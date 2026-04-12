@@ -1,0 +1,25 @@
+# Byte Transcode Server
+# Runs on your NAS (Linux)
+# Access the dashboard at http://<NAS_IP>:5800
+
+services:
+  byte-server:
+    container_name: byte-server
+    build: .
+    # Or use the pre-built image:
+    # image: theoldschoolmodder/byte-transcode-server:latest
+    restart: unless-stopped
+    ports:
+      - "5800:5800"
+    volumes:
+      - ./config:/config                          # Database + logs persist here
+      - /mnt/storage/data/media:/media:ro          # Your media library (read-only)
+    environment:
+      - TZ=Asia/Tokyo
+      - BYTE_DB_PATH=/config/byte_transcode.db
+      - BYTE_LOG_DIR=/config/logs
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5800/api/status')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

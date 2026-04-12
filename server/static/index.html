@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Byte Transcode</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/lucide-react@0.383.0/dist/umd/lucide-react.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0A0E14; color: #CFD8DC; font-family: 'Outfit', sans-serif; }
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
+        select option { background: #1a1f2e; color: #CFD8DC; }
+        input[type="range"] { -webkit-appearance: none; height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; outline: none; }
+        input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%; background: #E040FB; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+    <script type="text/babel" data-type="module">
+        // Placeholder - the full React UI will be loaded here
+        // For now, render a simple dashboard that connects to the API
+        
+        const { useState, useEffect, useCallback } = React;
+        const { Monitor, Settings, FileVideo, HardDrive, Zap, Clock, 
+                CheckCircle, XCircle, AlertTriangle, Play, Pause, Square, 
+                ChevronUp, ChevronDown, Filter, RefreshCw, FolderOpen,
+                BarChart3, Cpu, Layers, Search, X, Info, Plus } = lucideReact;
+
+        const API = '';  // Same origin
+
+        function useApi(endpoint, interval = null) {
+            const [data, setData] = useState(null);
+            const [loading, setLoading] = useState(true);
+
+            const fetchData = useCallback(() => {
+                fetch(`${API}/api${endpoint}`)
+                    .then(r => r.json())
+                    .then(d => { setData(d); setLoading(false); })
+                    .catch(() => setLoading(false));
+            }, [endpoint]);
+
+            useEffect(() => {
+                fetchData();
+                if (interval) {
+                    const id = setInterval(fetchData, interval);
+                    return () => clearInterval(id);
+                }
+            }, [fetchData, interval]);
+
+            return { data, loading, refresh: fetchData };
+        }
+
+        function App() {
+            const [tab, setTab] = useState('dashboard');
+            const { data: dashboard, refresh: refreshDash } = useApi('/dashboard', 3000);
+            const { data: queue, refresh: refreshQueue } = useApi('/queue', 3000);
+            const { data: libraries, refresh: refreshLibs } = useApi('/libraries', 10000);
+            const { data: settings } = useApi('/settings');
+            const { data: workers } = useApi('/workers', 5000);
+            const [filter, setFilter] = useState('all');
+            const [sort, setSort] = useState('priority');
+            const [search, setSearch] = useState('');
+            const [newLib, setNewLib] = useState({ name: '', path: '' });
+
+            const postApi = (endpoint, data = {}) => {
+                fetch(`${API}/api${endpoint}`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                }).then(() => { refreshQueue(); refreshDash(); });
+            };
+
+            const putApi = (endpoint, data = {}) => {
+                fetch(`${API}/api${endpoint}`, {
+                    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+            };
+
+            const deleteApi = (endpoint) => {
+                fetch(`${API}/api${endpoint}`, { method: 'DELETE' })
+                    .then(() => { refreshQueue(); refreshLibs(); });
+            };
+
+            const stats = dashboard || { status_stats: {}, hdr_stats: {}, workers: [], saved_gb: 0, processing_enabled: false };
+            const queueItems = (queue || [])
+                .filter(q => {
+                    if (filter === 'all') return true;
+                    if (['queued','processing','complete','error','scanning'].includes(filter)) return q.status === filter;
+                    return q.hdr_type === filter;
+                })
+                .filter(q => !search || q.file_name.toLowerCase().includes(search.toLowerCase()));
+
+            const HDR = {
+                'DoVi': { color: '#E040FB', bg: 'rgba(224,64,251,0.12)' },
+                'HDR10': { color: '#FF9100', bg: 'rgba(255,145,0,0.12)' },
+                'HDR10+': { color: '#00E5FF', bg: 'rgba(0,229,255,0.12)' },
+                'HLG': { color: '#76FF03', bg: 'rgba(118,255,3,0.12)' },
+                'SDR': { color: '#90A4AE', bg: 'rgba(144,164,174,0.12)' },
+            };
+
+            const getCount = (status) => (stats.status_stats[status] || {}).count || 0;
+
+            return (
+                <div style={{ display: 'flex', minHeight: '100vh' }}>
+                    {/* Sidebar */}
+                    <nav style={{ width: 200, background: '#0D1117', borderRight: '1px solid rgba(255,255,255,0.06)', display: 'flex', flexDirection: 'column', position: 'sticky', top: 0, height: '100vh' }}>
+                        <div style={{ padding: '20px 16px', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+                            <div style={{ fontSize: 20, fontWeight: 800, background: 'linear-gradient(135deg, #E040FB, #7C4DFF)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>BYTE</div>
+                            <div style={{ fontSize: 9, color: '#546E7A', letterSpacing: '2px', fontWeight: 600 }}>TRANSCODE</div>
+                        </div>
+                        {[
+                            ['dashboard', 'Dashboard', Monitor],
+                            ['queue', 'Queue', Layers],
+                            ['libraries', 'Libraries', FolderOpen],
+                            ['workers', 'Workers', Cpu],
+                            ['settings', 'Settings', Settings],
+                        ].map(([id, label, Icon]) => (
+                            <button key={id} onClick={() => setTab(id)} style={{
+                                display: 'flex', alignItems: 'center', gap: 8, width: '100%',
+                                padding: '9px 16px', margin: '1px 0', border: 'none', cursor: 'pointer',
+                                background: tab === id ? 'rgba(224,64,251,0.1)' : 'transparent',
+                                color: tab === id ? '#E040FB' : '#78909C',
+                                fontSize: 13, fontWeight: tab === id ? 600 : 400, fontFamily: "'Outfit', sans-serif",
+                            }}>
+                                <Icon size={15} /> {label}
+                            </button>
+                        ))}
+                    </nav>
+
+                    {/* Main */}
+                    <main style={{ flex: 1, padding: '20px 28px', overflowY: 'auto', maxHeight: '100vh' }}>
+                        
+                        {/* Dashboard */}
+                        {tab === 'dashboard' && (
+                            <div>
+                                <h1 style={{ fontSize: 18, fontWeight: 700, color: '#ECEFF1', marginBottom: 16 }}>Dashboard</h1>
+                                <div style={{ display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
+                                    {[
+                                        ['Queued', getCount('queued'), '#78909C', Clock],
+                                        ['Processing', getCount('processing'), '#E040FB', Zap],
+                                        ['Complete', getCount('complete'), '#66BB6A', CheckCircle],
+                                        ['Errors', getCount('error'), '#EF5350', XCircle],
+                                        ['Saved', `${(stats.saved_gb || 0).toFixed(0)} GB`, '#7C4DFF', HardDrive],
+                                    ].map(([label, val, color, Icon]) => (
+                                        <div key={label} style={{ background: 'rgba(255,255,255,0.03)', borderRadius: 8, padding: '14px 18px', border: '1px solid rgba(255,255,255,0.06)', flex: 1, minWidth: 120 }}>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                                                <Icon size={14} style={{ color, opacity: 0.8 }} />
+                                                <span style={{ fontSize: 10, color: '#78909C', textTransform: 'uppercase', letterSpacing: '0.5px', fontWeight: 600 }}>{label}</span>
+                                            </div>
+                                            <div style={{ fontSize: 22, fontWeight: 700, color: '#ECEFF1', fontFamily: "'JetBrains Mono', monospace" }}>{val}</div>
+                                        </div>
+                                    ))}
+                                </div>
+
+                                {/* Active Workers */}
+                                <h2 style={{ fontSize: 13, fontWeight: 600, color: '#90A4AE', marginBottom: 10, textTransform: 'uppercase', letterSpacing: '0.5px' }}>Active Workers</h2>
+                                {(stats.workers || []).map(w => (
+                                    <div key={w.id} style={{ background: 'rgba(255,255,255,0.03)', borderRadius: 8, padding: '14px 18px', marginBottom: 8, border: '1px solid rgba(224,64,251,0.15)' }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                                            <span style={{ fontSize: 13, fontWeight: 600, color: '#ECEFF1' }}>{w.current_file || w.name}</span>
+                                            <span style={{ fontSize: 11, color: w.status === 'active' ? '#E040FB' : '#546E7A', fontWeight: 600 }}>{w.status.toUpperCase()}</span>
+                                        </div>
+                                        {w.job_progress > 0 && (
+                                            <div style={{ width: '100%', height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.06)', overflow: 'hidden' }}>
+                                                <div style={{ width: `${w.job_progress}%`, height: '100%', background: '#E040FB', borderRadius: 2, transition: 'width 0.5s' }} />
+                                            </div>
+                                        )}
+                                        <div style={{ fontSize: 11, color: '#546E7A', marginTop: 4 }}>{w.current_step || 'Idle'} {w.gpu && `· ${w.gpu}`}</div>
+                                    </div>
+                                ))}
+                                {(!stats.workers || stats.workers.length === 0) && (
+                                    <div style={{ padding: 24, textAlign: 'center', color: '#546E7A', background: 'rgba(255,255,255,0.02)', borderRadius: 8, border: '1px dashed rgba(255,255,255,0.08)' }}>
+                                        No nodes connected. Start a Byte Node to begin processing.
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {/* Queue */}
+                        {tab === 'queue' && (
+                            <div>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                                    <h1 style={{ fontSize: 18, fontWeight: 700, color: '#ECEFF1' }}>Queue</h1>
+                                    <div style={{ display: 'flex', gap: 6 }}>
+                                        <button onClick={() => postApi('/queue/start')} style={{ background: 'rgba(224,64,251,0.1)', border: '1px solid rgba(224,64,251,0.3)', borderRadius: 6, padding: '5px 12px', cursor: 'pointer', color: '#E040FB', fontSize: 11, fontWeight: 600, fontFamily: "'Outfit', sans-serif", display: 'flex', alignItems: 'center', gap: 4 }}>
+                                            <Play size={11} /> Start
+                                        </button>
+                                        <button onClick={() => postApi('/queue/pause')} style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 6, padding: '5px 12px', cursor: 'pointer', color: '#90A4AE', fontSize: 11, fontWeight: 600, fontFamily: "'Outfit', sans-serif", display: 'flex', alignItems: 'center', gap: 4 }}>
+                                            <Pause size={11} /> Pause
+                                        </button>
+                                    </div>
+                                </div>
+
+                                {/* Filters */}
+                                <div style={{ display: 'flex', gap: 4, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+                                    {['all','queued','processing','complete','error','DoVi','HDR10','HDR10+','SDR'].map(f => (
+                                        <button key={f} onClick={() => setFilter(f)} style={{
+                                            padding: '3px 10px', borderRadius: 4, border: 'none', cursor: 'pointer',
+                                            fontSize: 10, fontWeight: 600, fontFamily: "'Outfit', sans-serif",
+                                            background: filter === f ? 'rgba(224,64,251,0.15)' : 'rgba(255,255,255,0.05)',
+                                            color: filter === f ? '#E040FB' : '#78909C',
+                                        }}>{f}</button>
+                                    ))}
+                                    <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, background: 'rgba(255,255,255,0.05)', borderRadius: 4, padding: '3px 8px', border: '1px solid rgba(255,255,255,0.08)' }}>
+                                        <Search size={11} style={{ color: '#546E7A' }} />
+                                        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search..." style={{ background: 'none', border: 'none', outline: 'none', color: '#CFD8DC', fontSize: 11, width: 100, fontFamily: "'Outfit', sans-serif" }} />
+                                    </div>
+                                </div>
+
+                                {/* Items */}
+                                {queueItems.map(item => {
+                                    const hdr = HDR[item.hdr_type] || HDR.SDR;
+                                    return (
+                                        <div key={item.id} style={{ background: 'rgba(255,255,255,0.02)', borderRadius: 6, padding: '8px 14px', marginBottom: 3, border: '1px solid rgba(255,255,255,0.04)' }}>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                                {item.status === 'queued' && (
+                                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                                                        <button onClick={() => postApi(`/queue/${item.id}/bump`, { direction: 'up' })} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, color: '#546E7A' }}><ChevronUp size={12} /></button>
+                                                        <button onClick={() => postApi(`/queue/${item.id}/bump`, { direction: 'down' })} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, color: '#546E7A' }}><ChevronDown size={12} /></button>
+                                                    </div>
+                                                )}
+                                                <div style={{ flex: 1, minWidth: 0 }}>
+                                                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                                        <span style={{ fontSize: 12, fontWeight: 500, color: '#ECEFF1', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 350 }}>{item.file_name}</span>
+                                                        <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: 3, color: hdr.color, background: hdr.bg, fontFamily: "'JetBrains Mono', monospace" }}>
+                                                            {item.hdr_type}{item.dovi_profile ? ` P${item.dovi_profile}` : ''}
+                                                        </span>
+                                                        <span style={{ fontSize: 10, fontWeight: 600, padding: '2px 6px', borderRadius: 3, color: item.status === 'complete' ? '#66BB6A' : item.status === 'error' ? '#EF5350' : item.status === 'processing' ? '#E040FB' : '#78909C', background: item.status === 'complete' ? 'rgba(102,187,106,0.12)' : item.status === 'error' ? 'rgba(239,83,80,0.12)' : item.status === 'processing' ? 'rgba(224,64,251,0.12)' : 'rgba(120,144,156,0.12)' }}>
+                                                            {item.status}
+                                                        </span>
+                                                    </div>
+                                                    {item.status === 'processing' && (
+                                                        <div style={{ marginTop: 4, display: 'flex', alignItems: 'center', gap: 6 }}>
+                                                            <div style={{ flex: 1, height: 3, borderRadius: 2, background: 'rgba(255,255,255,0.06)', overflow: 'hidden' }}>
+                                                                <div style={{ width: `${item.progress}%`, height: '100%', background: '#E040FB', borderRadius: 2, transition: 'width 0.5s' }} />
+                                                            </div>
+                                                            <span style={{ fontSize: 10, color: '#E040FB', fontFamily: "'JetBrains Mono', monospace" }}>{item.progress?.toFixed(0)}%</span>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                                <span style={{ fontSize: 10, color: '#546E7A', fontFamily: "'JetBrains Mono', monospace", whiteSpace: 'nowrap' }}>{item.file_size_gb?.toFixed(1)} GB · {item.resolution}</span>
+                                                {item.status === 'processing' && (
+                                                    <button onClick={() => postApi(`/queue/${item.id}/cancel`)} style={{ background: 'rgba(239,83,80,0.1)', border: 'none', borderRadius: 3, padding: '3px 5px', cursor: 'pointer', color: '#EF5350' }}><Square size={10} /></button>
+                                                )}
+                                                {['complete','error'].includes(item.status) && (
+                                                    <button onClick={() => deleteApi(`/queue/${item.id}`)} style={{ background: 'rgba(255,255,255,0.05)', border: 'none', borderRadius: 3, padding: '3px 5px', cursor: 'pointer', color: '#546E7A' }}><X size={10} /></button>
+                                                )}
+                                            </div>
+                                            {item.current_step && <div style={{ fontSize: 10, color: '#546E7A', marginTop: 3, marginLeft: 24 }}>{item.current_step}{item.eta ? ` · ETA: ${item.eta}` : ''}</div>}
+                                            {item.error_message && <div style={{ fontSize: 10, color: '#EF5350', marginTop: 3, marginLeft: 24 }}>{item.error_message}</div>}
+                                        </div>
+                                    );
+                                })}
+                                {queueItems.length === 0 && (
+                                    <div style={{ padding: 32, textAlign: 'center', color: '#546E7A', background: 'rgba(255,255,255,0.02)', borderRadius: 8, border: '1px dashed rgba(255,255,255,0.08)' }}>
+                                        Queue is empty. Scan a library to add files.
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {/* Libraries */}
+                        {tab === 'libraries' && (
+                            <div>
+                                <h1 style={{ fontSize: 18, fontWeight: 700, color: '#ECEFF1', marginBottom: 16 }}>Libraries</h1>
+                                
+                                {/* Add Library */}
+                                <div style={{ background: 'rgba(255,255,255,0.03)', borderRadius: 8, padding: '16px 20px', marginBottom: 16, border: '1px solid rgba(255,255,255,0.06)', display: 'flex', gap: 10, alignItems: 'flex-end' }}>
+                                    <div style={{ flex: 1 }}>
+                                        <label style={{ fontSize: 11, color: '#78909C', display: 'block', marginBottom: 4 }}>Name</label>
+                                        <input value={newLib.name} onChange={e => setNewLib(l => ({...l, name: e.target.value}))} placeholder="Movies" style={{ width: '100%', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 4, padding: '6px 10px', color: '#CFD8DC', fontSize: 12, fontFamily: "'Outfit', sans-serif", boxSizing: 'border-box' }} />
+                                    </div>
+                                    <div style={{ flex: 2 }}>
+                                        <label style={{ fontSize: 11, color: '#78909C', display: 'block', marginBottom: 4 }}>Path</label>
+                                        <input value={newLib.path} onChange={e => setNewLib(l => ({...l, path: e.target.value}))} placeholder="/media/data/media/movies" style={{ width: '100%', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 4, padding: '6px 10px', color: '#CFD8DC', fontSize: 12, fontFamily: "'JetBrains Mono', monospace", boxSizing: 'border-box' }} />
+                                    </div>
+                                    <button onClick={() => { postApi('/libraries', newLib); setNewLib({ name: '', path: '' }); setTimeout(refreshLibs, 500); }} style={{ background: 'rgba(224,64,251,0.1)', border: '1px solid rgba(224,64,251,0.3)', borderRadius: 6, padding: '7px 14px', cursor: 'pointer', color: '#E040FB', fontSize: 11, fontWeight: 600, fontFamily: "'Outfit', sans-serif", whiteSpace: 'nowrap' }}>
+                                        + Add
+                                    </button>
+                                </div>
+
+                                {(libraries || []).map(lib => (
+                                    <div key={lib.id} style={{ background: 'rgba(255,255,255,0.03)', borderRadius: 8, padding: '16px 20px', marginBottom: 8, border: '1px solid rgba(255,255,255,0.06)' }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                            <div>
+                                                <div style={{ fontSize: 15, fontWeight: 600, color: '#ECEFF1', marginBottom: 2 }}>{lib.name}</div>
+                                                <div style={{ fontSize: 11, color: '#546E7A', fontFamily: "'JetBrains Mono', monospace" }}>{lib.path}</div>
+                                            </div>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                                <div style={{ textAlign: 'right' }}>
+                                                    <div style={{ fontSize: 13, fontWeight: 600, color: '#CFD8DC' }}>{lib.file_count} files</div>
+                                                    <div style={{ fontSize: 10, color: '#546E7A' }}>{lib.total_size_gb?.toFixed(1)} GB · {lib.status}</div>
+                                                </div>
+                                                <button onClick={() => postApi(`/libraries/${lib.id}/scan`)} style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 6, padding: '6px 12px', cursor: 'pointer', color: '#90A4AE', fontSize: 11, fontWeight: 600, fontFamily: "'Outfit', sans-serif", display: 'flex', alignItems: 'center', gap: 4 }}>
+                                                    <RefreshCw size={11} /> Scan
+                                                </button>
+                                                <button onClick={() => deleteApi(`/libraries/${lib.id}`)} style={{ background: 'rgba(239,83,80,0.08)', border: '1px solid rgba(239,83,80,0.2)', borderRadius: 6, padding: '6px 8px', cursor: 'pointer', color: '#EF5350' }}>
+                                                    <X size={11} />
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+
+                        {/* Settings - simplified */}
+                        {tab === 'settings' && (
+                            <div>
+                                <h1 style={{ fontSize: 18, fontWeight: 700, color: '#ECEFF1', marginBottom: 16 }}>Settings</h1>
+                                <div style={{ color: '#78909C', fontSize: 13 }}>
+                                    Settings panel — configure via API or directly in the database for now. Full settings UI coming in v2.
+                                    <pre style={{ marginTop: 12, background: 'rgba(255,255,255,0.03)', padding: 16, borderRadius: 8, fontSize: 12, fontFamily: "'JetBrains Mono', monospace", border: '1px solid rgba(255,255,255,0.06)' }}>
+                                        {settings ? JSON.stringify(settings, null, 2) : 'Loading...'}
+                                    </pre>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Workers */}
+                        {tab === 'workers' && (
+                            <div>
+                                <h1 style={{ fontSize: 18, fontWeight: 700, color: '#ECEFF1', marginBottom: 16 }}>Workers</h1>
+                                {(workers || []).map(w => (
+                                    <div key={w.id} style={{ background: 'rgba(255,255,255,0.03)', borderRadius: 8, padding: '16px 20px', marginBottom: 8, border: '1px solid rgba(255,255,255,0.06)' }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                                            <span style={{ fontSize: 14, fontWeight: 600, color: '#ECEFF1' }}>{w.name}</span>
+                                            <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 4, background: w.status === 'active' ? 'rgba(224,64,251,0.1)' : 'rgba(255,255,255,0.05)', color: w.status === 'active' ? '#E040FB' : '#546E7A' }}>{w.status.toUpperCase()}</span>
+                                        </div>
+                                        <div style={{ fontSize: 11, color: '#546E7A' }}>GPU: {w.gpu} · Host: {w.host} · Jobs: {w.jobs_completed} · Saved: {w.total_saved_gb?.toFixed(1)} GB</div>
+                                    </div>
+                                ))}
+                                {(!workers || workers.length === 0) && (
+                                    <div style={{ padding: 32, textAlign: 'center', color: '#546E7A', background: 'rgba(255,255,255,0.02)', borderRadius: 8, border: '1px dashed rgba(255,255,255,0.08)' }}>
+                                        No workers registered. Start a Byte Node to connect.
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </main>
+                </div>
+            );
+        }
+
+        ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+    </script>
+</body>
+</html>

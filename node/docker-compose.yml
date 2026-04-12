@@ -1,0 +1,31 @@
+# Byte Transcode Node
+# Runs on your Windows PC (or any machine with an NVIDIA GPU)
+# Connects to the Byte Server for job management
+
+services:
+  byte-node:
+    container_name: byte-node
+    build: .
+    # Or use the pre-built image:
+    # image: theoldschoolmodder/byte-transcode-node:latest
+    restart: unless-stopped
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+      - TZ=Asia/Tokyo
+    volumes:
+      - D:\Tdarr_temp:/temp                        # Temp working directory (fast SSD recommended)
+      - \\192.168.3.13\media:/media                 # NAS media share (SMB/CIFS mount)
+    command: >
+      --server http://192.168.3.13:5800
+      --name "DoVi-5080"
+      --gpu "RTX 5080"
+      --poll 10
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu, video]
