@@ -1,25 +1,32 @@
-# Byte Transcode Server
-# Runs on your NAS (Linux)
-# Access the dashboard at http://<NAS_IP>:5800
+# Byte Transcode Server — Docker Compose
+#
+# Deploy on your NAS/Docker host. Edit the volumes below to match your setup.
+#
+# Usage:
+#   docker compose up -d
+#
+# First time:
+#   Open http://YOUR_NAS_IP:5800 and create your admin account.
 
 services:
   byte-server:
+    image: python:3.12-slim
     container_name: byte-server
-    build: .
-    # Or use the pre-built image:
-    # image: theoldschoolmodder/byte-transcode-server:latest
     restart: unless-stopped
     ports:
       - "5800:5800"
     volumes:
-      - ./config:/config                          # Database + logs persist here
-      - /mnt/storage/data/media:/media:ro          # Your media library (read-only)
+      # Server code — maps your local file AS byte_server.py inside the container
+      - ./app/byte_server_v3.py:/app/byte_server.py:ro
+      # Frontend
+      - ./app/static:/app/static:ro
+      # Persistent config + database
+      - ./config:/config
+      # Your media library (read-only) — change /mnt/media to your actual path
+      - /mnt/media:/media:ro
+    working_dir: /app
+    command: >
+      bash -c "pip install flask --quiet --break-system-packages 2>/dev/null &&
+               python3 /app/byte_server.py --port 5800"
     environment:
-      - TZ=Asia/Tokyo
-      - BYTE_DB_PATH=/config/byte_transcode.db
-      - BYTE_LOG_DIR=/config/logs
-    healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5800/api/status')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      - TZ=UTC

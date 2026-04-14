@@ -1,0 +1,34 @@
+{
+  "_README": "Byte Transcode Node Config — Edit with Notepad, restart node after saving.",
+  "_docs": "Full reference: https://github.com/Jenari-Dev/byte-transcode#configuration-reference",
+
+  "node_name": "MyNode",
+  "_node_name": "Display name shown in the Byte Transcode dashboard",
+
+  "server_url": "http://YOUR_NAS_IP:5800",
+  "_server_url": "URL of your Byte Transcode server (Flask on NAS)",
+
+  "gpu": "RTX 5080",
+  "_gpu": "Your GPU name — cosmetic label shown in the dashboard",
+
+  "poll_interval": 10,
+  "_poll_interval": "Seconds between checking server for new jobs (5-30 recommended)",
+
+  "path_from": "/media",
+  "_path_from": "Media path as the server sees it (inside Docker container)",
+
+  "path_to": "Z:\\",
+  "_path_to": "Same media as your Windows mapped drive letter (e.g. Z:\\ or Y:\\)",
+
+  "temp_dir": "F:\\Byte_Engine_temp",
+  "_temp_dir": "LOCAL SSD path for temp files. DoVi jobs write 50-80 GB per file — use your fastest drive, NOT a network path",
+
+  "ffmpeg_path": "",
+  "ffprobe_path": "",
+  "dovi_tool_path": "",
+  "mkvmerge_path": "",
+  "_tools": "Leave blank to auto-detect from tools/ subfolder and system PATH. Set full path to override (e.g. C:\\ffmpeg\\ffmpeg.exe)",
+
+  "start_paused": false,
+  "_start_paused": "If true, node connects but doesn't process until you click Start in the GUI"
+}
