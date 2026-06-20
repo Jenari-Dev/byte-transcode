@@ -11,7 +11,7 @@
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-html{font-size:16px}
+html{font-size:15px}
 body{font-family:'Outfit',sans-serif}
 ::-webkit-scrollbar{width:7px;height:7px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.12);border-radius:4px}
 select option{background:#1a1f2e;color:#CFD8DC}
@@ -19,11 +19,7 @@ select option{background:#1a1f2e;color:#CFD8DC}
 @keyframes spin{to{transform:rotate(360deg)}}
 @keyframes barStripe{0%{background-position:40px 0}100%{background-position:0 0}}
 @keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
-.grad-text{-webkit-background-clip:text!important;background-clip:text!important;-webkit-text-fill-color:transparent!important;color:transparent!important}
-button{transition:opacity 0.15s,filter 0.15s}button:hover{filter:brightness(1.15)}button:active{opacity:0.8}
-input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}input[type=number]{-moz-appearance:textfield}
-select:focus,input:focus{outline:none}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:0.45;transform:scale(0.85)}}
 </style>
 </head>
 <body>
@@ -44,26 +40,7 @@ const I=({n,s=16,c='currentColor'})=>{const d={monitor:<svg width={s} height={s}
 
 /*═══ API ═══*/
 function copyText(txt){try{if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(txt)}else{const t=document.createElement('textarea');t.value=txt;t.style.cssText='position:fixed;left:-9999px';document.body.appendChild(t);t.select();document.execCommand('copy');document.body.removeChild(t)}}catch(e){}}
-
-/* Format timestamps — server Docker stores UTC, convert to browser local time */
-function fmtTime(ts, mode='short'){
-    if(!ts) return '--';
-    try{
-        // Server container has no TZ set, so datetime('now','localtime') = UTC
-        // Append 'Z' to parse as UTC, toLocaleString converts to browser local
-        let d;
-        if(ts.includes('T')&&ts.includes('Z')){d=new Date(ts);}
-        else if(ts.includes('T')){d=new Date(ts+'Z');}
-        else{d=new Date(ts.replace(' ','T')+'Z');}
-        if(isNaN(d.getTime())) return ts;
-        if(mode==='full') return d.toLocaleString();
-        if(mode==='time') return d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});
-        if(mode==='date') return d.toLocaleDateString([],{month:'short',day:'numeric'});
-        return d.toLocaleDateString([],{month:'short',day:'numeric'})+' '+d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
-    }catch(e){return ts;}
-}
-
-function useApi(ep,ms){const[d,setD]=useState(null);const f=useCallback(()=>{if(!ep)return;fetch('/api'+ep,{credentials:'include'}).then(r=>r.ok?r.json():null).then(setD).catch(()=>{});},[ep]);useEffect(()=>{if(!ep)return;f();if(ms){const iv=setInterval(f,ms);return()=>clearInterval(iv)}},[f,ms,ep]);return{data:d,refresh:f};}
+function useApi(ep,ms){const[d,setD]=useState(null);const f=useCallback(()=>{fetch('/api'+ep,{credentials:'include'}).then(r=>r.ok?r.json():null).then(setD).catch(()=>{});},[ep]);useEffect(()=>{f();if(ms){const iv=setInterval(f,ms);return()=>clearInterval(iv)}},[f,ms]);return{data:d,refresh:f};}
 const post=(ep,body)=>fetch('/api'+ep,{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify(body||{})}).then(r=>r.json()).catch(()=>null);
 const put=(ep,body)=>fetch('/api'+ep,{method:'PUT',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify(body||{})}).then(r=>r.json()).catch(()=>null);
 const del=(ep)=>fetch('/api'+ep,{method:'DELETE',credentials:'include'}).then(r=>r.json()).catch(()=>null);
@@ -102,9 +79,6 @@ class ErrorBoundary extends React.Component{
 function Tog({on,onTog,T}){return <div onClick={onTog} style={{width:40,height:22,borderRadius:11,background:on?T.ac:`${T.t2}40`,position:'relative',cursor:'pointer',transition:'0.2s',flexShrink:0}}>
     <div style={{width:18,height:18,borderRadius:9,background:'#fff',position:'absolute',top:2,left:on?20:2,transition:'0.2s'}}/></div>;}
 
-/*═══ LIVE CLOCK ═══*/
-function Clock(){const[t,setT]=useState(new Date());useEffect(()=>{const iv=setInterval(()=>setT(new Date()),1000);return()=>clearInterval(iv);},[]);return t.toLocaleTimeString();}
-
 /*═══ LOGIN ═══*/
 function Login({onAuth,setup}){
     const[u,setU]=useState('');const[p,setP]=useState('');const[e,setE]=useState('');
@@ -112,8 +86,8 @@ function Login({onAuth,setup}){
     const T=TH.dark;
     return <div style={{minHeight:'100vh',background:T.bg,display:'flex',alignItems:'center',justifyContent:'center'}}>
         <div style={{background:T.sb,borderRadius:14,padding:'44px 40px',border:`1px solid ${T.bd}`,width:380,textAlign:'center'}}>
-            <div className="grad-text" style={{fontSize:32,fontWeight:800,background:`linear-gradient(135deg,${T.ac},${T.a2})`,marginBottom:4}}>BYTE</div>
-            <div style={{fontSize:11,color:T.t2,letterSpacing:'3px',fontWeight:600,marginBottom:36}}>TRANSCODE v3</div>
+            <div style={{fontSize:36,fontWeight:800,color:T.ac,letterSpacing:'-1px',lineHeight:1,marginBottom:4}}>BYTE</div>
+            <div style={{fontSize:11,color:T.t2,letterSpacing:'3px',fontWeight:600,marginBottom:36}}>TRANSCODE v3.4</div>
             {setup&&<div style={{fontSize:13,color:T.ac,marginBottom:16,padding:'10px 14px',background:`${T.ac}15`,borderRadius:8}}>First time — create your admin account</div>}
             {e&&<div style={{fontSize:13,color:T.er,marginBottom:14}}>{e}</div>}
             <input value={u} onChange={ev=>setU(ev.target.value)} placeholder="Username" style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'12px 16px',color:T.tx,fontSize:14,marginBottom:12}}/>
@@ -128,101 +102,33 @@ function SB({title,desc,children,T}){return <div style={{background:T.card,borde
     {desc&&<div style={{fontSize:12,color:T.t2,marginBottom:14}}>{desc}</div>}
     {children}</div>;}
 
-/*═══ LIVE LOG VIEWER — Tdarr-style rich output ═══*/
-function LiveLog({logs=[],T,isLive=false,jobId=null}){
-    const endRef=useRef();const containerRef=useRef();
-    const[autoScroll,setAutoScroll]=useState(true);
-    const[filter,setFilter]=useState('all'); // all, steps, ffmpeg, errors
-    const[search,setSearch]=useState('');
-    const[collapsed,setCollapsed]=useState({}); // step index -> collapsed
+/*═══ STEP LOG VIEWER ═══*/
+function StepLog({logs=[],T}){
+    const[open,setOpen]=useState({});
+    const steps=useMemo(()=>{const s=[];let cur={title:'Initialization',logs:[],ok:true};
+        logs.forEach(l=>{const m=(l.message||'').match(/\[Step (\d+\/\d+)\]\s*(.*)/);
+            if(m){if(cur.logs.length)s.push(cur);cur={title:`[Step ${m[1]}] ${m[2]}`,logs:[l],ok:l.level!=='ERROR'};}
+            else{cur.logs.push(l);if(l.level==='ERROR')cur.ok=false;}});
+        if(cur.logs.length)s.push(cur);return s;},[logs]);
 
-    // Auto-scroll when new logs arrive
-    useEffect(()=>{if(autoScroll&&endRef.current){endRef.current.scrollIntoView({behavior:'smooth'})}},[logs.length,autoScroll]);
-
-    // Detect manual scroll to disable auto-scroll
-    const handleScroll=useCallback(()=>{
-        if(!containerRef.current)return;
-        const{scrollTop,scrollHeight,clientHeight}=containerRef.current;
-        setAutoScroll(scrollHeight-scrollTop-clientHeight<80);
-    },[]);
-
-    // Categorize log lines
-    const categorized=useMemo(()=>{
-        return logs.map((l,i)=>{
-            const msg=l.message||'';
-            let cat='info';
-            if(msg.match(/^\[Step \d+/))cat='step';
-            else if(msg.startsWith('[CMD'))cat='cmd';
-            else if(msg.startsWith('[FFMPEG]'))cat='ffmpeg';
-            else if(msg.startsWith('[OK]'))cat='ok';
-            else if(l.level==='ERROR'||msg.startsWith('[ERROR]'))cat='error';
-            else if(l.level==='WARN'||msg.startsWith('[WARN]'))cat='warn';
-            else if(msg.includes('COMPLETE')||msg.includes('═══'))cat='result';
-            return{...l,idx:i,cat};
-        });
-    },[logs]);
-
-    // Apply filter
-    const filtered=useMemo(()=>{
-        let f=categorized;
-        if(filter==='steps')f=f.filter(l=>['step','ok','error','result','cmd'].includes(l.cat));
-        else if(filter==='ffmpeg')f=f.filter(l=>l.cat==='ffmpeg'||l.cat==='step'||l.cat==='result');
-        else if(filter==='errors')f=f.filter(l=>l.cat==='error'||l.cat==='warn');
-        if(search){const s=search.toLowerCase();f=f.filter(l=>(l.message||'').toLowerCase().includes(s));}
-        return f;
-    },[categorized,filter,search]);
-
-    const getColor=(l)=>{
-        if(l.cat==='error')return T.er;
-        if(l.cat==='warn')return T.wn;
-        if(l.cat==='step')return T.ac;
-        if(l.cat==='cmd')return T.a2;
-        if(l.cat==='ok')return T.ok;
-        if(l.cat==='result')return T.ok;
-        if(l.cat==='ffmpeg')return T.in;
-        return T.t2;
-    };
-
-    const lineCount=filtered.length;
-    const stepCount=categorized.filter(l=>l.cat==='step').length;
-    const errCount=categorized.filter(l=>l.cat==='error').length;
-
-    return <div style={{borderRadius:8,border:`1px solid ${T.bd}`,overflow:'hidden',display:'flex',flexDirection:'column'}}>
-        {/* Toolbar */}
-        <div style={{display:'flex',alignItems:'center',gap:6,padding:'8px 12px',borderBottom:`1px solid ${T.bd}`,background:T.cs,flexWrap:'wrap'}}>
-            <div style={{display:'flex',gap:3}}>
-                {[['all','All',T.t3,lineCount],['steps','Steps',T.ac,stepCount],['ffmpeg','FFmpeg',T.in,categorized.filter(l=>l.cat==='ffmpeg').length],['errors','Errors',T.er,errCount]].map(([k,l,c,n])=>
-                    <button key={k} onClick={()=>setFilter(k)} style={{padding:'3px 10px',borderRadius:4,border:'none',cursor:'pointer',fontSize:11,fontWeight:600,background:filter===k?`${c}22`:T.card,color:filter===k?c:T.t2}}>{l}{n>0&&<span className="mono" style={{marginLeft:4,fontSize:10,opacity:0.7}}>{n}</span>}</button>)}
+    return <div style={{borderRadius:8,border:`1px solid ${T.bd}`,overflow:'hidden'}}>
+        {steps.map((st,i)=><div key={i}>
+            <div onClick={()=>setOpen(o=>({...o,[i]:!o[i]}))} style={{display:'flex',alignItems:'center',gap:10,padding:'10px 16px',background:open[i]?T.cs:T.card,cursor:'pointer',borderBottom:`1px solid ${T.bd}`}}>
+                <span style={{color:T.t2,fontSize:11,transform:open[i]?'rotate(90deg)':'',transition:'0.2s'}}>▶</span>
+                {st.ok?<I n="check" s={14} c={T.ok}/>:<I n="x" s={14} c={T.er}/>}
+                <span style={{flex:1,fontSize:13,fontWeight:500,color:T.t1}}>{st.title}</span>
+                <span className="mono" style={{fontSize:11,color:T.t2}}>{st.logs.length} lines</span>
             </div>
-            <div style={{display:'flex',alignItems:'center',gap:4,background:T.bg,borderRadius:4,padding:'3px 8px',border:`1px solid ${T.bd}`,flex:1,minWidth:100,maxWidth:200}}>
-                <I n="search" s={11} c={T.t2}/>
-                <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Filter logs..." style={{background:'none',border:'none',outline:'none',color:T.tx,fontSize:11,width:'100%'}}/>
-            </div>
-            {isLive&&<div style={{display:'flex',alignItems:'center',gap:4,marginLeft:'auto'}}>
-                <div style={{width:7,height:7,borderRadius:4,background:T.er,animation:'pulse 1.5s ease-in-out infinite'}}/>
-                <span style={{fontSize:11,fontWeight:600,color:T.er}}>LIVE</span>
+            {open[i]&&<div className="mono" style={{background:'#08090c',padding:10,fontSize:11,lineHeight:'17px',maxHeight:300,overflowY:'auto',borderBottom:`1px solid ${T.bd}`}}>
+                {st.logs.map((l,j)=><div key={j} style={{display:'flex',gap:8,marginBottom:1}}>
+                    <span style={{color:T.t2,opacity:0.4,minWidth:24,textAlign:'right'}}>{j+1}</span>
+                    <span style={{color:T.t2,opacity:0.5,minWidth:70}}>{(l.timestamp||'').slice(11)}</span>
+                    <span style={{color:l.level==='ERROR'?T.er:l.level==='WARN'?T.wn:T.in,fontWeight:600,minWidth:42}}>[{l.level}]</span>
+                    <span style={{color:l.level==='ERROR'?T.er:T.t2}}>{l.message}</span>
+                </div>)}
             </div>}
-            <button onClick={()=>setAutoScroll(true)} style={{background:autoScroll?`${T.ok}15`:T.card,border:`1px solid ${autoScroll?T.ok+'44':T.bd}`,borderRadius:4,padding:'3px 8px',cursor:'pointer',color:autoScroll?T.ok:T.t2,fontSize:11,fontWeight:600,marginLeft:isLive?0:'auto'}}>Auto-scroll {autoScroll?'ON':'OFF'}</button>
-            <span className="mono" style={{fontSize:11,color:T.t2}}>{filtered.length} lines</span>
-        </div>
-        {/* Log output */}
-        <div ref={containerRef} onScroll={handleScroll} className="mono" style={{background:'#08090c',padding:8,fontSize:12,lineHeight:'19px',maxHeight:450,minHeight:200,overflowY:'auto'}}>
-            {filtered.map((l,i)=>{
-                const color=getColor(l);
-                const isStep=l.cat==='step';
-                const isResult=l.cat==='result';
-                const isSeparator=(l.message||'').includes('═══');
-                return <div key={l.idx||i} style={{display:'flex',gap:6,marginBottom:isStep?4:0,marginTop:isStep&&i>0?6:0,padding:isStep?'4px 6px':'1px 6px',background:isStep?`${T.ac}08`:isResult&&!isSeparator?`${T.ok}06`:'transparent',borderRadius:isStep?4:0,borderLeft:isStep?`3px solid ${T.ac}`:l.cat==='error'?`3px solid ${T.er}`:'3px solid transparent'}}>
-                        <span style={{color:T.t2,opacity:0.3,minWidth:30,textAlign:'right',fontSize:11,flexShrink:0,userSelect:'none'}}>{l.idx!=null?l.idx+1:i+1}</span>
-                        <span style={{color:T.t2,opacity:0.4,minWidth:70,fontSize:11,flexShrink:0}}>{fmtTime(l.timestamp,'time')}</span>
-                        <span style={{color,fontWeight:isStep||l.cat==='error'?600:400,wordBreak:'break-all'}}>{l.message}</span>
-                    </div>;
-            })}
-            {filtered.length===0&&<div style={{padding:20,textAlign:'center',color:T.t2}}>
-                {logs.length===0?(isLive?'Waiting for log output...':'No log entries'):'No matches for current filter'}
-            </div>}
-            <div ref={endRef}/>
-        </div>
+        </div>)}
+        {steps.length===0&&<div style={{padding:20,textAlign:'center',color:T.t2}}>No log entries yet</div>}
     </div>;
 }
 
@@ -230,74 +136,35 @@ function LiveLog({logs=[],T,isLive=false,jobId=null}){
 function FileModal({item,T,onClose,onAct}){
     const[tab,setTab]=useState(item._tab||'info');
     const[logs,setLogs]=useState([]);
-    const[isLive,setIsLive]=useState(false);
-    const iv=useRef();const esRef=useRef();const toast=useContext(TC);
-
-    // Fetch initial logs from DB
-    const getLogs=useCallback(()=>{fetch(`/api/logs?job_id=${item.id}&limit=200`,{credentials:'include'}).then(r=>r.ok?r.json():[]).then(d=>setLogs(Array.isArray(d)?d.reverse():[])).catch(()=>{});},[item.id]);
-
-    // SSE for live streaming when processing
-    useEffect(()=>{
-        getLogs();
-        if(item.status==='processing'){
-            setIsLive(true);
-            // Use SSE for live streaming
-            try{
-                const es=new EventSource(`/api/jobs/${item.id}/log-stream`);
-                esRef.current=es;
-                es.onmessage=(e)=>{
-                    try{
-                        const entry=JSON.parse(e.data);
-                        if(entry.type==='done'){setIsLive(false);es.close();return;}
-                        setLogs(prev=>{
-                            // Deduplicate by checking last message
-                            if(prev.length>0&&prev[prev.length-1].message===entry.message&&prev[prev.length-1].timestamp===entry.timestamp)return prev;
-                            return[...prev,entry];
-                        });
-                    }catch(err){}
-                };
-                es.onerror=()=>{
-                    // Fallback to polling if SSE fails
-                    setIsLive(false);
-                    es.close();
-                    iv.current=setInterval(getLogs,2000);
-                };
-            }catch(e){
-                // SSE not supported, fall back to polling
-                iv.current=setInterval(getLogs,2000);
-            }
-        }else if(['queued','pending'].includes(item.status)){
-            // Poll slowly for health check logs
-            iv.current=setInterval(getLogs,5000);
-        }
-        return()=>{clearInterval(iv.current);if(esRef.current)esRef.current.close();};
-    },[item.id,item.status,getLogs]);
+    const iv=useRef();const toast=useContext(TC);
+    const getLogs=useCallback(()=>{fetch(`/api/logs?job_id=${item.id}&limit=300`,{credentials:'include'}).then(r=>r.ok?r.json():[]).then(d=>setLogs(Array.isArray(d)?d.reverse():[])).catch(()=>{});},[item.id]);
+    useEffect(()=>{getLogs();if(item.status==='processing')iv.current=setInterval(getLogs,3000);return()=>clearInterval(iv.current);},[item.status,getLogs]);
 
     const hdr=HDR_C[item.hdr_type]||HDR_C.SDR;
-    const act=(a)=>{onAct(item.id,a);};
+    const act=async(a)=>{await onAct(item.id,a);toast(a==='cancel'?'Cancelled':a==='accept'?'Accepted':a==='requeue'?'Requeued':'Done',a==='cancel'?'error':'success');};
 
     return <div onClick={onClose} style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.65)',zIndex:500,display:'flex',alignItems:'center',justifyContent:'center',padding:20,animation:'fadeIn 0.15s'}}>
         <div onClick={e=>e.stopPropagation()} style={{background:T.cs,border:`1px solid ${T.bd}`,borderRadius:14,width:'100%',maxWidth:920,maxHeight:'88vh',overflow:'hidden',display:'flex',flexDirection:'column',boxShadow:'0 30px 80px rgba(0,0,0,0.5)'}}>
             <div style={{padding:'18px 24px',borderBottom:`1px solid ${T.bd}`,display:'flex',justifyContent:'space-between',gap:12}}>
-                <div style={{minWidth:0}}><div style={{fontSize:18,fontWeight:700,color:T.t1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{item.file_name}</div>
-                    <div className="mono" style={{fontSize:12,color:T.t2,marginTop:3}}>{item.file_path}</div></div>
+                <div style={{minWidth:0}}><div style={{fontSize:16,fontWeight:700,color:T.t1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{item.file_name}</div>
+                    <div className="mono" style={{fontSize:11,color:T.t2,marginTop:3}}>{item.file_path}</div></div>
                 <button onClick={onClose} style={{background:'none',border:'none',cursor:'pointer',color:T.t3,padding:4}}><I n="x" s={20}/></button>
             </div>
             <div style={{display:'flex',borderBottom:`1px solid ${T.bd}`}}>
-                {[['info','Details'],['log','Report']].map(([k,l])=><button key={k} onClick={()=>setTab(k)} style={{padding:'12px 20px',border:'none',borderBottom:tab===k?`2px solid ${T.ac}`:'2px solid transparent',background:'none',color:tab===k?T.ac:T.t3,fontSize:14,fontWeight:600,cursor:'pointer'}}>{l}</button>)}
+                {[['info','Details'],['log','Report']].map(([k,l])=><button key={k} onClick={()=>setTab(k)} style={{padding:'12px 20px',border:'none',borderBottom:tab===k?`2px solid ${T.ac}`:'2px solid transparent',background:'none',color:tab===k?T.ac:T.t3,fontSize:13,fontWeight:600,cursor:'pointer'}}>{l}</button>)}
             </div>
             <div style={{padding:24,overflowY:'auto',flex:1,animation:'fadeIn 0.15s'}}>
                 {tab==='info'&&<>
                     {item.status==='processing'&&<div style={{marginBottom:18}}>
                         <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:6}}>
                             <div style={{flex:1,height:8,borderRadius:4,background:`${T.t2}20`,overflow:'hidden'}}><div style={{width:`${item.progress||0}%`,height:'100%',background:T.ac,borderRadius:4,backgroundImage:'linear-gradient(45deg,rgba(255,255,255,.12) 25%,transparent 25%,transparent 50%,rgba(255,255,255,.12) 50%,rgba(255,255,255,.12) 75%,transparent 75%)',backgroundSize:'40px 40px',animation:'barStripe 1s linear infinite'}}/></div>
-                            <span className="mono" style={{fontSize:18,fontWeight:700,color:T.ac}}>{(item.progress||0).toFixed(0)}%</span>
+                            <span className="mono" style={{fontSize:16,fontWeight:700,color:T.ac}}>{(item.progress||0).toFixed(0)}%</span>
                         </div>
                         <div style={{fontSize:12,color:T.t2}}>{item.current_step||'Starting...'}{item.eta?' · ETA: '+item.eta:''}</div>
                     </div>}
-                    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'14px 24px',fontSize:14}}>
+                    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'12px 24px',fontSize:13}}>
                         {[['Status',item.status?.toUpperCase()],['Health',item.health_status?.toUpperCase()],['File Size',`${(item.file_size_gb||0).toFixed(2)} GB`],['HDR Type',item.hdr_type+(item.dovi_profile?' P'+item.dovi_profile:'')],['Codec',item.video_codec],['Resolution',item.resolution],['Duration',item.duration_str],['Audio',item.audio_summary||`${item.audio_track_count||0} tracks`],['Library',item.library_name],['Worker',item.worker_id||'--'],['Priority',`#${item.priority}`],['Queue ID',`#${item.id}`]].map(([k,v])=><div key={k}>
-                            <div style={{fontSize:11,color:T.t2,textTransform:'uppercase',letterSpacing:'0.5px',fontWeight:600,marginBottom:3}}>{k}</div>
+                            <div style={{fontSize:10,color:T.t2,textTransform:'uppercase',letterSpacing:'0.5px',fontWeight:600,marginBottom:3}}>{k}</div>
                             <div className="mono" style={{color:T.tx}}>{v||'--'}</div></div>)}
                     </div>
                     {item.status==='complete'&&<div style={{marginTop:18,padding:16,background:`${T.ok}10`,borderRadius:10,border:`1px solid ${T.ok}30`}}>
@@ -320,13 +187,12 @@ function FileModal({item,T,onClose,onAct}){
                     </div>
                 </>}
                 {tab==='log'&&<>
-                    <div style={{display:'flex',gap:8,marginBottom:12,alignItems:'center'}}>
-                        {!isLive&&<button onClick={getLogs} style={{background:T.card,border:`1px solid ${T.bd}`,borderRadius:6,padding:'6px 14px',cursor:'pointer',color:T.t3,fontSize:12,fontWeight:600,display:'flex',alignItems:'center',gap:4}}><I n="refresh" s={12}/> Refresh</button>}
-                        <button onClick={()=>{copyText(logs.map(l=>'['+fmtTime(l.timestamp,'full')+'] ['+l.level+'] '+l.message).join('\n'));toast('Copied','success')}} style={{background:T.card,border:`1px solid ${T.bd}`,borderRadius:6,padding:'6px 14px',cursor:'pointer',color:T.t3,fontSize:12,fontWeight:600,display:'flex',alignItems:'center',gap:4}}><I n="copy" s={12}/> Copy</button>
-                        <button onClick={()=>{const b=new Blob([logs.map(l=>`[${fmtTime(l.timestamp,'full')}] [${l.level}] ${l.message}`).join('\n')],{type:'text/plain'});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=`job-${item.id}.log`;a.click();}} style={{background:T.card,border:`1px solid ${T.bd}`,borderRadius:6,padding:'6px 14px',cursor:'pointer',color:T.t3,fontSize:12,fontWeight:600,display:'flex',alignItems:'center',gap:4}}><I n="download" s={12}/> Download</button>
-                        <span className="mono" style={{fontSize:11,color:T.t2,marginLeft:'auto'}}>{logs.length} entries</span>
+                    <div style={{display:'flex',gap:8,marginBottom:12}}>
+                        <button onClick={getLogs} style={{background:T.card,border:`1px solid ${T.bd}`,borderRadius:6,padding:'6px 14px',cursor:'pointer',color:T.t3,fontSize:12,fontWeight:600,display:'flex',alignItems:'center',gap:4}}><I n="refresh" s={12}/> Refresh</button>
+                        <button onClick={()=>{copyText(logs.map(l=>'['+l.timestamp+'] ['+l.level+'] '+l.message).join('\n'));toast('Copied','success')}} style={{background:T.card,border:`1px solid ${T.bd}`,borderRadius:6,padding:'6px 14px',cursor:'pointer',color:T.t3,fontSize:12,fontWeight:600,display:'flex',alignItems:'center',gap:4}}><I n="copy" s={12}/> Copy</button>
+                        <button onClick={()=>{const b=new Blob([logs.map(l=>`[${l.timestamp}] [${l.level}] ${l.message}`).join('\n')],{type:'text/plain'});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=`job-${item.id}.log`;a.click();}} style={{background:T.card,border:`1px solid ${T.bd}`,borderRadius:6,padding:'6px 14px',cursor:'pointer',color:T.t3,fontSize:12,fontWeight:600,display:'flex',alignItems:'center',gap:4}}><I n="download" s={12}/> Download</button>
                     </div>
-                    <LiveLog logs={logs} T={T} isLive={isLive} jobId={item.id}/>
+                    <StepLog logs={logs} T={T}/>
                 </>}
             </div>
         </div></div>;
@@ -335,11 +201,10 @@ function FileModal({item,T,onClose,onAct}){
 /*═══ MAIN APP ═══*/
 function App(){
     const[authed,setAuthed]=useState(false);const[setup,setSetup]=useState(false);
-    const[tab,setTab]=useState('dashboard');const[sbOpen,setSbOpen]=useState(()=>{try{return localStorage.getItem('byte_sb')!=='0'}catch(e){return true}});
-    const toggleSb=()=>{const n=!sbOpen;setSbOpen(n);try{localStorage.setItem('byte_sb',n?'1':'0')}catch(e){}};
-    const[stSections,setStSections]=useState({transcode:true,output:true,notify:false,appear:false,api:false});const[theme,setTheme]=useState('dark');
+    const[tab,setTab]=useState('dashboard');const[theme,setTheme]=useState('dark');
     const[qTab,setQTab]=useState('queued');const[search,setSearch]=useState('');const[sort,setSort]=useState('priority');
-    const[hdrF,setHdrF]=useState('all');const[libF,setLibF]=useState('all');
+    const[hdrF,setHdrF]=useState('all');const[libF,setLibF]=useState('all');const[qTypeT,setQTypeT]=useState('transcode');
+    const[settingsTab,setSettingsTab]=useState('transcode');
     const[newLib,setNewLib]=useState({name:'',path:''});const[xWorker,setXWorker]=useState(null);
     const[lSettings,setLS]=useState(null);const[selFile,setSelFile]=useState(null);const[skipGb,setSkipGb]=useState('');
     const[page,setPage]=useState(1);const[perPage,setPerPage]=useState(100);
@@ -348,17 +213,19 @@ function App(){
 
     useEffect(()=>{fetch('/api/auth/status',{credentials:'include'}).then(r=>r.json()).then(d=>{if(d.needs_setup)setSetup(true);else if(d.authenticated)setAuthed(true);}).catch(()=>setAuthed(true))},[]);
 
-    const{data:dash,refresh:rD}=useApi('/dashboard',5000);
-    const{data:queue,refresh:rQ}=useApi('/queue?sort='+sort+(qTab!=='all'?'&status='+qTab:''),5000);
-    const{data:allW,refresh:rW}=useApi('/workers',10000);
-    const{data:libs,refresh:rL}=useApi('/libraries',15000);
-    const{data:settings,refresh:rS}=useApi('/settings',30000);
-    const{data:logs,refresh:rLg}=useApi(tab==='logs'?'/logs?limit=100':null,tab==='logs'?10000:0);
+    const{data:dash,refresh:rD}=useApi('/dashboard',2500);
+    const{data:queue,refresh:rQ}=useApi('/queue?sort='+sort+(qTab!=='all'?'&status='+qTab:'')+'&job_type='+qTypeT,2500);
+    const{data:allW,refresh:rW}=useApi('/workers',3000);
+    const{data:libs,refresh:rL}=useApi('/libraries',5000);
+    const{data:settings,refresh:rS}=useApi('/settings',10000);
+    const{data:logs,refresh:rLg}=useApi('/logs?limit=300',5000);
     useEffect(()=>{if(settings&&!lSettings)setLS({...settings})},[settings]);
     useEffect(()=>{if(settings?.theme&&TH[settings.theme])setTheme(settings.theme)},[settings]);
 
-    const s=dash||{status_stats:{},workers:[],processing:[],recent_complete:[],health_checking:[],next_queued:[],saved_gb:0,processing_enabled:false,scan_progress:{},hdr_stats:{}};
+    const s=dash||{status_stats:{},status_stats_by_type:{},workers:[],processing:[],recent_complete:[],saved_gb:0,processing_enabled:false,scan_progress:{},hdr_stats:{}};
     const gc=st=>(s.status_stats[st]||{}).count||0;
+    const gcType=(jt,st)=>(s.status_stats_by_type?.[jt]||{})[st]||0;
+    const gcTypeTotal=jt=>{const m=s.status_stats_by_type?.[jt]||{};return Object.values(m).reduce((a,b)=>a+b,0);};
     const totalQ=gc('queued')+gc('pending');
 
     const workers=useMemo(()=>{
@@ -380,69 +247,86 @@ function App(){
         return q;},[queue,hdrF,libF,search,colFilter]);
     const totalPages=Math.max(1,Math.ceil(items.length/perPage));
     const pageItems=useMemo(()=>items.slice((page-1)*perPage,page*perPage),[items,page,perPage]);
-    useEffect(()=>{setPage(1);},[qTab,search,hdrF,libF,colFilter]);
+    useEffect(()=>{setPage(1);},[qTab,qTypeT,search,hdrF,libF,colFilter]);
     const libNms=useMemo(()=>[...new Set((queue||[]).map(i=>i.library_name).filter(Boolean))],[queue]);
 
     if(!authed)return <Login onAuth={()=>setAuthed(true)} setup={setup}/>;
 
-    const doAct=async(ep,d)=>{await post(ep,d);rQ();rD();rW();rL();};
-    const fileAct=(id,action)=>{
-        const msgs={cancel:['Cancelling...','info'],skip:['Skipped','info'],accept:['Accepted','success'],requeue:['Requeuing...','info'],'bump-top':['Bumped to top','info'],'bump-up':['Bumped up','info'],'bump-down':['Bumped down','info'],'force-start':['Force-started','success'],delete:['Removed','info']};
-        const[m,t]=msgs[action]||['Done','info'];
-        toast(m,t);
-        setSelFile(null);
-        const ep=action==='cancel'?post('/queue/'+id+'/cancel')
-            :action==='skip'?post('/queue/'+id+'/skip',{reason:'Not needed'})
-            :action==='accept'?post('/queue/'+id+'/accept')
-            :action==='requeue'?post('/queue/'+id+'/requeue')
-            :action==='bump-top'?post('/queue/'+id+'/bump-top')
-            :action==='bump-up'?post('/queue/'+id+'/bump',{direction:'up'})
-            :action==='bump-down'?post('/queue/'+id+'/bump',{direction:'down'})
-            :action==='force-start'?post('/queue/'+id+'/force-start')
-            :action==='delete'?del('/queue/'+id):Promise.resolve();
-        // Cancel gets extra retry for reliability
-        if(action==='cancel'){setTimeout(()=>post('/queue/'+id+'/cancel'),1500);}
-        ep.then(()=>{rQ();rD();rW();});
-        setTimeout(()=>{rQ();rD();},800);
+    const doAct=async(ep,d)=>{await post(ep,d);rQ();rD();rW();};
+    const fileAct=async(id,action)=>{
+        if(action==='cancel')await post('/queue/'+id+'/cancel');
+        else if(action==='skip')await post('/queue/'+id+'/skip',{reason:'Not needed'});
+        else if(action==='accept')await post('/queue/'+id+'/accept');
+        else if(action==='requeue')await post('/queue/'+id+'/requeue');
+        else if(action==='bump-top')await post('/queue/'+id+'/bump-top');
+        else if(action==='bump-up')await post('/queue/'+id+'/bump',{direction:'up'});
+        else if(action==='bump-down')await post('/queue/'+id+'/bump',{direction:'down'});
+        else if(action==='force-start'){await post('/queue/'+id+'/force-start');toast('Force-started — will process next','success');}
+        else if(action==='delete')await del('/queue/'+id);
+        rQ();rD();setSelFile(null);
     };
     const saveSt=async()=>{if(lSettings){await put('/settings',lSettings);rS();toast('Settings saved','success')}};
 
     return <div style={{display:'flex',minHeight:'100vh',background:T.bg,color:T.tx}}>
-        {/* SIDEBAR — collapsible */}
-        <nav style={{width:sbOpen?210:60,background:T.sb,borderRight:`1px solid ${T.bd}`,display:'flex',flexDirection:'column',position:'sticky',top:0,height:'100vh',flexShrink:0,transition:'width 0.2s ease',overflow:'hidden'}}>
-            <div style={{padding:sbOpen?'18px 18px':'18px 0',borderBottom:`1px solid ${T.bd}`,display:'flex',alignItems:'center',justifyContent:'center',gap:10,minHeight:58}}>
-                {sbOpen?<><div style={{flex:1}}><div className="grad-text" style={{fontSize:24,fontWeight:800,letterSpacing:'-0.5px',background:`linear-gradient(135deg,${T.ac},${T.a2})`}}>BYTE</div><div style={{fontSize:10,color:T.t2,letterSpacing:'2px',fontWeight:600}}>TRANSCODE v3</div></div></>:null}
-                <button onClick={toggleSb} style={{background:'none',border:'none',cursor:'pointer',color:T.t3,padding:4,flexShrink:0}} title={sbOpen?'Collapse':'Expand'}><I n={sbOpen?'up':'down'} s={16}/></button>
+        {/* SIDEBAR */}
+        <nav style={{width:218,background:T.sb,borderRight:`1px solid ${T.bd}`,display:'flex',flexDirection:'column',position:'sticky',top:0,height:'100vh',flexShrink:0}}>
+            <div style={{padding:'22px 18px',borderBottom:`1px solid ${T.bd}`}}>
+                <div style={{fontSize:24,fontWeight:800,color:T.ac,letterSpacing:'-0.5px',lineHeight:1}}>BYTE</div>
+                <div style={{fontSize:10,color:T.t2,letterSpacing:'2.5px',fontWeight:600,marginTop:4}}>TRANSCODE v3.6</div>
             </div>
-            <div style={{padding:sbOpen?10:6,flex:1}}>
-                {[['dashboard','Dashboard','monitor'],['stats','Stats','zap'],['libraries','Libraries','folder'],['settings','Settings','settings'],['logs','Logs','log'],['profile','Profile','user']].map(([id,label,icon])=>
-                    <button key={id} onClick={()=>setTab(id)} title={sbOpen?'':label} style={{display:'flex',alignItems:'center',gap:9,width:'100%',padding:sbOpen?'12px 14px':'12px 0',justifyContent:sbOpen?'flex-start':'center',margin:'2px 0',border:'none',cursor:'pointer',background:tab===id?`${T.ac}18`:'transparent',color:tab===id?T.ac:T.t3,fontSize:16,fontWeight:tab===id?600:400,borderRadius:6}}>
-                        <I n={icon} s={18}/>{sbOpen&&<> {label}</>}
-                        {sbOpen&&id==='dashboard'&&totalQ>0&&<span className="mono" style={{marginLeft:'auto',fontSize:11,fontWeight:700,background:`${T.ac}20`,color:T.ac,padding:'2px 8px',borderRadius:10}}>{totalQ}</span>}
+            <div style={{padding:10,flex:1,overflowY:'auto'}}>
+                {/* Main */}
+                {[['dashboard','Dashboard','monitor',T.ac],['stats','Stats','zap',T.ac],['libraries','Libraries','folder',T.ac]].map(([id,label,icon,c])=>{
+                    const procCount=id==='dashboard'?(s.processing||[]).filter(p=>(p.job_type||'transcode')===qTypeT).length:0;
+                    return <button key={id} onClick={()=>{setTab(id);if(id==='dashboard'){setQTypeT('transcode');setQTab('queued');}}} style={{display:'flex',alignItems:'center',gap:9,width:'100%',padding:'11px 14px',margin:'2px 0',border:'none',cursor:'pointer',background:tab===id?`${c}18`:'transparent',color:tab===id?c:T.t3,fontSize:14,fontWeight:tab===id?600:400,borderRadius:6,position:'relative'}}>
+                        <I n={icon} s={17}/> {label}
+                        {id==='dashboard'&&procCount>0&&<span style={{width:7,height:7,borderRadius:4,background:c,animation:'pulse 1.5s infinite',marginLeft:4}}/>}
+                        {id==='dashboard'&&gcType(qTypeT,'queued')+gcType(qTypeT,'pending')>0&&<span className="mono" style={{marginLeft:'auto',fontSize:10,fontWeight:700,background:`${c}20`,color:c,padding:'2px 8px',borderRadius:10}}>{gcType(qTypeT,'queued')+gcType(qTypeT,'pending')}</span>}
+                    </button>;
+                })}
+                {/* Tools section header */}
+                <div style={{fontSize:9,color:T.t2,fontWeight:700,letterSpacing:'1.5px',padding:'14px 14px 6px',marginTop:6}}>TOOLS</div>
+                {[
+                    ['tool-subgen','AI Subtitles','log',T.ok,'subgen'],
+                    ['tool-cleanup','Audio Cleanup','check',T.in,'remuxclean'],
+                    ['tool-dv78','DV7→8 Only','play',T.a2,'dv78only'],
+                ].map(([id,label,icon,c,jt])=>{
+                    const procCount=(s.processing||[]).filter(p=>(p.job_type||'transcode')===jt).length;
+                    const queueCount=gcType(jt,'queued')+gcType(jt,'pending');
+                    const active=tab==='dashboard'&&qTypeT===jt;
+                    return <button key={id} onClick={()=>{setTab('dashboard');setQTypeT(jt);setQTab('queued');}} style={{display:'flex',alignItems:'center',gap:9,width:'100%',padding:'11px 14px',margin:'2px 0',border:'none',cursor:'pointer',background:active?`${c}18`:'transparent',color:active?c:T.t3,fontSize:13,fontWeight:active?600:400,borderRadius:6,position:'relative'}}>
+                        <I n={icon} s={16}/> {label}
+                        {procCount>0&&<span style={{width:7,height:7,borderRadius:4,background:c,animation:'pulse 1.5s infinite',marginLeft:4}}/>}
+                        {queueCount>0&&<span className="mono" style={{marginLeft:'auto',fontSize:10,fontWeight:700,background:`${c}20`,color:c,padding:'2px 8px',borderRadius:10}}>{queueCount}</span>}
+                    </button>;
+                })}
+                {/* Bottom section header */}
+                <div style={{fontSize:9,color:T.t2,fontWeight:700,letterSpacing:'1.5px',padding:'14px 14px 6px',marginTop:6}}>SYSTEM</div>
+                {[['settings','Settings','settings'],['logs','Logs','log']].map(([id,label,icon])=>
+                    <button key={id} onClick={()=>setTab(id)} style={{display:'flex',alignItems:'center',gap:9,width:'100%',padding:'11px 14px',margin:'2px 0',border:'none',cursor:'pointer',background:tab===id?`${T.ac}18`:'transparent',color:tab===id?T.ac:T.t3,fontSize:14,fontWeight:tab===id?600:400,borderRadius:6}}>
+                        <I n={icon} s={17}/> {label}
                     </button>)}
             </div>
-            <div style={{padding:sbOpen?'14px 18px':'10px 6px',borderTop:`1px solid ${T.bd}`,fontSize:12}}>
-                {sbOpen?<><div style={{display:'flex',alignItems:'center',gap:6,color:T.t2}}>
-                    <div style={{width:8,height:8,borderRadius:4,background:workers.some(w=>w._on)?T.ok:T.t2,boxShadow:workers.some(w=>w._on)?`0 0 6px ${T.ok}`:``}}/>
-                    {workers.filter(w=>w._on).length} / {workers.length}
+            <div style={{padding:'14px 18px',borderTop:`1px solid ${T.bd}`,fontSize:11}}>
+                <div style={{display:'flex',alignItems:'center',gap:6,color:T.t2}}>
+                    <div style={{width:7,height:7,borderRadius:4,background:workers.some(w=>w._on)?T.ok:T.t2}}/>
+                    {workers.filter(w=>w._on).length} online / {workers.length} total
                 </div>
-                <div style={{marginTop:5,color:s.processing_enabled?T.ok:T.wn,fontWeight:600,fontSize:12}}>{s.processing_enabled?'▶ Active':'⏸ Paused'}</div></>
-                :<div style={{display:'flex',justifyContent:'center'}}><div style={{width:8,height:8,borderRadius:4,background:s.processing_enabled?T.ok:T.wn}}/></div>}
+                <div style={{marginTop:5,color:s.processing_enabled?T.ok:T.wn,fontWeight:600}}>{s.processing_enabled?'▶ Active':'⏸ Paused'}</div>
             </div>
-            <div style={{padding:sbOpen?'10px 14px':'10px 6px',borderTop:`1px solid ${T.bd}`,display:'flex',alignItems:'center',gap:8,justifyContent:sbOpen?'flex-start':'center'}}>
-                {lSettings?.avatar_base64?<img src={lSettings.avatar_base64} style={{width:24,height:24,borderRadius:12,objectFit:'cover'}}/>:<I n="user" s={15} c={T.t3}/>}
-                {sbOpen&&<><span style={{fontSize:12,color:T.t3,flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{lSettings?.display_name||settings?.auth_user||'admin'}</span>
-                <button onClick={()=>post('/auth/logout').then(()=>window.location.reload())} style={{background:'none',border:'none',cursor:'pointer',color:T.t2,fontSize:11}}>Logout</button></>}
+            <div style={{padding:'10px 14px',borderTop:`1px solid ${T.bd}`,display:'flex',alignItems:'center',gap:8}}>
+                <I n="user" s={15} c={T.t3}/><span style={{fontSize:12,color:T.t3,flex:1}}>{settings?.auth_user||'admin'}</span>
+                <button onClick={()=>post('/auth/logout').then(()=>window.location.reload())} style={{background:'none',border:'none',cursor:'pointer',color:T.t2,fontSize:11}}>Logout</button>
             </div>
         </nav>
 
         {/* MAIN */}
-        <main style={{flex:1,padding:'24px 32px',overflowY:'auto',maxHeight:'100vh'}}>
+        <main style={{flex:1,padding:'22px 30px',overflowY:'auto',maxHeight:'100vh'}}>
 
         {/*═══ DASHBOARD ═══*/}
         {tab==='dashboard'&&<div>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14}}>
-                <h1 style={{fontSize:24,fontWeight:700,color:T.t1}}>Dashboard</h1>
+                <h1 style={{fontSize:20,fontWeight:700,color:T.t1}}>Dashboard</h1>
                 <div style={{display:'flex',gap:8}}>
                     {!s.processing_enabled?
                         <button onClick={()=>doAct('/queue/start')} style={{background:`${T.ok}18`,border:`1px solid ${T.ok}44`,borderRadius:8,padding:'8px 18px',cursor:'pointer',color:T.ok,fontSize:13,fontWeight:700,display:'flex',alignItems:'center',gap:5}}><I n="play" s={14}/> Start Processing</button>:
@@ -455,15 +339,54 @@ function App(){
             {/* STATS */}
             <div style={{display:'grid',gridTemplateColumns:'repeat(6,1fr)',gap:12,marginBottom:20}}>
                 {[['Queued',totalQ,T.t3,'clock'],['Processing',gc('processing'),T.ac,'zap'],['Health Check',gc('pending'),T.in,'heart'],['Complete',gc('complete'),T.ok,'check'],['Errors',gc('error'),T.er,'x'],['Saved',(s.saved_gb||0).toFixed(0)+' GB',T.a2,'hdd']].map(([l,v,c,ic])=>
-                    <div key={l} style={{background:T.card,borderRadius:10,padding:'18px 20px',border:`1px solid ${T.bd}`}}>
-                        <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:8}}><I n={ic} s={16} c={c}/><span style={{fontSize:12,color:T.t2,textTransform:'uppercase',letterSpacing:'0.5px',fontWeight:600}}>{l}</span></div>
-                        <div className="mono" style={{fontSize:28,fontWeight:700,color:T.t1}}>{v}</div>
+                    <div key={l} style={{background:T.card,borderRadius:10,padding:'16px 18px',border:`1px solid ${T.bd}`}}>
+                        <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:6}}><I n={ic} s={16} c={c}/><span style={{fontSize:11,color:T.t2,textTransform:'uppercase',letterSpacing:'0.5px',fontWeight:600}}>{l}</span></div>
+                        <div className="mono" style={{fontSize:26,fontWeight:700,color:T.t1}}>{v}</div>
                     </div>)}
             </div>
 
+            {/* SERVER OVERVIEW */}
+            <div style={{background:T.card,borderRadius:10,padding:'16px 20px',border:`1px solid ${T.bd}`,marginBottom:16}}>
+                <div style={{fontSize:12,fontWeight:600,color:T.t3,textTransform:'uppercase',letterSpacing:'0.5px',marginBottom:10}}>Server Overview</div>
+                <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:12}}>
+                    <div style={{background:T.bg,borderRadius:8,padding:'10px 14px',border:`1px solid ${T.bd}`}}>
+                        <div style={{fontSize:10,color:T.t2,fontWeight:600}}>SERVER CLOCK</div>
+                        <div className="mono" style={{fontSize:15,fontWeight:700,color:T.t1,marginTop:2}}>{new Date().toLocaleTimeString()}</div>
+                    </div>
+                    <div style={{background:T.bg,borderRadius:8,padding:'10px 14px',border:`1px solid ${T.bd}`}}>
+                        <div style={{fontSize:10,color:T.t2,fontWeight:600}}>VERSION</div>
+                        <div className="mono" style={{fontSize:15,fontWeight:700,color:T.t1,marginTop:2}}>3.0.0</div>
+                    </div>
+                    <div style={{background:T.bg,borderRadius:8,padding:'10px 14px',border:`1px solid ${T.bd}`}}>
+                        <div style={{fontSize:10,color:T.t2,fontWeight:600}}>STATUS</div>
+                        <div style={{fontSize:15,fontWeight:700,color:s.processing_enabled?T.ok:T.wn,marginTop:2}}>{s.processing_enabled?'Active':'Paused'}</div>
+                    </div>
+                    <div style={{background:T.bg,borderRadius:8,padding:'10px 14px',border:`1px solid ${T.bd}`}}>
+                        <div style={{fontSize:10,color:T.t2,fontWeight:600}}>ACTIVE WORKERS</div>
+                        <div className="mono" style={{fontSize:15,fontWeight:700,color:T.ac,marginTop:2}}>{workers.filter(w=>w.status==='active').length} / {workers.length}</div>
+                    </div>
+                    <div style={{background:T.bg,borderRadius:8,padding:'10px 14px',border:`1px solid ${T.bd}`}}>
+                        <div style={{fontSize:10,color:T.t2,fontWeight:600}}>TOTAL SAVED</div>
+                        <div className="mono" style={{fontSize:15,fontWeight:700,color:T.ok,marginTop:2}}>{(s.saved_gb||0).toFixed(1)} GB</div>
+                    </div>
+                </div>
+            </div>
 
-
-
+            {/* NODES OVERVIEW TABLE */}
+            {workers.length>0&&<div style={{background:T.card,borderRadius:10,border:`1px solid ${T.bd}`,overflow:'hidden',marginBottom:16}}>
+                <div style={{fontSize:12,fontWeight:600,color:T.t3,textTransform:'uppercase',letterSpacing:'0.5px',padding:'12px 18px',borderBottom:`1px solid ${T.bd}`}}>Nodes Overview (Active Workers)</div>
+                <div style={{display:'grid',gridTemplateColumns:'120px 1fr 100px 100px 100px 100px',gap:4,padding:'8px 18px',fontSize:10,fontWeight:600,color:T.t2,textTransform:'uppercase',borderBottom:`1px solid ${T.bd}`}}>
+                    <span>Session ID</span><span>Name</span><span>Transcode CPU</span><span>Transcode GPU</span><span>Health CPU</span><span>Health GPU</span>
+                </div>
+                {workers.map(w=><div key={w.id+'ov'} style={{display:'grid',gridTemplateColumns:'120px 1fr 100px 100px 100px 100px',gap:4,padding:'10px 18px',alignItems:'center',borderBottom:`1px solid ${T.bd}`,fontSize:12}}>
+                    <span className="mono" style={{fontSize:10,color:T.t2}}>{(w.id||'').slice(0,12)}</span>
+                    <span style={{fontWeight:600,color:T.t1}}>{w.name}</span>
+                    <span className="mono" style={{color:T.t3}}>{parseInt(lSettings?.transcode_cpu_count)||0}</span>
+                    <span className="mono" style={{color:T.ac}}>{parseInt(lSettings?.transcode_gpu_count)||1}</span>
+                    <span className="mono" style={{color:T.t3}}>{parseInt(lSettings?.healthcheck_cpu_count)||0}</span>
+                    <span className="mono" style={{color:T.ac}}>{parseInt(lSettings?.healthcheck_gpu_count)||1}</span>
+                </div>)}
+            </div>}
 
             {/* SCAN PROGRESS */}
             {Object.entries(s.scan_progress||{}).filter(([,sp])=>sp?.status==='scanning').map(([lid,sp])=>{
@@ -477,10 +400,7 @@ function App(){
                 </div>;})}
 
             {/* WORKERS */}
-            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
-                <h2 style={{fontSize:15,fontWeight:700,color:T.t3,textTransform:'uppercase',letterSpacing:'0.5px',marginBottom:10}}>Workers / Nodes</h2>
-                {workers.length>1&&<button onClick={async()=>{await post('/workers/cleanup');rW();rD();toast('Stale workers cleaned up','success');setTimeout(()=>{rW();rD();},2000);}} style={{background:`${T.wn}12`,border:`1px solid ${T.wn}33`,borderRadius:6,padding:'5px 12px',cursor:'pointer',color:T.wn,fontSize:11,fontWeight:600,display:'flex',alignItems:'center',gap:4}}><I n="x" s={12}/> Clean Up Stale</button>}
-            </div>
+            <h2 style={{fontSize:13,fontWeight:600,color:T.t3,textTransform:'uppercase',letterSpacing:'0.5px',marginBottom:10}}>Workers / Nodes</h2>
             {workers.map(w=>{const active=w.status==='active';const on=w._on;const stale=w._stale;const sc=active?T.ac:on?T.ok:stale?T.wn:T.t2;
                 return <div key={w.id} style={{background:T.card,borderRadius:10,marginBottom:8,border:`1px solid ${active?T.ac+'44':T.bd}`,overflow:'hidden'}}>
                     <div onClick={()=>setXWorker(xWorker===w.id?null:w.id)} style={{padding:'14px 18px',cursor:'pointer'}}>
@@ -505,14 +425,14 @@ function App(){
                         <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:10,marginBottom:12}}>
                             {[['GPU',w.gpu_usage],['VRAM',w.vram_usage],['CPU',w.cpu_usage],['RAM',w.ram_usage]].map(([l,v])=>
                                 <div key={l} style={{background:T.bg,borderRadius:8,padding:'10px 12px',border:`1px solid ${T.bd}`}}>
-                                    <div style={{fontSize:11,color:T.t2,textTransform:'uppercase',fontWeight:600}}>{l}</div>
-                                    <div className="mono" style={{fontSize:20,fontWeight:700,color:v>80?T.wn:T.t1}}>{v>0?v+'%':'N/A'}</div></div>)}
+                                    <div style={{fontSize:10,color:T.t2,textTransform:'uppercase',fontWeight:600}}>{l}</div>
+                                    <div className="mono" style={{fontSize:18,fontWeight:700,color:v>80?T.wn:T.t1}}>{v>0?v+'%':'N/A'}</div></div>)}
                         </div>
                         <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'6px 20px',fontSize:12,color:T.t3}}>
                             <div>Host: <span style={{color:T.tx}}>{w.host||'N/A'}</span></div>
                             <div>Jobs Done: <span style={{color:T.tx}}>{w.jobs_completed||0}</span></div>
                             <div>Saved: <span style={{color:T.tx}}>{(w.total_saved_gb||0).toFixed(1)} GB</span></div>
-                            <div>Heartbeat: <span style={{color:stale?T.wn:T.tx}}>{fmtTime(w.last_heartbeat,'full')||'N/A'}</span></div>
+                            <div>Heartbeat: <span style={{color:stale?T.wn:T.tx}}>{w.last_heartbeat||'N/A'}</span></div>
                         </div>
                         {/* Worker +/- Controls */}
                         <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginTop:12}}>
@@ -575,17 +495,24 @@ function App(){
                 </div>;})}
             {workers.length===0&&<div style={{padding:28,textAlign:'center',color:T.t2,background:T.card,borderRadius:10,border:`1px dashed ${T.bd}`,fontSize:13}}>No workers registered. Start byte_node.py on your GPU machine.</div>}
 
-            {/* ACTIVE TRANSCODES - Tdarr-style table */}
-            {/* Active Workers + Staging — always visible */}
+            {/* ACTIVE WORKERS - filtered to current view's job type */}
             <>
-                <h2 style={{fontSize:15,fontWeight:700,color:T.t3,textTransform:'uppercase',letterSpacing:'0.5px',margin:'18px 0 10px'}}>Active Workers</h2>
+                {(()=>{
+                    const myProc=(s.processing||[]).filter(p=>(p.job_type||'transcode')===qTypeT);
+                    return <>
+                <h2 style={{fontSize:13,fontWeight:600,color:T.t3,textTransform:'uppercase',letterSpacing:'0.5px',margin:'18px 0 10px'}}>Active Workers <span style={{color:T.t2,fontWeight:400}}>({{transcode:'Transcode',subgen:'AI Subtitles',remuxclean:'Audio Cleanup',dv78only:'DV7→8 Only'}[qTypeT]||qTypeT})</span></h2>
                 <div style={{background:T.card,borderRadius:10,border:`1px solid ${T.bd}`,overflow:'hidden',marginBottom:8}}>
-                    <div style={{display:'grid',gridTemplateColumns:'50px 100px 1fr 160px 80px 120px 60px 100px 60px',gap:6,padding:'10px 16px',fontSize:12,fontWeight:700,color:T.t2,textTransform:'uppercase',letterSpacing:'0.3px',borderBottom:`1px solid ${T.bd}`}}>
+                    <div style={{display:'grid',gridTemplateColumns:'44px 90px 1fr 130px 80px 100px 50px 90px 56px',gap:4,padding:'8px 14px',fontSize:10,fontWeight:600,color:T.t2,textTransform:'uppercase',letterSpacing:'0.3px',borderBottom:`1px solid ${T.bd}`}}>
                         <span>On/Off</span><span>Type</span><span>Title</span><span>Status</span><span>ETA</span><span>Progress</span><span>FPS</span><span>Compression</span><span></span>
                     </div>
-                    {s.processing.map(p=>{const h=HDR_C[p.hdr_type]||HDR_C.SDR;return <div key={p.id} style={{display:'grid',gridTemplateColumns:'50px 100px 1fr 160px 80px 120px 60px 100px 60px',gap:6,padding:'12px 16px',alignItems:'center',borderBottom:`1px solid ${T.bd}`,fontSize:13}}>
-                        <div style={{width:36,height:20,borderRadius:10,background:T.ok,display:'flex',alignItems:'center',justifyContent:'flex-end',padding:'0 2px'}}><div style={{width:16,height:16,borderRadius:8,background:'#fff'}}/></div>
-                        <span style={{color:T.ac,fontWeight:700,fontSize:12}}>Transcode GPU</span>
+                    {myProc.length===0&&<div style={{padding:24,textAlign:'center',color:T.t2,fontSize:12}}>No active jobs in this pipeline</div>}
+                    {myProc.map(p=>{const h=HDR_C[p.hdr_type]||HDR_C.SDR;
+                        const jt=p.job_type||'transcode';
+                        const jtLabel={transcode:'Transcode',subgen:'AI Subtitle',remuxclean:'Cleanup',dv78only:'DV7→8'}[jt]||jt;
+                        const jtColor={transcode:T.ac,subgen:T.ok,remuxclean:T.in,dv78only:T.a2}[jt]||T.ac;
+                        return <div key={p.id} style={{display:'grid',gridTemplateColumns:'44px 90px 1fr 130px 80px 100px 50px 90px 56px',gap:4,padding:'10px 14px',alignItems:'center',borderBottom:`1px solid ${T.bd}`,fontSize:12}}>
+                        <div style={{width:34,height:18,borderRadius:9,background:T.ok,display:'flex',alignItems:'center',justifyContent:'flex-end',padding:'0 2px'}}><div style={{width:14,height:14,borderRadius:7,background:'#fff'}}/></div>
+                        <span style={{color:jtColor,fontWeight:600,fontSize:11}}>{jtLabel} GPU</span>
                         <div style={{minWidth:0}}>
                             <div style={{fontWeight:500,color:T.t1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{p.file_name}</div>
                             <div style={{fontSize:10,color:T.t2,display:'flex',gap:6,marginTop:1}}>
@@ -599,80 +526,76 @@ function App(){
                             <div style={{height:6,borderRadius:3,background:`${T.t2}20`,overflow:'hidden',marginBottom:2}}><div style={{width:(p.progress||0)+'%',height:'100%',background:T.ac,borderRadius:3,backgroundImage:'linear-gradient(45deg,rgba(255,255,255,.12) 25%,transparent 25%,transparent 50%,rgba(255,255,255,.12) 50%,rgba(255,255,255,.12) 75%,transparent 75%)',backgroundSize:'40px 40px',animation:'barStripe 1s linear infinite'}}/></div>
                             <span className="mono" style={{fontSize:10,fontWeight:700,color:T.ac}}>{(p.progress||0).toFixed(1)}%</span>
                         </div>
-                        <span className="mono" style={{fontSize:11,color:p.fps&&!String(p.fps).includes('/')?T.ac:T.t3}}>{(()=>{
-                            const f=p.fps;if(!f)return'--';
-                            if(String(f).includes('/')){const[n,d]=String(f).split('/');return d?Math.round(n/d)+'fps':f;}
-                            return parseInt(f)||'--';
-                        })()}</span>
-                        <div className="mono" style={{fontSize:10}}><span style={{color:T.in}}>C:{p.reduction_pct&&p.reduction_pct>0?(100-p.reduction_pct).toFixed(0):'--'}%</span> <span style={{color:T.ac}}>T:{p.reduction_pct&&p.reduction_pct>0?p.reduction_pct.toFixed(0):'--'}%</span></div>
+                        <span className="mono" style={{fontSize:11,color:T.t3}}>{p.fps||'--'}</span>
+                        <div className="mono" style={{fontSize:10}}><span style={{color:T.in}}>C:{p.reduction_pct?(100-p.reduction_pct).toFixed(0):'--'}%</span> <span style={{color:T.ac}}>T:{p.reduction_pct?p.reduction_pct.toFixed(0):'--'}%</span></div>
                         <div style={{display:'flex',gap:3}}>
                             <button onClick={()=>setSelFile({...p,_tab:'log'})} style={{background:`${T.in}10`,border:'none',borderRadius:4,padding:'4px',cursor:'pointer',color:T.in}}><I n="log" s={13}/></button>
-                            <button onClick={()=>{toast('Cancelling...','info');post('/queue/'+p.id+'/cancel').then(()=>{rQ();rD();rW()})}} style={{background:`${T.er}10`,border:'none',borderRadius:4,padding:'4px',cursor:'pointer',color:T.er}}><I n="stop" s={13}/></button>
+                            <button onClick={()=>doAct('/queue/'+p.id+'/cancel')} style={{background:`${T.er}10`,border:'none',borderRadius:4,padding:'4px',cursor:'pointer',color:T.er}}><I n="stop" s={13}/></button>
                         </div>
                     </div>;})}
                 </div>
+                </>;})()}
                 {/* Staging Section — Two Panel Layout */}
-                <h2 style={{fontSize:15,fontWeight:700,color:T.t3,textTransform:'uppercase',letterSpacing:'0.5px',margin:'18px 0 10px'}}>Staging</h2>
+                <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8}}>
+                    <h2 style={{fontSize:13,fontWeight:600,color:T.t3,textTransform:'uppercase',letterSpacing:'0.5px'}}>Staging Section</h2>
+                    <div style={{display:'flex',alignItems:'center',gap:8}}>
+                        <span style={{fontSize:11,color:T.t2}}>Staged file limit:</span>
+                        <input className="mono" type="number" min={0} max={500} value={lSettings?.staged_limit||'100'} onChange={e=>{setLS(s=>({...s,staged_limit:e.target.value}));put('/settings',{staged_limit:e.target.value})}} style={{width:55,background:T.bg,border:`1px solid ${(lSettings?.staged_limit||'100')==='0'?T.er:T.bd}`,borderRadius:4,padding:'4px 8px',color:(lSettings?.staged_limit||'100')==='0'?T.er:T.ac,fontSize:13,fontWeight:700,outline:'none',textAlign:'center'}}/>
+                        {(lSettings?.staged_limit||'100')==='0'&&<span style={{color:T.er,fontWeight:700,fontSize:11}}>STOPPED</span>}
+                    </div>
+                </div>
                 <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginBottom:16}}>
-                    {/* LEFT: Staged Files — HC + Processing + Next Up */}
+                    {/* LEFT: Staged Files — Processing */}
+                    {(()=>{
+                        const myProc=(s.processing||[]).filter(p=>(p.job_type||'transcode')===qTypeT);
+                        const myComplete=(s.recent_complete||[]).filter(c=>(c.job_type||'transcode')===qTypeT);
+                        return <>
                     <div style={{background:T.card,borderRadius:10,border:`1px solid ${T.bd}`,overflow:'hidden'}}>
                         <div style={{padding:'10px 14px',borderBottom:`1px solid ${T.bd}`,display:'flex',alignItems:'center',gap:6}}>
                             <I n="zap" s={14} c={T.ac}/><span style={{fontSize:12,fontWeight:600,color:T.t3}}>Staged Files</span>
-                            <span className="mono" style={{marginLeft:'auto',fontSize:10,color:T.ac,fontWeight:700}}>{(s.health_checking||[]).length+s.processing.length+(s.next_queued||[]).length}</span>
+                            <span className="mono" style={{marginLeft:'auto',fontSize:10,color:T.ac,fontWeight:700}}>{myProc.length}</span>
                         </div>
-                        <div style={{display:'grid',gridTemplateColumns:'80px 1fr 60px 90px 40px',gap:4,padding:'6px 12px',fontSize:10,fontWeight:600,color:T.t2,textTransform:'uppercase',borderBottom:`1px solid ${T.bd}`}}>
-                            <span>Type</span><span>File</span><span>Size</span><span>Status</span><span></span>
+                        <div style={{display:'grid',gridTemplateColumns:'70px 1fr 60px 70px 50px',gap:4,padding:'6px 12px',fontSize:9,fontWeight:600,color:T.t2,textTransform:'uppercase',borderBottom:`1px solid ${T.bd}`}}>
+                            <span>Type</span><span>Original File</span><span>Size</span><span>Status</span><span></span>
                         </div>
-                        <div style={{maxHeight:300,overflowY:'auto'}}>
-                            {/* Health checks in progress */}
-                            {(s.health_checking||[]).map(h=><div key={h.id+'hc'} style={{display:'grid',gridTemplateColumns:'80px 1fr 60px 90px 40px',gap:4,padding:'8px 12px',alignItems:'center',borderBottom:`1px solid ${T.bd}`,fontSize:11,background:`${T.in}06`}}>
-                                <span style={{color:T.in,fontWeight:600,fontSize:10}}>Health GPU</span>
-                                <span style={{color:T.t1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{h.file_name}</span>
-                                <span className="mono" style={{color:T.t3,fontSize:10}}>{(h.file_size_gb||0).toFixed(1)} GB</span>
-                                <span style={{color:T.in,fontWeight:500,fontSize:10}}>{h.current_step||'Checking...'}</span>
-                                <span/>
-                            </div>)}
-                            {/* Active processing */}
-                            {s.processing.map(p=><div key={p.id+'stg'} style={{display:'grid',gridTemplateColumns:'80px 1fr 60px 90px 40px',gap:4,padding:'8px 12px',alignItems:'center',borderBottom:`1px solid ${T.bd}`,fontSize:11,background:`${T.ac}06`}}>
-                                <span style={{color:T.ac,fontWeight:600,fontSize:10}}>Transcode GPU</span>
+                        <div style={{maxHeight:250,overflowY:'auto'}}>
+                            {myProc.map(p=>{
+                                const jt2=p.job_type||'transcode';
+                                const jtLbl={transcode:'Transcode',subgen:'AI Subtitle',remuxclean:'Cleanup',dv78only:'DV7→8'}[jt2]||jt2;
+                                const jtClr={transcode:T.ac,subgen:T.ok,remuxclean:T.in,dv78only:T.a2}[jt2]||T.ac;
+                                return <div key={p.id+'stg'} style={{display:'grid',gridTemplateColumns:'70px 1fr 60px 70px 50px',gap:4,padding:'8px 12px',alignItems:'center',borderBottom:`1px solid ${T.bd}`,fontSize:11}}>
+                                <span style={{color:jtClr,fontWeight:600,fontSize:10}}>{jtLbl}</span>
                                 <span style={{color:T.t1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{p.file_name}</span>
                                 <span className="mono" style={{color:T.t3,fontSize:10}}>{(p.file_size_gb||0).toFixed(1)} GB</span>
                                 <span style={{color:T.ac,fontWeight:500,fontSize:10}}>Processing</span>
-                                <button onClick={()=>{toast('Cancelling...','info');post('/queue/'+p.id+'/cancel').then(()=>{rQ();rD()})}} style={{background:T.er+'10',border:'none',borderRadius:4,padding:'3px',cursor:'pointer',color:T.er}}><I n="stop" s={12}/></button>
-                            </div>)}
-                            {/* Next queued — waiting for a transcode slot */}
-                            {(s.next_queued||[]).slice(0,15).map(q=><div key={q.id+'nxt'} style={{display:'grid',gridTemplateColumns:'80px 1fr 60px 90px 40px',gap:4,padding:'8px 12px',alignItems:'center',borderBottom:`1px solid ${T.bd}`,fontSize:11}}>
-                                <span style={{color:T.t2,fontWeight:600,fontSize:10}}>Queued</span>
-                                <span style={{color:T.t3,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{q.file_name}</span>
-                                <span className="mono" style={{color:T.t2,fontSize:10}}>{(q.file_size_gb||0).toFixed(1)} GB</span>
-                                <span style={{color:T.t2,fontWeight:500,fontSize:10}}>Waiting</span>
-                                <span/>
-                            </div>)}
-                            {(s.health_checking||[]).length+s.processing.length+(s.next_queued||[]).length===0&&<div style={{padding:20,textAlign:'center',color:T.t2,fontSize:11}}>No staged files</div>}
+                                <button onClick={()=>doAct('/queue/'+p.id+'/cancel')} style={{background:T.er+'10',border:'none',borderRadius:4,padding:'3px',cursor:'pointer',color:T.er}}><I n="stop" s={12}/></button>
+                            </div>;})}
+                            {myProc.length===0&&<div style={{padding:20,textAlign:'center',color:T.t2,fontSize:11}}>No active jobs</div>}
                         </div>
                     </div>
                     {/* RIGHT: Recently Completed */}
                     <div style={{background:T.card,borderRadius:10,border:`1px solid ${T.bd}`,overflow:'hidden'}}>
                         <div style={{padding:'10px 14px',borderBottom:`1px solid ${T.bd}`,display:'flex',alignItems:'center',gap:6}}>
                             <I n="check" s={14} c={T.ok}/><span style={{fontSize:12,fontWeight:600,color:T.t3}}>Completed</span>
-                            <span className="mono" style={{marginLeft:'auto',fontSize:10,color:T.ok,fontWeight:700}}>{(s.recent_complete||[]).length}</span>
+                            <span className="mono" style={{marginLeft:'auto',fontSize:10,color:T.ok,fontWeight:700}}>{myComplete.length}</span>
                         </div>
-                        <div style={{display:'grid',gridTemplateColumns:'1fr 65px 65px 50px 50px 50px',gap:4,padding:'6px 12px',fontSize:10,fontWeight:600,color:T.t2,textTransform:'uppercase',borderBottom:`1px solid ${T.bd}`}}>
+                        <div style={{display:'grid',gridTemplateColumns:'1fr 65px 65px 50px 50px 50px',gap:4,padding:'6px 12px',fontSize:9,fontWeight:600,color:T.t2,textTransform:'uppercase',borderBottom:`1px solid ${T.bd}`}}>
                             <span>File</span><span>Old Size</span><span>New Size</span><span>Saved</span><span>Ratio</span><span></span>
                         </div>
                         <div style={{maxHeight:250,overflowY:'auto'}}>
-                            {(s.recent_complete||[]).map(c=>{const saved=((c.file_size_gb||0)-(c.output_size_gb||0));const ratio=c.reduction_pct||0;
+                            {myComplete.map(c=>{const saved=((c.file_size_gb||0)-(c.output_size_gb||0));const ratio=c.reduction_pct||0;
                                 return <div key={c.id+'comp'} style={{display:'grid',gridTemplateColumns:'1fr 65px 65px 50px 50px 50px',gap:4,padding:'8px 12px',alignItems:'center',borderBottom:`1px solid ${T.bd}`,fontSize:11}}>
                                     <span style={{color:T.t1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{c.file_name}</span>
                                     <span className="mono" style={{color:T.t3,fontSize:10}}>{(c.file_size_gb||0).toFixed(1)} GB</span>
                                     <span className="mono" style={{color:T.ok,fontSize:10}}>{(c.output_size_gb||0).toFixed(1)} GB</span>
                                     <span className="mono" style={{color:T.ok,fontSize:10,fontWeight:700}}>{saved.toFixed(1)}</span>
                                     <span className="mono" style={{color:T.ac,fontSize:10,fontWeight:700}}>{ratio.toFixed(0)}%</span>
-                                    {!c.accepted?<button onClick={()=>{toast('Accepted','success');post('/queue/'+c.id+'/accept').then(()=>rD())}} style={{background:T.ok+'15',border:'none',borderRadius:4,padding:'2px 6px',cursor:'pointer',color:T.ok,fontSize:10,fontWeight:700}}>Accept</button>:<span style={{color:T.ok,fontSize:10}}>&#10003;</span>}
+                                    {!c.accepted?<button onClick={async()=>{await post('/queue/'+c.id+'/accept');rD();toast('Accepted','success')}} style={{background:T.ok+'15',border:'none',borderRadius:4,padding:'2px 6px',cursor:'pointer',color:T.ok,fontSize:9,fontWeight:700}}>Accept</button>:<span style={{color:T.ok,fontSize:9}}>&#10003;</span>}
                                 </div>;})}
-                            {(s.recent_complete||[]).length===0&&<div style={{padding:20,textAlign:'center',color:T.t2,fontSize:11}}>No completed jobs yet</div>}
+                            {myComplete.length===0&&<div style={{padding:20,textAlign:'center',color:T.t2,fontSize:11}}>No completed jobs yet</div>}
                         </div>
                     </div>
+                    </>;})()}
                 </div>
             </>
 
@@ -687,20 +610,9 @@ function App(){
                         <input className="mono" type="number" min={0} max={500} value={lSettings?.staged_limit||'100'} onChange={e=>{setLS(s=>({...s,staged_limit:e.target.value}));put('/settings',{staged_limit:e.target.value})}} style={{width:55,background:T.bg,border:`1px solid ${T.bd}`,borderRadius:4,padding:'4px 8px',color:(lSettings?.staged_limit||'100')==='0'?T.er:T.ac,fontSize:12,fontWeight:700,outline:'none',textAlign:'center'}}/>
                         {(lSettings?.staged_limit||'100')==='0'&&<span style={{color:T.er,fontWeight:600,fontSize:10}}>PAUSED</span>}
                     </div>
-                    <div style={{display:'flex',alignItems:'center',gap:8}}>
-                        <span style={{color:T.t2}}>Max DoVi concurrent:</span>
-                        <input className="mono" type="number" min={1} max={8} value={lSettings?.max_dovi_concurrent||'2'} onChange={e=>{setLS(s=>({...s,max_dovi_concurrent:e.target.value}));put('/settings',{max_dovi_concurrent:e.target.value})}} style={{width:45,background:T.bg,border:`1px solid ${T.bd}`,borderRadius:4,padding:'4px 8px',color:T.ac,fontSize:12,fontWeight:700,outline:'none',textAlign:'center'}}/>
-                        <span style={{color:T.t2,fontSize:10}}>rest fill with SDR/HDR10</span>
-                    </div>
                     <label style={{display:'flex',alignItems:'center',gap:8,cursor:'pointer',color:T.t3}}>
                         <input type="checkbox" checked={(lSettings?.auto_accept||'false')==='true'} onChange={e=>{const v=e.target.checked?'true':'false';setLS(s=>({...s,auto_accept:v}));put('/settings',{auto_accept:v})}} style={{accentColor:T.ac}}/> Auto accept transcodes
                     </label>
-                    <div style={{display:'flex',alignItems:'center',gap:8}}>
-                        <span style={{color:T.t2}}>Mode:</span>
-                        <select value={lSettings?.processing_mode||'transcode'} onChange={e=>{setLS(s=>({...s,processing_mode:e.target.value}));put('/settings',{processing_mode:e.target.value})}} style={{background:T.bg,border:`1px solid ${T.bd}`,borderRadius:4,padding:'4px 8px',color:(lSettings?.processing_mode||'transcode')==='remux'?T.wn:T.ac,fontSize:11,cursor:'pointer',fontWeight:600}}>
-                            <option value="transcode">Transcode (compress)</option><option value="remux">Remux only (convert container)</option>
-                        </select>
-                    </div>
                     <label style={{display:'flex',alignItems:'center',gap:8,cursor:'pointer',color:T.t3}}>
                         <input type="checkbox" checked={showPaths} onChange={e=>setShowPaths(e.target.checked)} style={{accentColor:T.ac}}/> Show full paths
                     </label>
@@ -719,28 +631,94 @@ function App(){
                 </div>
             </div>
 
-            {/* TRANSCODE QUEUE */}
-            <h2 style={{fontSize:15,fontWeight:700,color:T.t3,textTransform:'uppercase',letterSpacing:'0.5px',margin:'18px 0 10px'}}>Transcode Queue</h2>
+            {/* CURRENTLY PROCESSING — only shows jobs of the CURRENT view's type */}
+            {(()=>{
+                const labels={transcode:'Transcode',subgen:'AI Subtitles',remuxclean:'Audio/Track Cleanup',dv78only:'DV7→8 Only'};
+                const colors={transcode:T.ac,subgen:T.ok,remuxclean:T.in,dv78only:T.a2};
+                const c=colors[qTypeT]||T.ac;
+                const lbl=labels[qTypeT]||qTypeT;
+                const myJobs=(s.processing||[]).filter(p=>(p.job_type||'transcode')===qTypeT);
+                const otherJobs=(s.processing||[]).filter(p=>(p.job_type||'transcode')!==qTypeT);
+                const otherByType={};
+                otherJobs.forEach(p=>{const jt=p.job_type||'transcode';otherByType[jt]=(otherByType[jt]||0)+1;});
+                return <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:8,padding:'10px 14px',background:T.card,borderRadius:10,border:`1px solid ${T.bd}`,flexWrap:'wrap'}}>
+                    <span style={{fontSize:11,color:T.t2,textTransform:'uppercase',letterSpacing:'0.5px',fontWeight:600}}>{lbl} — Currently Processing</span>
+                    {myJobs.length===0
+                        ? <span style={{fontSize:13,color:T.t3}}>{!s.processing_enabled?'Master paused':((s.processing_enabled_by_type||{})[qTypeT]===false?lbl+' pipeline paused':'Idle — no '+lbl+' jobs running')}</span>
+                        : <div style={{display:'flex',alignItems:'center',gap:5,padding:'4px 10px',borderRadius:14,background:`${c}1a`,color:c,fontSize:12,fontWeight:600}}>
+                            <span style={{width:8,height:8,borderRadius:4,background:c,animation:'pulse 1.5s infinite'}}/>
+                            {myJobs.length} active {myJobs.length===1?'job':'jobs'}
+                          </div>
+                    }
+                    {Object.keys(otherByType).length>0&&<div style={{marginLeft:'auto',display:'flex',alignItems:'center',gap:6,fontSize:11,color:T.t2}}>
+                        <span style={{textTransform:'uppercase',letterSpacing:'0.4px',fontWeight:600}}>Other:</span>
+                        {Object.entries(otherByType).map(([jt,n])=><span key={jt} style={{padding:'2px 8px',borderRadius:10,background:`${colors[jt]||T.t2}1a`,color:colors[jt]||T.t2,fontSize:10,fontWeight:600}}>{labels[jt]||jt} ({n})</span>)}
+                    </div>}
+                </div>;
+            })()}
+
+            {/* Header showing what view we're on (driven by sidebar Tools nav) */}
+            {(()=>{
+                const labels={transcode:'Transcode',subgen:'AI Subtitles',remuxclean:'Audio/Track Cleanup',dv78only:'DV7→8 Only'};
+                const colors={transcode:T.ac,subgen:T.ok,remuxclean:T.in,dv78only:T.a2};
+                const icons={transcode:'zap',subgen:'log',remuxclean:'check',dv78only:'play'};
+                const c=colors[qTypeT]||T.ac;
+                const lbl=labels[qTypeT]||qTypeT;
+                return <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:8,padding:'12px 16px',background:T.card,borderRadius:10,border:`1px solid ${c}33`}}>
+                    <I n={icons[qTypeT]||'monitor'} s={20} c={c}/>
+                    <h2 style={{fontSize:16,fontWeight:700,color:c}}>{lbl}</h2>
+                    <span style={{fontSize:11,color:T.t2,marginLeft:6}}>·  {gcTypeTotal(qTypeT)} total jobs</span>
+                </div>;
+            })()}
+
+            {/* PER-TYPE PIPELINE CONTROL — Start/Pause for the currently-selected job type */}
+            {(()=>{
+                const labels={transcode:'Transcode',subgen:'AI Subtitles',remuxclean:'Audio/Track Cleanup',dv78only:'DV7→8 Only'};
+                const colors={transcode:T.ac,subgen:T.ok,remuxclean:T.in,dv78only:T.a2};
+                const typeEnabled=(s.processing_enabled_by_type||{})[qTypeT]!==false;
+                const masterOn=s.processing_enabled;
+                const c=colors[qTypeT]||T.ac;
+                const lbl=labels[qTypeT]||qTypeT;
+                return <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,marginBottom:10,padding:'10px 14px',background:T.card,borderRadius:10,border:`1px solid ${T.bd}`,flexWrap:'wrap'}}>
+                    <div style={{display:'flex',alignItems:'center',gap:10}}>
+                        <span style={{fontSize:11,color:T.t2,textTransform:'uppercase',letterSpacing:'0.5px',fontWeight:600}}>{lbl} Pipeline</span>
+                        <span style={{fontSize:12,fontWeight:700,color:typeEnabled&&masterOn?T.ok:T.wn,padding:'3px 10px',borderRadius:12,background:typeEnabled&&masterOn?`${T.ok}1a`:`${T.wn}1a`}}>
+                            {!masterOn?'⏸ Master paused':typeEnabled?'▶ Active':'⏸ Paused'}
+                        </span>
+                        {!masterOn&&typeEnabled&&<span style={{fontSize:11,color:T.t2}}>(starting will also resume the master switch)</span>}
+                    </div>
+                    <div style={{display:'flex',gap:6}}>
+                        {(!typeEnabled||!masterOn)
+                            ? <button onClick={async()=>{await post('/queue/start/'+qTypeT);toast(lbl+' pipeline started','success');rD();}} style={{background:`${T.ok}1a`,border:`1px solid ${T.ok}55`,borderRadius:8,padding:'7px 16px',cursor:'pointer',color:T.ok,fontSize:12,fontWeight:700,display:'flex',alignItems:'center',gap:5}}><I n="play" s={13}/> Start {lbl}</button>
+                            : <button onClick={async()=>{await post('/queue/pause/'+qTypeT);toast(lbl+' pipeline paused','info');rD();}} style={{background:`${T.wn}1a`,border:`1px solid ${T.wn}55`,borderRadius:8,padding:'7px 16px',cursor:'pointer',color:T.wn,fontSize:12,fontWeight:700,display:'flex',alignItems:'center',gap:5}}>⏸ Pause {lbl}</button>
+                        }
+                    </div>
+                </div>;
+            })()}
+
+            {/* STATUS SUB-TABS — scoped to selected job type */}
             <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:10,flexWrap:'wrap',gap:8}}>
-                <div style={{display:'flex',gap:4,flexWrap:'wrap'}}>
-                    {[['pending','Health Check',T.in,gc('pending')],['queued','Queued',T.t3,totalQ],['processing','Processing',T.ac,gc('processing')],['complete','Complete',T.ok,gc('complete')],['error','Errored',T.er,gc('error')],['skipped','Skipped',T.t2,gc('skipped')],['cancelled','Cancelled',T.wn,gc('cancelled')],['all','Job History',T.in,0]].map(([k,l,c,n])=>
-                        <button key={k} onClick={()=>setQTab(k)} style={{padding:'8px 16px',borderRadius:6,border:'none',cursor:'pointer',fontSize:13,fontWeight:600,background:qTab===k?`${c}22`:T.card,color:qTab===k?c:T.t2,display:'flex',alignItems:'center',gap:5}}>
-                            {l}{n>0&&<span className="mono" style={{fontSize:11,fontWeight:700,padding:'2px 7px',borderRadius:8,background:`${c}22`,color:c}}>{n}</span>}
-                        </button>)}
+                <div style={{display:'flex',gap:3,flexWrap:'wrap'}}>
+                    {[['pending','Health Check',T.in],['queued','Queued',T.t3],['processing','Processing',T.ac],['complete','Complete',T.ok],['error','Errored',T.er],['skipped','Skipped',T.t2],['cancelled','Cancelled',T.wn],['all','Job History',T.in]].map(([k,l,c])=>{
+                        const n=k==='queued'?(gcType(qTypeT,'queued')+gcType(qTypeT,'pending')):k==='all'?0:gcType(qTypeT,k);
+                        return <button key={k} onClick={()=>setQTab(k)} style={{padding:'6px 14px',borderRadius:6,border:'none',cursor:'pointer',fontSize:12,fontWeight:600,background:qTab===k?`${c}22`:T.card,color:qTab===k?c:T.t2,display:'flex',alignItems:'center',gap:5}}>
+                            {l}{n>0&&<span className="mono" style={{fontSize:10,fontWeight:700,padding:'1px 6px',borderRadius:8,background:`${c}22`,color:c}}>{n}</span>}
+                        </button>;
+                    })}
                 </div>
-                <div style={{display:'flex',gap:6}}>
-                    {qTab==='error'&&gc('error')>0&&
-                        <button onClick={async()=>{const r=await post('/queue/requeue-errors');toast(`Requeued ${r?.count||'all'} errors`,'success');rQ();rD();setTimeout(()=>{rQ();rD();},500);}} style={{fontSize:12,background:`${T.in}15`,border:`1px solid ${T.in}33`,borderRadius:6,padding:'6px 14px',cursor:'pointer',color:T.in,fontWeight:700,display:'flex',alignItems:'center',gap:4}}><I n="refresh" s={13}/> Requeue All Errors</button>}
-                    {['complete','error','skipped','cancelled'].includes(qTab)&&items.length>0&&
-                        <button onClick={()=>{doAct('/queue/clear/'+qTab);toast('Cleared','info')}} style={{fontSize:12,background:`${T.er}15`,border:`1px solid ${T.er}33`,borderRadius:6,padding:'6px 14px',cursor:'pointer',color:T.er,fontWeight:600}}>Clear All</button>}
-                </div>
+                {qTab==='error'&&items.length>0&&<div style={{display:'flex',gap:6}}>
+                    <button onClick={async()=>{const r=await post('/queue/requeue-status/error',{job_type:qTypeT});toast(`Requeued ${r?.count||0} files`,'success');rQ();rD();}} style={{fontSize:11,background:`${T.ok}15`,border:`1px solid ${T.ok}44`,borderRadius:6,padding:'5px 12px',cursor:'pointer',color:T.ok,fontWeight:600,display:'flex',alignItems:'center',gap:4}}><I n="refresh" s={12}/> Requeue All Errored</button>
+                    <button onClick={()=>{doAct('/queue/clear/'+qTab);toast('Cleared','info')}} style={{fontSize:11,background:`${T.er}15`,border:`1px solid ${T.er}33`,borderRadius:6,padding:'5px 12px',cursor:'pointer',color:T.er,fontWeight:600}}>Clear All</button>
+                </div>}
+                {['complete','skipped','cancelled'].includes(qTab)&&items.length>0&&
+                    <button onClick={()=>{doAct('/queue/clear/'+qTab);toast('Cleared','info')}} style={{fontSize:11,background:`${T.er}15`,border:`1px solid ${T.er}33`,borderRadius:6,padding:'5px 12px',cursor:'pointer',color:T.er,fontWeight:600}}>Clear All</button>}
             </div>
 
             {/* SEARCH + FILTERS */}
             <div style={{display:'flex',gap:8,marginBottom:8,flexWrap:'wrap',alignItems:'center'}}>
                 <div style={{display:'flex',alignItems:'center',gap:5,background:T.card,borderRadius:6,padding:'6px 12px',border:`1px solid ${T.bd}`,flex:1,minWidth:160}}>
                     <I n="search" s={14} c={T.t2}/>
-                    <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search files..." style={{background:'none',border:'none',outline:'none',color:T.tx,fontSize:14,width:'100%'}}/>
+                    <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search files..." style={{background:'none',border:'none',outline:'none',color:T.tx,fontSize:13,width:'100%'}}/>
                 </div>
                 <select value={hdrF} onChange={e=>setHdrF(e.target.value)} style={{background:T.card,border:`1px solid ${T.bd}`,borderRadius:6,padding:'7px 12px',color:T.t3,fontSize:12,cursor:'pointer'}}>
                     <option value="all">All HDR</option><option value="DoVi">DoVi</option><option value="HDR10">HDR10</option><option value="HDR10+">HDR10+</option><option value="SDR">SDR</option>
@@ -766,10 +744,10 @@ function App(){
             {/* COLUMN HEADERS + FILTER ROW */}
             <div style={{background:T.card,borderRadius:'10px 10px 0 0',border:`1px solid ${T.bd}`,borderBottom:'none'}}>
                 {qTab==='all'?
-                    <div style={{display:'grid',gridTemplateColumns:'36px 70px 70px 70px 1fr 70px 70px 70px 70px 70px 60px',gap:4,padding:'8px 10px',fontSize:11,fontWeight:600,color:T.t2,textTransform:'uppercase',borderBottom:`1px solid ${T.bd}`}}>
+                    <div style={{display:'grid',gridTemplateColumns:'36px 70px 70px 70px 1fr 70px 70px 70px 70px 70px 60px',gap:4,padding:'8px 10px',fontSize:10,fontWeight:600,color:T.t2,textTransform:'uppercase',borderBottom:`1px solid ${T.bd}`}}>
                         <span>#</span><span>Type</span><span>Library</span><span>Time</span><span>File</span><span>Status</span><span>Node</span><span>Start</span><span>End</span><span>Ratio</span><span>Report</span>
                     </div>:
-                    <div style={{display:'grid',gridTemplateColumns:'36px 70px 80px 1fr 60px 60px 80px 50px 50px 36px 80px',gap:4,padding:'8px 10px',fontSize:11,fontWeight:600,color:T.t2,textTransform:'uppercase',borderBottom:`1px solid ${T.bd}`}}>
+                    <div style={{display:'grid',gridTemplateColumns:'36px 70px 80px 1fr 60px 60px 80px 50px 50px 36px 80px',gap:4,padding:'8px 10px',fontSize:10,fontWeight:600,color:T.t2,textTransform:'uppercase',borderBottom:`1px solid ${T.bd}`}}>
                         <span>#</span><span>Library</span><span>Time</span><span>File</span><span>Codec</span><span>Res</span><span>Size</span><span>Bump</span><span>Skip</span><span></span><span>Actions</span>
                     </div>}
                 {/* Column filter row */}
@@ -794,7 +772,7 @@ function App(){
                             <span className="mono" style={{color:T.t2,fontSize:10}}>{(page-1)*perPage+idx+1}</span>
                             <span style={{fontSize:10,color:T.t2}}>{item.has_dovi?'Transcode':'Health'}</span>
                             <span style={{fontSize:10,color:T.t2,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{item.library_name||'--'}</span>
-                            <span className="mono" style={{fontSize:10,color:T.t2}}>{fmtTime(item.created_at,'short')}</span>
+                            <span className="mono" style={{fontSize:9,color:T.t2}}>{(item.created_at||'').slice(5,16)}</span>
                             <span style={{color:T.t1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',fontWeight:500}}>{showPaths?item.file_path:item.file_name}</span>
                             <span style={{color:stC,fontWeight:600,fontSize:10}}>{(item.status||'').replace(/_/g,' ')}</span>
                             <span style={{fontSize:10,color:T.t2}}>{item.worker_id||'--'}</span>
@@ -809,49 +787,50 @@ function App(){
                     return <div key={item.id} onClick={()=>setSelFile(item)} style={{display:'grid',gridTemplateColumns:'36px 70px 80px 1fr 60px 60px 80px 50px 50px 36px 80px',gap:4,padding:'9px 10px',alignItems:'center',borderBottom:`1px solid ${T.bd}`,cursor:'pointer',background:idx%2===0?'transparent':T.card,fontSize:12}} onMouseEnter={e=>e.currentTarget.style.background=T.ac+'08'} onMouseLeave={e=>e.currentTarget.style.background=idx%2===0?'transparent':T.card}>
                         <span className="mono" style={{color:T.t2,fontSize:10}}>{(page-1)*perPage+idx+1}</span>
                         <span style={{fontSize:10,color:T.t2,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{item.library_name||'--'}</span>
-                        <span className="mono" style={{fontSize:10,color:T.t2}}>{fmtTime(item.created_at,'short')}</span>
+                        <span className="mono" style={{fontSize:9,color:T.t2}}>{(item.created_at||'').slice(5,16)}</span>
                         <div style={{minWidth:0}}>
                             <div style={{display:'flex',alignItems:'center',gap:5}}>
                                 <span style={{fontWeight:500,color:T.t1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{showPaths?item.file_path:item.file_name}</span>
-                                <span className="mono" style={{fontSize:10,fontWeight:700,padding:'2px 5px',borderRadius:3,color:h.c,background:h.b,flexShrink:0}}>{item.hdr_type}{item.dovi_profile?' P'+item.dovi_profile:''}</span>
-                                {item.health_status==='healthy'&&<span style={{fontSize:10,fontWeight:600,padding:'1px 6px',borderRadius:3,color:T.ok,background:T.ok+'18',display:'flex',alignItems:'center',gap:2,flexShrink:0}}>&#10003; Healthy</span>}
-                                {item.health_status==='checking'&&<span style={{fontSize:10,fontWeight:600,padding:'1px 6px',borderRadius:3,color:T.in,background:T.in+'18',flexShrink:0}}>Checking...</span>}
-                                {item.health_status==='pending'&&<span style={{fontSize:10,fontWeight:600,padding:'1px 6px',borderRadius:3,color:T.t2,background:T.t2+'18',flexShrink:0}}>Pending</span>}
-                                {item.health_status&&!['healthy','checking','pending'].includes(item.health_status)&&<span style={{fontSize:10,fontWeight:600,padding:'1px 6px',borderRadius:3,color:T.er,background:T.er+'18',flexShrink:0}}>&#10007; {item.health_status}</span>}
-                                {item.status!=='queued'&&<span style={{fontSize:10,fontWeight:600,padding:'1px 5px',borderRadius:3,color:stC,background:stC+'18'}}>{item.status}</span>}
+                                <span className="mono" style={{fontSize:9,fontWeight:700,padding:'2px 5px',borderRadius:3,color:h.c,background:h.b,flexShrink:0}}>{item.hdr_type}{item.dovi_profile?' P'+item.dovi_profile:''}</span>
+                                {item.health_status==='healthy'&&<span style={{fontSize:9,fontWeight:600,padding:'1px 6px',borderRadius:3,color:T.ok,background:T.ok+'18',display:'flex',alignItems:'center',gap:2,flexShrink:0}}>&#10003; Healthy</span>}
+                                {item.health_status==='checking'&&<span style={{fontSize:9,fontWeight:600,padding:'1px 6px',borderRadius:3,color:T.in,background:T.in+'18',flexShrink:0}}>Checking...</span>}
+                                {item.health_status==='pending'&&<span style={{fontSize:9,fontWeight:600,padding:'1px 6px',borderRadius:3,color:T.t2,background:T.t2+'18',flexShrink:0}}>Pending</span>}
+                                {item.health_status&&!['healthy','checking','pending'].includes(item.health_status)&&<span style={{fontSize:9,fontWeight:600,padding:'1px 6px',borderRadius:3,color:T.er,background:T.er+'18',flexShrink:0}}>&#10007; {item.health_status}</span>}
+                                {item.status!=='queued'&&<span style={{fontSize:9,fontWeight:600,padding:'1px 5px',borderRadius:3,color:stC,background:stC+'18'}}>{item.status}</span>}
+                                {item.skipped_reason&&<span style={{fontSize:9,fontWeight:600,padding:'1px 6px',borderRadius:3,color:T.in,background:T.in+'18',flexShrink:0}}>{item.skipped_reason}</span>}
                             </div>
                             {item.status==='processing'&&<div style={{marginTop:3,display:'flex',alignItems:'center',gap:5}}>
                                 <div style={{flex:1,height:4,borderRadius:2,background:T.t2+'20',overflow:'hidden'}}><div style={{width:(item.progress||0)+'%',height:'100%',background:T.ac,borderRadius:2}}/></div>
-                                <span className="mono" style={{fontSize:10,color:T.ac}}>{(item.progress||0).toFixed(0)}%</span>
+                                <span className="mono" style={{fontSize:9,color:T.ac}}>{(item.progress||0).toFixed(0)}%</span>
                             </div>}
                             {item.health_status==='checking'&&<div style={{marginTop:3,display:'flex',alignItems:'center',gap:5}}>
                                 <div style={{flex:1,height:3,borderRadius:2,background:T.t2+'20',overflow:'hidden'}}><div style={{width:'60%',height:'100%',background:T.in,borderRadius:2,backgroundImage:'linear-gradient(45deg,rgba(255,255,255,.15) 25%,transparent 25%,transparent 50%,rgba(255,255,255,.15) 50%,rgba(255,255,255,.15) 75%,transparent 75%)',backgroundSize:'30px 30px',animation:'barStripe 1s linear infinite'}}/></div>
-                                <span style={{fontSize:10,color:T.in}}>{item.current_step||'Health check...'}</span>
+                                <span style={{fontSize:9,color:T.in}}>{item.current_step||'Health check...'}</span>
                             </div>}
                         </div>
                         <span className="mono" style={{fontSize:10,color:T.t2}}>{item.video_codec||'--'}</span>
                         <span className="mono" style={{fontSize:10,color:T.t2}}>{item.resolution||'--'}</span>
                         <div>
                             <span className="mono" style={{fontSize:11,color:T.t3}}>{(item.file_size_gb||0).toFixed(1)} GB</span>
-                            {item.output_size_gb!=null&&<div className="mono" style={{fontSize:10,color:T.ok}}>{'→'}{item.output_size_gb.toFixed(1)} GB</div>}
-                            {item.reduction_pct!=null&&item.reduction_pct>0&&<div className="mono" style={{fontSize:10,color:T.ac}}>T{item.reduction_pct.toFixed(0)}% C{(100-item.reduction_pct).toFixed(0)}%</div>}
+                            {item.output_size_gb!=null&&<div className="mono" style={{fontSize:9,color:T.ok}}>{'→'}{item.output_size_gb.toFixed(1)} GB</div>}
+                            {item.reduction_pct!=null&&item.reduction_pct>0&&<div className="mono" style={{fontSize:9,color:T.ac}}>T{item.reduction_pct.toFixed(0)}% C{(100-item.reduction_pct).toFixed(0)}%</div>}
                         </div>
                         <div onClick={e=>e.stopPropagation()}>
                             {['queued','pending'].includes(item.status)?<div style={{display:'flex',flexDirection:'column',gap:1}}>
-                                <button onClick={()=>{toast('Bumped up','info');post('/queue/'+item.id+'/bump',{direction:'up'}).then(()=>{rQ();setTimeout(rQ,500)})}} style={{background:'none',border:'none',cursor:'pointer',color:T.t3,padding:0,lineHeight:0}}><I n="up" s={14}/></button>
-                                <button onClick={()=>{toast('Bumped down','info');post('/queue/'+item.id+'/bump',{direction:'down'}).then(()=>{rQ();setTimeout(rQ,500)})}} style={{background:'none',border:'none',cursor:'pointer',color:T.t3,padding:0,lineHeight:0}}><I n="down" s={14}/></button>
+                                <button onClick={async()=>{await post('/queue/'+item.id+'/bump',{direction:'up'});rQ();toast('Bumped up','info')}} style={{background:'none',border:'none',cursor:'pointer',color:T.t3,padding:0,lineHeight:0}}><I n="up" s={14}/></button>
+                                <button onClick={async()=>{await post('/queue/'+item.id+'/bump',{direction:'down'});rQ();toast('Bumped down','info')}} style={{background:'none',border:'none',cursor:'pointer',color:T.t3,padding:0,lineHeight:0}}><I n="down" s={14}/></button>
                             </div>:<span/>}
                         </div>
                         <div onClick={e=>e.stopPropagation()}>
-                            {['queued','pending'].includes(item.status)?<button onClick={()=>{toast('Skipped','info');post('/queue/'+item.id+'/skip',{reason:'Not needed'}).then(()=>{rQ();rD()})}} style={{background:T.wn+'12',border:'none',borderRadius:4,padding:'2px 6px',cursor:'pointer',color:T.wn,fontSize:11,fontWeight:600}}>~</button>:<span/>}
+                            {['queued','pending'].includes(item.status)?<button onClick={async()=>{await post('/queue/'+item.id+'/skip',{reason:'Not needed'});rQ();rD();toast('Skipped','info')}} style={{background:T.wn+'12',border:'none',borderRadius:4,padding:'2px 6px',cursor:'pointer',color:T.wn,fontSize:10,fontWeight:600}}>~</button>:<span/>}
                         </div>
                         <div onClick={e=>e.stopPropagation()}>
                             <button onClick={()=>setSelFile({...item,_tab:'log'})} style={{background:T.in+'08',border:'none',borderRadius:4,padding:'3px',cursor:'pointer',color:T.in}}><I n="log" s={12}/></button>
                         </div>
                         <div style={{display:'flex',gap:2}} onClick={e=>e.stopPropagation()}>
-                            {item.status==='complete'&&!item.accepted&&<button onClick={()=>{toast('Accepted','success');post('/queue/'+item.id+'/accept').then(()=>{rQ();rD()})}} style={{background:T.ok+'12',border:'none',borderRadius:3,padding:'2px 6px',cursor:'pointer',color:T.ok,fontSize:11,fontWeight:600}}>Accept</button>}
-                            {['error','skipped','cancelled'].includes(item.status)&&<button onClick={()=>{toast('Requeued','success');post('/queue/'+item.id+'/requeue').then(()=>{rQ();rD()})}} style={{background:T.in+'12',border:'none',borderRadius:3,padding:'2px 6px',cursor:'pointer',color:T.in,fontSize:11,fontWeight:600}}>Requeue</button>}
-                            {['complete','error','skipped','cancelled'].includes(item.status)&&<button onClick={()=>{del('/queue/'+item.id).then(()=>{rQ();rD()})}} style={{background:'none',border:'none',cursor:'pointer',color:T.t2,padding:2}}><I n="x" s={12}/></button>}
+                            {item.status==='complete'&&!item.accepted&&<button onClick={async()=>{await post('/queue/'+item.id+'/accept');rQ();rD();toast('Accepted','success')}} style={{background:T.ok+'12',border:'none',borderRadius:3,padding:'2px 6px',cursor:'pointer',color:T.ok,fontSize:10,fontWeight:600}}>Accept</button>}
+                            {['error','skipped','cancelled'].includes(item.status)&&<button onClick={async()=>{await post('/queue/'+item.id+'/requeue');rQ();rD();toast('Requeued','success')}} style={{background:T.in+'12',border:'none',borderRadius:3,padding:'2px 6px',cursor:'pointer',color:T.in,fontSize:10,fontWeight:600}}>Requeue</button>}
+                            {['complete','error','skipped','cancelled'].includes(item.status)&&<button onClick={async()=>{await del('/queue/'+item.id);rQ();rD();}} style={{background:'none',border:'none',cursor:'pointer',color:T.t2,padding:2}}><I n="x" s={12}/></button>}
                         </div>
                     </div>;})}
                 {pageItems.length===0&&<div style={{padding:36,textAlign:'center',color:T.t2,fontSize:14}}>No items in {qTab}</div>}
@@ -873,7 +852,7 @@ function App(){
 
         {/*═══ STATS ═══*/}
         {tab==='stats'&&<div>
-            <h1 style={{fontSize:24,fontWeight:700,color:T.t1,marginBottom:18}}>Statistics</h1>
+            <h1 style={{fontSize:20,fontWeight:700,color:T.t1,marginBottom:18}}>Statistics</h1>
             <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:16,marginBottom:20}}>
                 {/* HDR Distribution */}
                 <div style={{background:T.card,borderRadius:10,padding:'18px 20px',border:`1px solid ${T.bd}`}}>
@@ -936,49 +915,6 @@ function App(){
                     </div>
                 </div>
             </div>
-            {/* Container & Codec Distribution */}
-            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16,marginBottom:20}}>
-                {/* Container Format */}
-                <div style={{background:T.card,borderRadius:10,padding:'18px 20px',border:`1px solid ${T.bd}`}}>
-                    <div style={{fontSize:13,fontWeight:600,color:T.t3,marginBottom:14}}>Container Format</div>
-                    {(()=>{const cs=s.container_stats||{};const total=Object.values(cs).reduce((a,b)=>a+b,0)||1;const entries=Object.entries(cs).sort((a,b)=>b[1]-a[1]);
-                        const colors=['#E040FB','#7C4DFF','#29B6F6','#FF9100','#66BB6A','#EF5350','#FFB74D','#00E5FF'];
-                        let offset=0;const segs=entries.map(([type,count],i)=>{const pct=count/total*100;const len=pct*2.51327;const gap=251.327-len;const seg={type,count,pct,offset,len,gap,color:colors[i%colors.length]};offset+=len;return seg;});
-                        return <div style={{display:'flex',alignItems:'center',gap:20}}>
-                            <svg width={100} height={100} viewBox="0 0 100 100"><circle cx="50" cy="50" r="40" fill="none" stroke={T.bd} strokeWidth="12"/>
-                                {segs.map((sg,i)=><circle key={i} cx="50" cy="50" r="40" fill="none" stroke={sg.color} strokeWidth="12" strokeDasharray={sg.len+' '+sg.gap} strokeDashoffset={-sg.offset} transform="rotate(-90 50 50)"/>)}
-                                <text x="50" y="50" textAnchor="middle" dominantBaseline="middle" fill={T.t1} fontSize="16" fontWeight="700" fontFamily="'JetBrains Mono'">{total}</text>
-                            </svg>
-                            <div>{entries.map(([type,count],i)=><div key={type} style={{display:'flex',alignItems:'center',gap:6,marginBottom:4}}>
-                                <div style={{width:10,height:10,borderRadius:2,background:colors[i%colors.length]}}/>
-                                <span style={{fontSize:12,color:T.t3,flex:1}}>{type}</span>
-                                <span className="mono" style={{fontSize:12,fontWeight:600,color:T.t1}}>{count}</span>
-                                <span className="mono" style={{fontSize:10,color:T.t2}}>{(count/total*100).toFixed(0)}%</span>
-                            </div>)}</div>
-                        </div>;
-                    })()}
-                </div>
-                {/* Codec Distribution */}
-                <div style={{background:T.card,borderRadius:10,padding:'18px 20px',border:`1px solid ${T.bd}`}}>
-                    <div style={{fontSize:13,fontWeight:600,color:T.t3,marginBottom:14}}>Video Codec</div>
-                    {(()=>{const cs=s.codec_stats||{};const total=Object.values(cs).reduce((a,b)=>a+b,0)||1;const entries=Object.entries(cs).sort((a,b)=>b[1]-a[1]);
-                        const colors=['#7C4DFF','#E040FB','#FF9100','#29B6F6','#66BB6A','#EF5350','#FFB74D','#00E5FF'];
-                        let offset=0;const segs=entries.map(([type,count],i)=>{const pct=count/total*100;const len=pct*2.51327;const gap=251.327-len;const seg={type,count,pct,offset,len,gap,color:colors[i%colors.length]};offset+=len;return seg;});
-                        return <div style={{display:'flex',alignItems:'center',gap:20}}>
-                            <svg width={100} height={100} viewBox="0 0 100 100"><circle cx="50" cy="50" r="40" fill="none" stroke={T.bd} strokeWidth="12"/>
-                                {segs.map((sg,i)=><circle key={i} cx="50" cy="50" r="40" fill="none" stroke={sg.color} strokeWidth="12" strokeDasharray={sg.len+' '+sg.gap} strokeDashoffset={-sg.offset} transform="rotate(-90 50 50)"/>)}
-                                <text x="50" y="50" textAnchor="middle" dominantBaseline="middle" fill={T.t1} fontSize="16" fontWeight="700" fontFamily="'JetBrains Mono'">{total}</text>
-                            </svg>
-                            <div>{entries.map(([type,count],i)=><div key={type} style={{display:'flex',alignItems:'center',gap:6,marginBottom:4}}>
-                                <div style={{width:10,height:10,borderRadius:2,background:colors[i%colors.length]}}/>
-                                <span className="mono" style={{fontSize:12,color:T.t3,flex:1}}>{type}</span>
-                                <span className="mono" style={{fontSize:12,fontWeight:600,color:T.t1}}>{count}</span>
-                                <span className="mono" style={{fontSize:10,color:T.t2}}>{(count/total*100).toFixed(0)}%</span>
-                            </div>)}</div>
-                        </div>;
-                    })()}
-                </div>
-            </div>
             {/* Libraries Breakdown */}
             <div style={{background:T.card,borderRadius:10,padding:'18px 20px',border:`1px solid ${T.bd}`,marginBottom:16}}>
                 <div style={{fontSize:13,fontWeight:600,color:T.t3,marginBottom:14}}>Libraries</div>
@@ -1011,7 +947,7 @@ function App(){
         {/*═══ LIBRARIES ═══*/}
         {tab==='libraries'&&<div>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:18}}>
-                <h1 style={{fontSize:24,fontWeight:700,color:T.t1}}>Libraries</h1>
+                <h1 style={{fontSize:20,fontWeight:700,color:T.t1}}>Libraries</h1>
                 <button onClick={()=>doAct('/libraries/scan-all')} style={{background:`${T.ac}18`,border:`1px solid ${T.ac}44`,borderRadius:8,padding:'8px 16px',cursor:'pointer',color:T.ac,fontSize:13,fontWeight:600,display:'flex',alignItems:'center',gap:5}}><I n="refresh" s={14}/> Scan All</button>
             </div>
             <div style={{background:T.card,borderRadius:10,padding:'16px 20px',marginBottom:18,border:`1px solid ${T.bd}`,display:'flex',gap:12,alignItems:'flex-end'}}>
@@ -1020,30 +956,42 @@ function App(){
                 <button onClick={()=>{if(newLib.name&&newLib.path){doAct('/libraries',newLib);setNewLib({name:'',path:''})}}} style={{background:`${T.ac}18`,border:`1px solid ${T.ac}44`,borderRadius:8,padding:'9px 18px',cursor:'pointer',color:T.ac,fontSize:13,fontWeight:600,whiteSpace:'nowrap'}}>+ Add</button>
             </div>
             {(libs||[]).map(lib=>{const sp=s.scan_progress?.[lib.id];const scanning=sp?.status==='scanning';const pct=sp?Math.round(sp.scanned/Math.max(sp.total,1)*100):0;
+                const sprc=s.scan_progress?.['remuxclean_'+lib.id];const scanningRC=sprc?.status==='scanning';const pctRC=sprc?Math.round(sprc.scanned/Math.max(sprc.total,1)*100):0;
+                const spdv=s.scan_progress?.['dv78only_'+lib.id];const scanningDV=spdv?.status==='scanning';const pctDV=spdv?Math.round(spdv.scanned/Math.max(spdv.total,1)*100):0;
+                const spsg=s.scan_progress?.['subgen_'+lib.id];const scanningSG=spsg?.status==='scanning';const pctSG=spsg?Math.round(spsg.scanned/Math.max(spsg.total,1)*100):0;
                 return <div key={lib.id} style={{borderRadius:10,marginBottom:10,border:`1px solid ${T.bd}`,overflow:'hidden',position:'relative'}}>
                     {scanning&&<div style={{position:'absolute',bottom:0,left:0,height:4,width:`${pct}%`,background:T.ac,transition:'width 0.5s'}}/>}
+                    {scanningRC&&<div style={{position:'absolute',bottom:0,left:0,height:4,width:`${pctRC}%`,background:T.in,transition:'width 0.5s'}}/>}
+                    {scanningDV&&<div style={{position:'absolute',bottom:0,left:0,height:4,width:`${pctDV}%`,background:T.a2,transition:'width 0.5s'}}/>}
+                    {scanningSG&&<div style={{position:'absolute',bottom:0,left:0,height:4,width:`${pctSG}%`,background:T.ok,transition:'width 0.5s'}}/>}
                     <div style={{background:T.card,padding:'16px 20px'}}>
                         <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start'}}>
                             <div style={{flex:1}}>
                                 <div style={{fontSize:16,fontWeight:600,color:T.t1,marginBottom:3}}>{lib.name}</div>
                                 <div className="mono" style={{fontSize:12,color:T.t2}}>{lib.path}</div>
                                 {scanning&&<div style={{fontSize:12,color:T.ac,marginTop:5}}>Scanning: {sp.current_file} ({pct}%) · ETA: {sp.eta}</div>}
+                                {scanningRC&&<div style={{fontSize:12,color:T.in,marginTop:5}}>Cleanup scan: {sprc.current_file} ({pctRC}%) · ETA: {sprc.eta}</div>}
+                                {scanningDV&&<div style={{fontSize:12,color:T.a2,marginTop:5}}>DV7→8 scan: {spdv.current_file} ({pctDV}%) · ETA: {spdv.eta}</div>}
+                                {scanningSG&&<div style={{fontSize:12,color:T.ok,marginTop:5}}>SubGen scan: {spsg.current_file} ({pctSG}%) · ETA: {spsg.eta}</div>}
                                 <div style={{display:'flex',gap:6,marginTop:10,flexWrap:'wrap'}}>
                                     <span style={{fontSize:12,color:T.t3}}>Status: <span style={{color:lib.status==='scanned'?T.ok:T.t3,fontWeight:600}}>{lib.status||'idle'}</span></span>
-                                    {lib.last_scanned&&<span style={{fontSize:11,color:T.t2}}>Last scan: {fmtTime(lib.last_scanned,'full')}</span>}
+                                    {lib.last_scanned&&<span style={{fontSize:11,color:T.t2}}>Last scan: {lib.last_scanned}</span>}
                                 </div>
                                 {/* Library Processing Options */}
                                 <div style={{display:'flex',gap:6,marginTop:10,flexWrap:'wrap'}}>
-                                    <button onClick={()=>doAct('/libraries/'+lib.id+'/scan')} disabled={scanning} style={{background:`${T.ok}12`,border:`1px solid ${T.ok}33`,borderRadius:6,padding:'6px 12px',cursor:scanning?'default':'pointer',color:T.ok,fontSize:12,fontWeight:600,opacity:scanning?0.5:1,display:'flex',alignItems:'center',gap:4}}><I n="refresh" s={12}/> Scan (New Files Only)</button>
-                                    <button onClick={async()=>{if(confirm('Fresh scan will clear all existing queue items for "'+lib.name+'" and rescan everything.\n\nProceed?')){await post('/queue/clear-library',{library_id:lib.id});await doAct('/libraries/'+lib.id+'/scan');toast('Fresh scan started — queue cleared','info');rL();}}} disabled={scanning} style={{background:`${T.ac}12`,border:`1px solid ${T.ac}33`,borderRadius:6,padding:'6px 12px',cursor:'pointer',color:T.ac,fontSize:12,fontWeight:600,display:'flex',alignItems:'center',gap:4}}><I n="refresh" s={12}/> Fresh Scan</button>
+                                    <button onClick={()=>doAct('/libraries/'+lib.id+'/scan')} disabled={scanning} style={{background:`${T.ok}12`,border:`1px solid ${T.ok}33`,borderRadius:6,padding:'6px 12px',cursor:scanning?'default':'pointer',color:T.ok,fontSize:11,fontWeight:600,opacity:scanning?0.5:1,display:'flex',alignItems:'center',gap:4}}><I n="refresh" s={12}/> Scan (Find New)</button>
+                                    <button onClick={async()=>{await del('/queue?library_id='+lib.id);await doAct('/libraries/'+lib.id+'/scan');toast('Fresh scan started','info')}} disabled={scanning} style={{background:`${T.ac}12`,border:`1px solid ${T.ac}33`,borderRadius:6,padding:'6px 12px',cursor:'pointer',color:T.ac,fontSize:11,fontWeight:600,display:'flex',alignItems:'center',gap:4}}><I n="refresh" s={12}/> Scan (Fresh)</button>
+                                    <button onClick={async()=>{await post('/libraries/'+lib.id+'/scan-remuxclean');toast('Cleanup scan started','info');rL();rD();}} disabled={scanningRC} style={{background:`${T.in}12`,border:`1px solid ${T.in}33`,borderRadius:6,padding:'6px 12px',cursor:scanningRC?'default':'pointer',color:T.in,fontSize:11,fontWeight:600,opacity:scanningRC?0.5:1,display:'flex',alignItems:'center',gap:4}}><I n="search" s={12}/> Scan for Cleanup</button>
+                                    <button onClick={async()=>{await post('/libraries/'+lib.id+'/scan-dv78only');toast('DV7→8 scan started','info');rL();rD();}} disabled={scanningDV} style={{background:`${T.a2}12`,border:`1px solid ${T.a2}33`,borderRadius:6,padding:'6px 12px',cursor:scanningDV?'default':'pointer',color:T.a2,fontSize:11,fontWeight:600,opacity:scanningDV?0.5:1,display:'flex',alignItems:'center',gap:4}}><I n="search" s={12}/> Scan for DV7→8</button>
+                                    <button onClick={async()=>{await post('/libraries/'+lib.id+'/scan-subgen');toast('SubGen scan started','info');rL();rD();}} disabled={scanningSG} style={{background:`${T.ok}12`,border:`1px solid ${T.ok}33`,borderRadius:6,padding:'6px 12px',cursor:scanningSG?'default':'pointer',color:T.ok,fontSize:11,fontWeight:600,opacity:scanningSG?0.5:1,display:'flex',alignItems:'center',gap:4}}><I n="search" s={12}/> Scan for Japanese Subs</button>
                                     <button onClick={()=>doAct('/libraries/'+lib.id+'/refresh')} style={{background:`${T.in}12`,border:`1px solid ${T.in}33`,borderRadius:6,padding:'6px 12px',cursor:'pointer',color:T.in,fontSize:11,fontWeight:600,display:'flex',alignItems:'center',gap:4}}><I n="refresh" s={12}/> Refresh</button>
-                                    <button onClick={async()=>{const r=await post('/queue/requeue-library',{library_id:lib.id});toast(`Requeued ${r?.count||'all'} items`,'info');rQ();rD();setTimeout(()=>{rQ();rD();},500);}} style={{background:`${T.wn}12`,border:`1px solid ${T.wn}33`,borderRadius:6,padding:'6px 12px',cursor:'pointer',color:T.wn,fontSize:11,fontWeight:600}}>Requeue All</button>
-                                    <button onClick={async()=>{if(confirm('Clear all queue items for '+lib.name+'?\n\nThis only removes items from the queue — your library and media files are NOT affected.')){await post('/queue/clear-library',{library_id:lib.id});toast('Library queue cleared','info');rQ();rD();rL();setTimeout(()=>{rQ();rD();rL();},500);}}} style={{background:`${T.er}12`,border:`1px solid ${T.er}33`,borderRadius:6,padding:'6px 12px',cursor:'pointer',color:T.er,fontSize:11,fontWeight:600}}>Clear Queue</button>
+                                    <button onClick={async()=>{const r=await post('/queue/requeue-library',{library_id:lib.id});toast('Requeued all items','info');rQ();rD();}} style={{background:`${T.wn}12`,border:`1px solid ${T.wn}33`,borderRadius:6,padding:'6px 12px',cursor:'pointer',color:T.wn,fontSize:11,fontWeight:600}}>Requeue All</button>
+                                    <button onClick={async()=>{if(confirm('Clear all queue items for '+lib.name+'?')){await post('/queue/clear-library',{library_id:lib.id});toast('Library queue cleared','info');rQ();rD();}}} style={{background:`${T.er}12`,border:`1px solid ${T.er}33`,borderRadius:6,padding:'6px 12px',cursor:'pointer',color:T.er,fontSize:11,fontWeight:600}}>Clear Library</button>
                                 </div>
                             </div>
                             <div style={{display:'flex',alignItems:'center',gap:12,flexShrink:0}}>
                                 <div style={{textAlign:'right'}}><div style={{fontSize:16,fontWeight:600,color:T.tx}}>{lib.file_count||0} <span style={{fontSize:11,fontWeight:400,color:T.t2}}>files</span></div><div style={{fontSize:12,color:T.t2}}>{(lib.total_size_gb||0).toFixed(1)} GB</div></div>
-                                <button onClick={()=>{if(confirm('DELETE library "'+lib.name+'" and remove all its queue items?\n\nThis removes the library from Byte Transcode. Your media files on disk are NOT affected.')){del('/libraries/'+lib.id).then(()=>{rL();rQ();rD();})}}} style={{background:`${T.er}10`,border:`1px solid ${T.er}30`,borderRadius:8,padding:'8px 10px',cursor:'pointer',color:T.er}}><I n="x" s={13}/></button>
+                                <button onClick={()=>{del('/libraries/'+lib.id);rL()}} style={{background:`${T.er}10`,border:`1px solid ${T.er}30`,borderRadius:8,padding:'8px 10px',cursor:'pointer',color:T.er}}><I n="x" s={13}/></button>
                             </div>
                         </div>
                     </div></div>;})}
@@ -1052,157 +1000,211 @@ function App(){
         {/*═══ SETTINGS ═══*/}
         {tab==='settings'&&lSettings&&<div>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:18}}>
-                <h1 style={{fontSize:24,fontWeight:700,color:T.t1}}>Settings</h1>
-                <div style={{fontSize:12,color:T.ok,display:'flex',alignItems:'center',gap:6}}><I n="check" s={14} c={T.ok}/> Auto-saving enabled</div>
+                <h1 style={{fontSize:20,fontWeight:700,color:T.t1}}>Settings</h1>
+                <button onClick={saveSt} style={{background:`linear-gradient(135deg,${T.ac},${T.a2})`,border:'none',borderRadius:10,padding:'10px 24px',color:'#fff',fontSize:14,fontWeight:700,cursor:'pointer'}}>Save Settings</button>
             </div>
-            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16}}>
-                {/* LEFT COLUMN */}
-                <div>
-                    {/* Transcode Settings */}
-                    <div style={{background:T.card,borderRadius:10,border:`1px solid ${T.bd}`,marginBottom:14,overflow:'hidden'}}>
-                        <div onClick={()=>setStSections(s=>({...s,transcode:!s.transcode}))} style={{padding:'14px 18px',cursor:'pointer',display:'flex',justifyContent:'space-between',alignItems:'center',borderBottom:stSections.transcode?`1px solid ${T.bd}`:'none'}}>
-                            <div style={{fontSize:14,fontWeight:700,color:T.t1}}>Transcode</div>
-                            <I n={stSections.transcode?'up':'down'} s={14} c={T.t3}/>
-                        </div>
-                        {stSections.transcode&&<div style={{padding:'14px 18px'}}>
-                            <SB T={T} title="Constant Quality (CQ)" desc="Lower = better quality, larger files. 16-20 recommended for 4K.">
-                                <div style={{display:'flex',justifyContent:'space-between',marginBottom:6}}><span style={{fontSize:12,color:T.t3}}>Quality</span><span className="mono" style={{fontSize:15,fontWeight:700,color:T.ac}}>{lSettings.cq}</span></div>
-                                <input type="range" min={10} max={30} value={lSettings.cq} onChange={e=>{setLS(s=>({...s,cq:e.target.value}));put('/settings',{cq:e.target.value})}} style={{width:'100%',background:`${T.t2}30`}}/>
-                            </SB>
-                            <SB T={T} title="NVENC Preset" desc="Slower = better quality at same file size.">
-                                <select value={lSettings.preset} onChange={e=>{setLS(s=>({...s,preset:e.target.value}));put('/settings',{preset:e.target.value});toast('Preset saved: '+e.target.value,'success')}} style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'10px 14px',color:T.tx,fontSize:14}}>
-                                    <option value="p7">P7 (Slowest) — best compression</option><option value="p6">P6 — very slow</option><option value="p5">P5 — slower</option><option value="p4">P4 — slow</option><option value="p3">P3 — medium</option><option value="p2">P2 — fast</option><option value="p1">P1 (Fastest) — lowest quality</option><option value="slow">slow (legacy)</option><option value="medium">medium (legacy)</option><option value="fast">fast (legacy)</option>
-                                </select></SB>
-                            <SB T={T} title="Output Codec"><select value={lSettings.output_codec||'hevc'} onChange={e=>{setLS(s=>({...s,output_codec:e.target.value}));put('/settings',{output_codec:e.target.value})}} style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'10px 14px',color:T.tx,fontSize:14}}>
-                                <option value="hevc">HEVC (H.265) — recommended</option><option value="h264">H.264 (AVC)</option><option value="av1">AV1</option></select></SB>
-                            <SB T={T} title="Hardware Encoder"><select value={lSettings.hw_encoder||'nvenc'} onChange={e=>{setLS(s=>({...s,hw_encoder:e.target.value}));put('/settings',{hw_encoder:e.target.value})}} style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'10px 14px',color:T.tx,fontSize:14}}>
-                                <option value="nvenc">NVENC (NVIDIA)</option><option value="qsv">QSV (Intel)</option><option value="vaapi">VAAPI (Linux)</option><option value="software">Software (x265)</option></select></SB>
-                            <SB T={T} title="Hardware Decoding" desc="Use GPU to decode source file."><label style={{display:'flex',alignItems:'center',gap:12,cursor:'pointer'}}><Tog on={(lSettings.hw_decode||'true')==='true'} onTog={()=>{const nv=lSettings.hw_decode==='true'?'false':'true';setLS(s=>({...s,hw_decode:nv}));put('/settings',{hw_decode:nv})}} T={T}/><span style={{fontSize:14,color:T.tx}}>{(lSettings.hw_decode||'true')==='true'?'Enabled':'Disabled'}</span></label></SB>
-                            <SB T={T} title="Max Workers"><input type="range" min={0} max={6} value={lSettings.max_workers} onChange={e=>{setLS(s=>({...s,max_workers:e.target.value}));put('/settings',{max_workers:e.target.value})}} style={{width:'100%',background:`${T.t2}30`}}/><div style={{display:'flex',justifyContent:'space-between',fontSize:12,marginTop:4}}><span style={{color:T.t2}}>0 = paused</span><span className="mono" style={{color:T.ac,fontWeight:700}}>{lSettings.max_workers}</span></div></SB>
-                            <SB T={T} title="Min File Size (GB)"><input type="range" min={0} max={100} step={5} value={lSettings.min_size_gb} onChange={e=>{setLS(s=>({...s,min_size_gb:e.target.value}));put('/settings',{min_size_gb:e.target.value})}} style={{width:'100%',background:`${T.t2}30`}}/><span className="mono" style={{fontSize:13,color:T.ac,fontWeight:700}}>{lSettings.min_size_gb} GB</span></SB>
-                        </div>}
-                    </div>
-                    {/* Notifications */}
-                    <div style={{background:T.card,borderRadius:10,border:`1px solid ${T.bd}`,marginBottom:14,overflow:'hidden'}}>
-                        <div onClick={()=>setStSections(s=>({...s,notify:!s.notify}))} style={{padding:'14px 18px',cursor:'pointer',display:'flex',justifyContent:'space-between',alignItems:'center',borderBottom:stSections.notify?`1px solid ${T.bd}`:'none'}}>
-                            <div style={{fontSize:14,fontWeight:700,color:T.t1}}>Notifications</div>
-                            <I n={stSections.notify?'up':'down'} s={14} c={T.t3}/>
-                        </div>
-                        {stSections.notify&&<div style={{padding:'14px 18px'}}>
-                            <SB T={T} title="ntfy.sh Notifications" desc="Push notifications when jobs complete or fail.">
-                                <label style={{display:'flex',alignItems:'center',gap:12,cursor:'pointer',marginBottom:10}}>
-                                    <Tog on={(lSettings.ntfy_enabled||'false')==='true'} onTog={()=>{const nv=lSettings.ntfy_enabled==='true'?'false':'true';setLS(s=>({...s,ntfy_enabled:nv}));put('/settings',{ntfy_enabled:nv})}} T={T}/>
-                                    <span style={{fontSize:14,color:T.tx}}>{(lSettings.ntfy_enabled||'false')==='true'?'Enabled':'Disabled'}</span>
-                                </label>
-                                <div style={{marginBottom:8}}>
-                                    <label style={{fontSize:11,color:T.t2,display:'block',marginBottom:4}}>ntfy Topic URL</label>
-                                    <input value={lSettings.ntfy_url||''} onChange={e=>setLS(s=>({...s,ntfy_url:e.target.value}))} onBlur={e=>put('/settings',{ntfy_url:e.target.value})} placeholder="https://ntfy.sh/byte-transcode-alerts" style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:6,padding:'10px 14px',color:T.tx,fontSize:13}}/>
-                                </div>
-                                <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:8}}>
-                                    {[['ntfy_on_complete','Job Complete','true'],['ntfy_on_error','Job Error','true'],['ntfy_on_scan','Scan Complete','false']].map(([k,l,def_])=>
-                                        <label key={k} style={{display:'flex',alignItems:'center',gap:4,fontSize:12,color:T.t3,cursor:'pointer'}}>
-                                            <input type="checkbox" checked={(lSettings[k]||def_)==='true'} onChange={e=>{const v=e.target.checked?'true':'false';setLS(s=>({...s,[k]:v}));put('/settings',{[k]:v})}} style={{accentColor:T.ac}}/> {l}
-                                        </label>)}
-                                </div>
-                                {lSettings.ntfy_url&&<button onClick={async()=>{try{await fetch(lSettings.ntfy_url,{method:'POST',body:'Byte Transcode test!'});toast('Test sent!','success')}catch(e){toast('Failed: '+e.message,'error')}}} style={{background:`${T.in}15`,border:`1px solid ${T.in}44`,borderRadius:6,padding:'6px 14px',cursor:'pointer',color:T.in,fontSize:12,fontWeight:600}}>Send Test</button>}
-                            </SB>
-                        </div>}
-                    </div>
-                </div>
-                {/* RIGHT COLUMN */}
-                <div>
-                    {/* Output Settings */}
-                    <div style={{background:T.card,borderRadius:10,border:`1px solid ${T.bd}`,marginBottom:14,overflow:'hidden'}}>
-                        <div onClick={()=>setStSections(s=>({...s,output:!s.output}))} style={{padding:'14px 18px',cursor:'pointer',display:'flex',justifyContent:'space-between',alignItems:'center',borderBottom:stSections.output?`1px solid ${T.bd}`:'none'}}>
-                            <div style={{fontSize:14,fontWeight:700,color:T.t1}}>Output</div>
-                            <I n={stSections.output?'up':'down'} s={14} c={T.t3}/>
-                        </div>
-                        {stSections.output&&<div style={{padding:'14px 18px'}}>
-                            <SB T={T} title="Container"><select value={lSettings.container} onChange={e=>{setLS(s=>({...s,container:e.target.value}));put('/settings',{container:e.target.value})}} style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'10px 14px',color:T.tx,fontSize:14}}><option value="mkv">MKV (recommended)</option><option value="mp4">MP4</option></select></SB>
-                            <SB T={T} title="DoVi P7 → P8"><label style={{display:'flex',alignItems:'center',gap:12,cursor:'pointer'}}><Tog on={lSettings.dovi_convert_p8==='true'} onTog={()=>{const nv=lSettings.dovi_convert_p8==='true'?'false':'true';setLS(s=>({...s,dovi_convert_p8:nv}));put('/settings',{dovi_convert_p8:nv})}} T={T}/><span style={{fontSize:14,color:T.tx}}>{lSettings.dovi_convert_p8==='true'?'Enabled':'Disabled'}</span></label></SB>
-                            <SB T={T} title="Replace Original"><label style={{display:'flex',alignItems:'center',gap:12,cursor:'pointer'}}><Tog on={lSettings.replace_original==='true'} onTog={()=>{const nv=lSettings.replace_original==='true'?'false':'true';setLS(s=>({...s,replace_original:nv}));put('/settings',{replace_original:nv})}} T={T}/><span style={{fontSize:14,color:T.tx}}>{lSettings.replace_original==='true'?'Replace originals':'Keep both (accept to replace)'}</span></label></SB>
-                            <SB T={T} title="Auto-Accept"><label style={{display:'flex',alignItems:'center',gap:12,cursor:'pointer'}}><Tog on={lSettings.auto_accept==='true'} onTog={()=>{const nv=lSettings.auto_accept==='true'?'false':'true';setLS(s=>({...s,auto_accept:nv}));put('/settings',{auto_accept:nv})}} T={T}/><span style={{fontSize:14,color:T.tx}}>{lSettings.auto_accept==='true'?'Enabled':'Manual review'}</span></label></SB>
-                            <SB T={T} title="Skip Transcoded"><label style={{display:'flex',alignItems:'center',gap:12,cursor:'pointer'}}><Tog on={lSettings.skip_transcoded==='true'} onTog={()=>{const nv=lSettings.skip_transcoded==='true'?'false':'true';setLS(s=>({...s,skip_transcoded:nv}));put('/settings',{skip_transcoded:nv})}} T={T}/><span style={{fontSize:14,color:T.tx}}>{lSettings.skip_transcoded==='true'?'Skip NVENC files':'Re-encode all'}</span></label></SB>
-                        </div>}
-                    </div>
-                    {/* Appearance */}
-                    <div style={{background:T.card,borderRadius:10,border:`1px solid ${T.bd}`,marginBottom:14,overflow:'hidden'}}>
-                        <div onClick={()=>setStSections(s=>({...s,appear:!s.appear}))} style={{padding:'14px 18px',cursor:'pointer',display:'flex',justifyContent:'space-between',alignItems:'center',borderBottom:stSections.appear?`1px solid ${T.bd}`:'none'}}>
-                            <div style={{fontSize:14,fontWeight:700,color:T.t1}}>Appearance</div>
-                            <I n={stSections.appear?'up':'down'} s={14} c={T.t3}/>
-                        </div>
-                        {stSections.appear&&<div style={{padding:'14px 18px'}}>
-                            <SB T={T} title="Theme"><div style={{display:'flex',gap:10}}>{Object.entries(TH).map(([k,t])=><button key={k} onClick={()=>{setTheme(k);setLS(s=>({...s,theme:k}));put('/settings',{theme:k})}} style={{flex:1,padding:14,borderRadius:8,border:theme===k?`2px solid ${t.ac}`:`1px solid ${t.bd}`,background:t.bg,cursor:'pointer',textAlign:'center'}}><div style={{width:22,height:22,borderRadius:11,background:t.ac,margin:'0 auto 8px'}}/><div style={{fontSize:12,fontWeight:600,color:t.t1,textTransform:'capitalize'}}>{k}</div></button>)}</div></SB>
-                        </div>}
-                    </div>
-                    {/* API */}
-                    <div style={{background:T.card,borderRadius:10,border:`1px solid ${T.bd}`,marginBottom:14,overflow:'hidden'}}>
-                        <div onClick={()=>setStSections(s=>({...s,api:!s.api}))} style={{padding:'14px 18px',cursor:'pointer',display:'flex',justifyContent:'space-between',alignItems:'center',borderBottom:stSections.api?`1px solid ${T.bd}`:'none'}}>
-                            <div style={{fontSize:14,fontWeight:700,color:T.t1}}>API</div>
-                            <I n={stSections.api?'up':'down'} s={14} c={T.t3}/>
-                        </div>
-                        {stSections.api&&<div style={{padding:'14px 18px'}}>
-                            <SB T={T} title="API Key"><div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
-                                <button onClick={()=>{let k='';try{k=crypto.randomUUID();}catch(e){k=Array.from({length:32},()=>Math.random().toString(36)[2]).join('');}setLS(s=>({...s,api_key:k}));put('/settings',{api_key:k});toast('Key generated','info')}} style={{background:`${T.ac}18`,border:`1px solid ${T.ac}44`,borderRadius:8,padding:'8px 16px',cursor:'pointer',color:T.ac,fontSize:12,fontWeight:600,display:'flex',alignItems:'center',gap:4}}><I n="key" s={13}/> Generate</button>
-                                {lSettings.api_key&&<><code className="mono" style={{fontSize:11,color:T.t3,background:T.bg,padding:'6px 10px',borderRadius:6,border:`1px solid ${T.bd}`,wordBreak:'break-all',flex:1}}>{lSettings.api_key}</code>
-                                    <button onClick={()=>{copyText(lSettings.api_key);toast('Copied!','success')}} style={{background:`${T.ok}15`,border:`1px solid ${T.ok}44`,borderRadius:8,padding:'7px 12px',cursor:'pointer',color:T.ok,fontSize:11,fontWeight:600}}><I n="copy" s={12}/></button></>}
-                            </div></SB>
-                        </div>}
-                    </div>
-                </div>
-            </div>
-        </div>}
+            <div style={{display:'grid',gridTemplateColumns:'220px 1fr',gap:18,maxWidth:1400}}>
 
+                {/* SETTINGS SIDE NAV */}
+                <div style={{background:T.card,border:`1px solid ${T.bd}`,borderRadius:10,padding:8,height:'fit-content',position:'sticky',top:20}}>
+                    {[['transcode','Transcode','zap',T.ac],['output','Output','play',T.in],['ai','AI / Subtitles','log',T.ok],['notifications','Notifications','search',T.wn],['appearance','Appearance','settings',T.a2],['api','API Access','key',T.ac]].map(([k,l,ic,c])=>
+                        <button key={k} onClick={()=>setSettingsTab(k)} style={{display:'flex',alignItems:'center',gap:10,width:'100%',padding:'10px 12px',margin:'2px 0',border:'none',cursor:'pointer',background:settingsTab===k?`${c}18`:'transparent',color:settingsTab===k?c:T.t3,fontSize:13,fontWeight:settingsTab===k?700:500,borderRadius:6,textAlign:'left'}}>
+                            <I n={ic} s={15}/> {l}
+                        </button>
+                    )}
+                </div>
 
-        {/*═══ PROFILE ═══*/}
-        {tab==='profile'&&lSettings&&<div>
-            <h1 style={{fontSize:24,fontWeight:700,color:T.t1,marginBottom:18}}>Profile</h1>
-            <div style={{display:'grid',gridTemplateColumns:'280px 1fr',gap:20}}>
-                {/* LEFT: Avatar */}
-                <div style={{background:T.card,borderRadius:12,border:`1px solid ${T.bd}`,padding:24,textAlign:'center'}}>
-                    <div style={{width:120,height:120,borderRadius:60,margin:'0 auto 16px',background:`${T.t2}20`,border:`3px solid ${T.bd}`,overflow:'hidden',display:'flex',alignItems:'center',justifyContent:'center'}}>
-                        {lSettings.avatar_base64?<img src={lSettings.avatar_base64} style={{width:'100%',height:'100%',objectFit:'cover'}}/>:<I n="user" s={48} c={T.t2}/>}
-                    </div>
-                    <label style={{display:'inline-flex',alignItems:'center',gap:6,background:`${T.ac}18`,border:`1px solid ${T.ac}44`,borderRadius:8,padding:'8px 16px',cursor:'pointer',color:T.ac,fontSize:12,fontWeight:600}}>
-                        <I n="download" s={13}/> Upload Photo
-                        <input type="file" accept="image/*" style={{display:'none'}} onChange={e=>{const f=e.target.files[0];if(!f)return;if(f.size>2*1024*1024){toast('Max 2MB','error');return;}const r=new FileReader();r.onload=ev=>{setLS(s=>({...s,avatar_base64:ev.target.result}));put('/settings',{avatar_base64:ev.target.result});toast('Avatar updated','success')};r.readAsDataURL(f)}}/>
-                    </label>
-                    {lSettings.avatar_base64&&<button onClick={()=>{setLS(s=>({...s,avatar_base64:''}));put('/settings',{avatar_base64:''});toast('Avatar removed','info')}} style={{display:'block',margin:'10px auto 0',background:'none',border:'none',cursor:'pointer',color:T.t2,fontSize:11}}>Remove</button>}
-                </div>
-                {/* RIGHT: Profile fields */}
+                {/* SETTINGS PANEL */}
                 <div>
-                    <SB T={T} title="Display Name" desc="Shown in the sidebar and dashboard.">
-                        <input value={lSettings.display_name||''} onChange={e=>setLS(s=>({...s,display_name:e.target.value}))} onBlur={e=>{put('/settings',{display_name:e.target.value});toast('Name saved','success')}} placeholder={settings?.auth_user||'admin'} style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'12px 16px',color:T.tx,fontSize:14}}/>
+
+                {/* TRANSCODE */}
+                {settingsTab==='transcode'&&<div style={{background:T.card,borderRadius:10,padding:'20px 24px',border:`1px solid ${T.bd}`}}>
+                    <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:18,paddingBottom:14,borderBottom:`1px solid ${T.bd}`}}>
+                        <I n="zap" s={18} c={T.ac}/>
+                        <h2 style={{fontSize:16,fontWeight:700,color:T.t1}}>Transcode</h2>
+                        <span style={{fontSize:12,color:T.t2,marginLeft:'auto'}}>Encoder + quality settings for full transcodes</span>
+                    </div>
+                    <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(300px,1fr))',gap:14}}>
+                        <SB T={T} title="Constant Quality (CQ)" desc="Lower = better quality, larger files. 16-20 recommended for 4K.">
+                            <div style={{display:'flex',justifyContent:'space-between',marginBottom:6}}><span style={{fontSize:12,color:T.t3}}>Quality</span><span className="mono" style={{fontSize:15,fontWeight:700,color:T.ac}}>{lSettings.cq}</span></div>
+                            <input type="range" min={10} max={30} value={lSettings.cq} onChange={e=>setLS(s=>({...s,cq:e.target.value}))} style={{width:'100%',background:`${T.t2}30`}}/>
+                        </SB>
+                        <SB T={T} title="NVENC Preset" desc="Slower = better quality at same file size.">
+                            <select value={lSettings.preset} onChange={e=>setLS(s=>({...s,preset:e.target.value}))} style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'10px 14px',color:T.tx,fontSize:14}}>
+                                <option value="p7">P7 (Slowest) — best compression</option><option value="slow">Slow — excellent quality</option><option value="medium">Medium — balanced</option><option value="fast">Fast — faster encode</option><option value="p1">P1 (Fastest) — lowest quality</option>
+                            </select>
+                        </SB>
+                        <SB T={T} title="Output Codec">
+                            <select value={lSettings.output_codec||'hevc'} onChange={e=>setLS(s=>({...s,output_codec:e.target.value}))} style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'10px 14px',color:T.tx,fontSize:14}}>
+                                <option value="hevc">HEVC (H.265) — recommended</option><option value="h264">H.264 (AVC)</option><option value="av1">AV1</option>
+                            </select>
+                        </SB>
+                        <SB T={T} title="Hardware Encoder">
+                            <select value={lSettings.hw_encoder||'nvenc'} onChange={e=>setLS(s=>({...s,hw_encoder:e.target.value}))} style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'10px 14px',color:T.tx,fontSize:14}}>
+                                <option value="nvenc">NVENC (NVIDIA)</option><option value="qsv">QSV (Intel)</option><option value="vaapi">VAAPI (Linux)</option><option value="software">Software (x265)</option>
+                            </select>
+                        </SB>
+                        <SB T={T} title="Hardware Decoding" desc="Use GPU to decode source file.">
+                            <label style={{display:'flex',alignItems:'center',gap:12,cursor:'pointer'}}><Tog on={(lSettings.hw_decode||'true')==='true'} onTog={()=>setLS(s=>({...s,hw_decode:s.hw_decode==='true'?'false':'true'}))} T={T}/><span style={{fontSize:14,color:T.tx}}>{(lSettings.hw_decode||'true')==='true'?'Enabled':'Disabled'}</span></label>
+                        </SB>
+                        <SB T={T} title="Max Workers">
+                            <input type="range" min={0} max={6} value={lSettings.max_workers} onChange={e=>setLS(s=>({...s,max_workers:e.target.value}))} style={{width:'100%',background:`${T.t2}30`}}/>
+                            <div style={{display:'flex',justifyContent:'space-between',fontSize:12,marginTop:4}}><span style={{color:T.t2}}>0 = paused</span><span className="mono" style={{color:T.ac,fontWeight:700}}>{lSettings.max_workers}</span></div>
+                        </SB>
+                        <SB T={T} title="Min File Size (GB)">
+                            <input type="range" min={0} max={50} value={lSettings.min_size_gb} onChange={e=>setLS(s=>({...s,min_size_gb:e.target.value}))} style={{width:'100%',background:`${T.t2}30`}}/>
+                            <span className="mono" style={{fontSize:13,color:T.ac,fontWeight:700}}>{lSettings.min_size_gb} GB</span>
+                        </SB>
+                    </div>
+                </div>}
+
+                {/* OUTPUT */}
+                {settingsTab==='output'&&<div style={{background:T.card,borderRadius:10,padding:'20px 24px',border:`1px solid ${T.bd}`}}>
+                    <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:18,paddingBottom:14,borderBottom:`1px solid ${T.bd}`}}>
+                        <I n="play" s={18} c={T.in}/>
+                        <h2 style={{fontSize:16,fontWeight:700,color:T.t1}}>Output</h2>
+                        <span style={{fontSize:12,color:T.t2,marginLeft:'auto'}}>How processed files are saved and named</span>
+                    </div>
+                    <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(300px,1fr))',gap:14}}>
+                        <SB T={T} title="Container">
+                            <select value={lSettings.container} onChange={e=>setLS(s=>({...s,container:e.target.value}))} style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'10px 14px',color:T.tx,fontSize:14}}><option value="mkv">MKV (recommended)</option><option value="mp4">MP4</option></select>
+                        </SB>
+                        <SB T={T} title="DoVi P7 → P8" desc="Convert Dolby Vision Profile 7 → 8 during transcode.">
+                            <label style={{display:'flex',alignItems:'center',gap:12,cursor:'pointer'}}><Tog on={lSettings.dovi_convert_p8==='true'} onTog={()=>setLS(s=>({...s,dovi_convert_p8:s.dovi_convert_p8==='true'?'false':'true'}))} T={T}/><span style={{fontSize:14,color:T.tx}}>{lSettings.dovi_convert_p8==='true'?'Enabled':'Disabled'}</span></label>
+                        </SB>
+                        <SB T={T} title="Replace Original" desc="Overwrite source file once processing completes.">
+                            <label style={{display:'flex',alignItems:'center',gap:12,cursor:'pointer'}}><Tog on={lSettings.replace_original==='true'} onTog={()=>setLS(s=>({...s,replace_original:s.replace_original==='true'?'false':'true'}))} T={T}/><span style={{fontSize:14,color:T.tx}}>{lSettings.replace_original==='true'?'Replace originals':'Keep both'}</span></label>
+                        </SB>
+                        <SB T={T} title="Auto-Accept" desc="Skip the manual review step on completed transcodes.">
+                            <label style={{display:'flex',alignItems:'center',gap:12,cursor:'pointer'}}><Tog on={lSettings.auto_accept==='true'} onTog={()=>setLS(s=>({...s,auto_accept:s.auto_accept==='true'?'false':'true'}))} T={T}/><span style={{fontSize:14,color:T.tx}}>{lSettings.auto_accept==='true'?'Enabled':'Manual review'}</span></label>
+                        </SB>
+                        <SB T={T} title="Skip Transcoded" desc="Don't re-encode files already in the chosen codec.">
+                            <label style={{display:'flex',alignItems:'center',gap:12,cursor:'pointer'}}><Tog on={lSettings.skip_transcoded==='true'} onTog={()=>setLS(s=>({...s,skip_transcoded:s.skip_transcoded==='true'?'false':'true'}))} T={T}/><span style={{fontSize:14,color:T.tx}}>{lSettings.skip_transcoded==='true'?'Skip NVENC files':'Re-encode all'}</span></label>
+                        </SB>
+                        <SB T={T} title="Path Mapping — Server Prefix" desc="Server's view of media root (e.g. /media/ for Docker bind mount).">
+                            <input type="text" value={lSettings.node_path_remote_prefix||'/media/'} onChange={e=>setLS(s=>({...s,node_path_remote_prefix:e.target.value}))} className="mono" style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'10px 14px',color:T.tx,fontSize:13}}/>
+                        </SB>
+                        <SB T={T} title="Path Mapping — Node Prefix" desc="What the node sees instead (e.g. Z:\\ for Windows SMB share). Empty = no translation.">
+                            <input type="text" value={lSettings.node_path_local_prefix||''} onChange={e=>setLS(s=>({...s,node_path_local_prefix:e.target.value}))} placeholder="Z:\\" className="mono" style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'10px 14px',color:T.tx,fontSize:13}}/>
+                        </SB>
+                        <SB T={T} title="Node Temp Directory" desc="Where the node writes intermediate files (HEVC dumps, audio extracts, SRTs). Use a fast local SSD. Default: F:\\Byte_Engine_temp on Windows.">
+                            <input type="text" value={lSettings.node_temp_path||''} onChange={e=>setLS(s=>({...s,node_temp_path:e.target.value}))} placeholder="F:\\Byte_Engine_temp" className="mono" style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'10px 14px',color:T.tx,fontSize:13}}/>
+                        </SB>
+                    </div>
+                </div>}
+
+                {/* AI / SUBTITLES */}
+                {settingsTab==='ai'&&<div style={{background:T.card,borderRadius:10,padding:'20px 24px',border:`1px solid ${T.bd}`}}>
+                    <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:18,paddingBottom:14,borderBottom:`1px solid ${T.bd}`}}>
+                        <I n="log" s={18} c={T.ok}/>
+                        <h2 style={{fontSize:16,fontWeight:700,color:T.t1}}>AI / Subtitle Generation</h2>
+                        <span style={{fontSize:12,color:T.t2,marginLeft:'auto'}}>Whisper transcription + Claude translation</span>
+                    </div>
+                    {!lSettings.claude_api_key&&<div style={{padding:'10px 14px',background:`${T.wn}15`,border:`1px solid ${T.wn}44`,borderRadius:8,marginBottom:14,fontSize:12,color:T.wn,display:'flex',gap:8,alignItems:'center'}}><I n="search" s={14}/> Claude API key not set — SubGen jobs that need translation will fail until this is configured.</div>}
+                    <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(300px,1fr))',gap:14}}>
+                        <SB T={T} title="Claude API Key" desc="From console.anthropic.com — used by SubGen to translate to Japanese.">
+                            <input type="password" value={lSettings.claude_api_key||''} onChange={e=>setLS(s=>({...s,claude_api_key:e.target.value}))} placeholder="sk-ant-api03-..." className="mono" style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'10px 14px',color:T.tx,fontSize:13}}/>
+                        </SB>
+                        <SB T={T} title="Claude Model" desc="Recommended: claude-sonnet-4-6.">
+                            <select value={lSettings.claude_model||'claude-sonnet-4-6'} onChange={e=>setLS(s=>({...s,claude_model:e.target.value}))} style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'10px 14px',color:T.tx,fontSize:14}}>
+                                <option value="claude-sonnet-4-6">claude-sonnet-4-6 (recommended)</option>
+                                <option value="claude-opus-4-7">claude-opus-4-7 (highest quality)</option>
+                                <option value="claude-opus-4-6">claude-opus-4-6 (high quality)</option>
+                                <option value="claude-sonnet-4-5">claude-sonnet-4-5 (legacy)</option>
+                                <option value="claude-haiku-4-5-20251001">claude-haiku-4-5 (fastest, cheapest)</option>
+                            </select>
+                        </SB>
+                        <SB T={T} title="Whisper Model" desc="large-v3 = best Japanese accuracy.">
+                            <select value={lSettings.whisper_model||'large-v3'} onChange={e=>setLS(s=>({...s,whisper_model:e.target.value}))} style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'10px 14px',color:T.tx,fontSize:14}}>
+                                <option value="large-v3">large-v3 (best accuracy)</option>
+                                <option value="medium">medium (balanced)</option>
+                                <option value="small">small (fast)</option>
+                                <option value="base">base (fastest)</option>
+                            </select>
+                        </SB>
+                        <SB T={T} title="Whisper Device" desc="auto picks CUDA if available. RTX 5080 → CUDA recommended.">
+                            <select value={lSettings.whisper_device||'auto'} onChange={e=>setLS(s=>({...s,whisper_device:e.target.value}))} style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'10px 14px',color:T.tx,fontSize:14}}>
+                                <option value="auto">auto (CUDA → fall back to CPU)</option>
+                                <option value="cuda">cuda (NVIDIA GPU)</option>
+                                <option value="cpu">cpu (slower, more RAM)</option>
+                            </select>
+                        </SB>
+                        <SB T={T} title="Translation Chunk Size" desc="SRT entries per Claude API call. 40 is a safe default.">
+                            <input type="number" min={10} max={100} value={lSettings.subgen_translate_chunk||'40'} onChange={e=>setLS(s=>({...s,subgen_translate_chunk:e.target.value}))} className="mono" style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'10px 14px',color:T.tx,fontSize:13}}/>
+                        </SB>
+                    </div>
+                </div>}
+
+                {/* NOTIFICATIONS */}
+                {settingsTab==='notifications'&&<div style={{background:T.card,borderRadius:10,padding:'20px 24px',border:`1px solid ${T.bd}`}}>
+                    <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:18,paddingBottom:14,borderBottom:`1px solid ${T.bd}`}}>
+                        <I n="search" s={18} c={T.wn}/>
+                        <h2 style={{fontSize:16,fontWeight:700,color:T.t1}}>Notifications</h2>
+                        <span style={{fontSize:12,color:T.t2,marginLeft:'auto'}}>ntfy.sh push alerts</span>
+                    </div>
+                    <SB T={T} title="ntfy.sh Notifications" desc="Get push notifications when jobs complete or fail. Free service at ntfy.sh — enter your topic URL.">
+                        <label style={{display:'flex',alignItems:'center',gap:12,cursor:'pointer',marginBottom:10}}>
+                            <Tog on={(lSettings.ntfy_enabled||'false')==='true'} onTog={()=>setLS(s=>({...s,ntfy_enabled:s.ntfy_enabled==='true'?'false':'true'}))} T={T}/>
+                            <span style={{fontSize:14,color:T.tx}}>{(lSettings.ntfy_enabled||'false')==='true'?'Enabled':'Disabled'}</span>
+                        </label>
+                        <div style={{marginBottom:8}}>
+                            <label style={{fontSize:11,color:T.t2,display:'block',marginBottom:4}}>ntfy Topic URL</label>
+                            <input value={lSettings.ntfy_url||''} onChange={e=>setLS(s=>({...s,ntfy_url:e.target.value}))} placeholder="https://ntfy.sh/byte-transcode-alerts" style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:6,padding:'10px 14px',color:T.tx,fontSize:13}}/>
+                        </div>
+                        <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+                            <label style={{display:'flex',alignItems:'center',gap:4,fontSize:12,color:T.t3,cursor:'pointer'}}><input type="checkbox" checked={(lSettings.ntfy_on_complete||'true')==='true'} onChange={e=>setLS(s=>({...s,ntfy_on_complete:e.target.checked?'true':'false'}))} style={{accentColor:T.ac}}/> Job Complete</label>
+                            <label style={{display:'flex',alignItems:'center',gap:4,fontSize:12,color:T.t3,cursor:'pointer'}}><input type="checkbox" checked={(lSettings.ntfy_on_error||'true')==='true'} onChange={e=>setLS(s=>({...s,ntfy_on_error:e.target.checked?'true':'false'}))} style={{accentColor:T.ac}}/> Job Error</label>
+                            <label style={{display:'flex',alignItems:'center',gap:4,fontSize:12,color:T.t3,cursor:'pointer'}}><input type="checkbox" checked={(lSettings.ntfy_on_scan||'false')==='true'} onChange={e=>setLS(s=>({...s,ntfy_on_scan:e.target.checked?'true':'false'}))} style={{accentColor:T.ac}}/> Scan Complete</label>
+                        </div>
+                        {lSettings.ntfy_url&&<button onClick={async()=>{try{await fetch(lSettings.ntfy_url,{method:'POST',body:'Byte Transcode test notification!'});toast('Test sent!','success')}catch(e){toast('Failed: '+e.message,'error')}}} style={{marginTop:10,background:`${T.in}15`,border:`1px solid ${T.in}44`,borderRadius:6,padding:'6px 14px',cursor:'pointer',color:T.in,fontSize:12,fontWeight:600}}>Send Test</button>}
                     </SB>
-                    <SB T={T} title="Username" desc="Login username. Changes take effect next login.">
-                        <div style={{display:'flex',gap:10}}>
-                            <input value={lSettings._new_user||settings?.auth_user||''} onChange={e=>setLS(s=>({...s,_new_user:e.target.value}))} style={{flex:1,background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'12px 16px',color:T.tx,fontSize:14}}/>
-                            <button onClick={async()=>{if(!lSettings._new_user){toast('Enter a username','error');return;}if(!confirm('Change login username to "'+lSettings._new_user+'"?'))return;await put('/settings',{auth_user:lSettings._new_user});toast('Username updated','success');rS()}} style={{background:`${T.ac}18`,border:`1px solid ${T.ac}44`,borderRadius:8,padding:'10px 18px',cursor:'pointer',color:T.ac,fontSize:13,fontWeight:600,whiteSpace:'nowrap'}}>Update</button>
+                </div>}
+
+                {/* APPEARANCE */}
+                {settingsTab==='appearance'&&<div style={{background:T.card,borderRadius:10,padding:'20px 24px',border:`1px solid ${T.bd}`}}>
+                    <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:18,paddingBottom:14,borderBottom:`1px solid ${T.bd}`}}>
+                        <I n="settings" s={18} c={T.a2}/>
+                        <h2 style={{fontSize:16,fontWeight:700,color:T.t1}}>Appearance</h2>
+                        <span style={{fontSize:12,color:T.t2,marginLeft:'auto'}}>UI theme</span>
+                    </div>
+                    <SB T={T} title="Theme">
+                        <div style={{display:'flex',gap:10}}>{Object.entries(TH).map(([k,t])=><button key={k} onClick={()=>{setTheme(k);setLS(s=>({...s,theme:k}))}} style={{flex:1,padding:14,borderRadius:8,border:theme===k?`2px solid ${t.ac}`:`1px solid ${t.bd}`,background:t.bg,cursor:'pointer',textAlign:'center'}}><div style={{width:22,height:22,borderRadius:11,background:t.ac,margin:'0 auto 8px'}}/><div style={{fontSize:12,fontWeight:600,color:t.t1,textTransform:'capitalize'}}>{k}</div></button>)}</div>
+                    </SB>
+                </div>}
+
+                {/* API ACCESS */}
+                {settingsTab==='api'&&<div style={{background:T.card,borderRadius:10,padding:'20px 24px',border:`1px solid ${T.bd}`}}>
+                    <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:18,paddingBottom:14,borderBottom:`1px solid ${T.bd}`}}>
+                        <I n="key" s={18} c={T.ac}/>
+                        <h2 style={{fontSize:16,fontWeight:700,color:T.t1}}>API Access</h2>
+                        <span style={{fontSize:12,color:T.t2,marginLeft:'auto'}}>For programmatic access to this server</span>
+                    </div>
+                    <SB T={T} title="API Key" desc="Generate a key for external scripts to authenticate with the server.">
+                        <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
+                            <button onClick={()=>{let k='';try{k=crypto.randomUUID();}catch(e){k=Array.from({length:32},()=>Math.random().toString(36)[2]).join('');}setLS(s=>({...s,api_key:k}));toast('Key generated — save to persist','info')}} style={{background:`${T.ac}18`,border:`1px solid ${T.ac}44`,borderRadius:8,padding:'8px 16px',cursor:'pointer',color:T.ac,fontSize:12,fontWeight:600,display:'flex',alignItems:'center',gap:4}}><I n="key" s={13}/> Generate</button>
+                            {lSettings.api_key&&<><code className="mono" style={{fontSize:11,color:T.t3,background:T.bg,padding:'6px 10px',borderRadius:6,border:`1px solid ${T.bd}`,wordBreak:'break-all',flex:1}}>{lSettings.api_key}</code>
+                                <button onClick={()=>{copyText(lSettings.api_key);toast('Copied!','success')}} style={{background:`${T.ok}15`,border:`1px solid ${T.ok}44`,borderRadius:8,padding:'7px 12px',cursor:'pointer',color:T.ok,fontSize:11,fontWeight:600}}><I n="copy" s={12}/></button></>}
                         </div>
                     </SB>
-                    <SB T={T} title="Change Password" desc="Enter current password to set a new one.">
-                        <div style={{display:'flex',flexDirection:'column',gap:10}}>
-                            <input type="password" placeholder="Current password" id="pw_cur" style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'12px 16px',color:T.tx,fontSize:14}}/>
-                            <input type="password" placeholder="New password" id="pw_new" style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'12px 16px',color:T.tx,fontSize:14}}/>
-                            <input type="password" placeholder="Confirm new password" id="pw_conf" style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'12px 16px',color:T.tx,fontSize:14}}/>
-                            <button onClick={async()=>{const cur=document.getElementById('pw_cur').value;const nw=document.getElementById('pw_new').value;const cf=document.getElementById('pw_conf').value;if(!cur||!nw){toast('Fill all fields','error');return;}if(nw!==cf){toast('Passwords don\'t match','error');return;}if(nw.length<4){toast('Min 4 characters','error');return;}const r=await post('/auth/change-password',{current:cur,password:nw});if(r?.ok){toast('Password changed','success');document.getElementById('pw_cur').value='';document.getElementById('pw_new').value='';document.getElementById('pw_conf').value='';}else{toast(r?.error||'Failed','error')}}} style={{background:`linear-gradient(135deg,${T.ac},${T.a2})`,border:'none',borderRadius:8,padding:'12px',color:'#fff',fontSize:14,fontWeight:700,cursor:'pointer'}}>Change Password</button>
-                        </div>
-                    </SB>
-                </div>
+                </div>}
+
+                <button onClick={saveSt} style={{background:`linear-gradient(135deg,${T.ac},${T.a2})`,border:'none',borderRadius:10,padding:'13px',color:'#fff',fontSize:15,fontWeight:700,cursor:'pointer',width:'100%',marginTop:14}}>Save Settings</button>
+
+                </div>{/* /SETTINGS PANEL */}
             </div>
         </div>}
 
         {/*═══ LOGS ═══*/}
         {tab==='logs'&&<div>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:18}}>
-                <h1 style={{fontSize:24,fontWeight:700,color:T.t1}}>System Logs</h1>
+                <h1 style={{fontSize:20,fontWeight:700,color:T.t1}}>System Logs</h1>
                 <div style={{display:'flex',gap:8}}>
                     <a href="/api/logs/download" style={{background:T.card,border:`1px solid ${T.bd}`,borderRadius:8,padding:'8px 14px',color:T.t3,fontSize:12,fontWeight:600,display:'flex',alignItems:'center',gap:4,textDecoration:'none'}}><I n="download" s={13}/> Download</a>
                     <button onClick={rLg} style={{background:T.card,border:`1px solid ${T.bd}`,borderRadius:8,padding:'8px 14px',cursor:'pointer',color:T.t3,fontSize:12,fontWeight:600,display:'flex',alignItems:'center',gap:4}}><I n="refresh" s={13}/> Refresh</button>
                 </div></div>
-            <div className="mono" style={{background:'#08090c',borderRadius:10,padding:16,fontSize:13,lineHeight:'20px',maxHeight:'75vh',overflowY:'auto',border:`1px solid ${T.bd}`}}>
+            <div className="mono" style={{background:'#08090c',borderRadius:10,padding:16,fontSize:12,lineHeight:'19px',maxHeight:'75vh',overflowY:'auto',border:`1px solid ${T.bd}`}}>
                 {(logs||[]).map(l=><div key={l.id} style={{color:l.level==='ERROR'?T.er:l.level==='WARN'?T.wn:T.t2,marginBottom:2}}>
-                    <span style={{opacity:0.5}}>{fmtTime(l.timestamp,'full')}</span>{' '}<span style={{color:l.level==='ERROR'?T.er:l.level==='WARN'?T.wn:T.in,fontWeight:600}}>[{l.level}]</span>{' '}<span style={{opacity:0.6}}>[{l.source}]</span>{' '}{l.message}
+                    <span style={{opacity:0.5}}>{l.timestamp}</span>{' '}<span style={{color:l.level==='ERROR'?T.er:l.level==='WARN'?T.wn:T.in,fontWeight:600}}>[{l.level}]</span>{' '}<span style={{opacity:0.6}}>[{l.source}]</span>{' '}{l.message}
                 </div>)}
                 {(!logs||logs.length===0)&&<div style={{color:T.t2}}>No logs yet.</div>}
             </div>

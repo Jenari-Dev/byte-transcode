@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-Byte Transcode Server v2
-========================
-Flask API server with authentication, health checks, scan progress,
-theme support, and comprehensive queue management.
+Byte Transcode Server v3.6
+==========================
+v3.5 — path mapping (server→node) settings + SubGen 'show all'
+v3.6 — adds node_temp_path setting (Windows nodes need F:\\Byte_Engine_temp,
+       not the Linux /temp/byte_work). Defaults remain empty so node auto-detects.
 
 Run: python3 byte_server.py --port 5800
-Reset password: python3 byte_server.py --reset-password
 """
 
 import os, sys, json, time, sqlite3, hashlib, subprocess, threading, logging, secrets, functools
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from contextlib import contextmanager
 from flask import Flask, request, jsonify, send_from_directory, Response, session, redirect
@@ -19,7 +18,7 @@ DEFAULT_PORT = 5800
 DB_PATH = os.environ.get("BYTE_DB_PATH", "/config/byte_transcode.db")
 LOG_DIR = os.environ.get("BYTE_LOG_DIR", "/config/logs")
 STATIC_DIR = os.environ.get("BYTE_STATIC_DIR", "/app/static")
-VIDEO_EXTENSIONS = {'.mkv', '.mp4', '.m4v', '.avi', '.mov', '.wmv', '.flv', '.webm'}
+VIDEO_EXTENSIONS = {'.mkv', '.mp4', '.m4v', '.avi', '.mov', '.wmv', '.flv', '.webm', '.ts', '.m2ts', '.mpg', '.mpeg'}
 
 app = Flask(__name__, static_folder=STATIC_DIR)
 app.config["SECRET_KEY"] = os.environ.get("BYTE_SECRET", secrets.token_hex(32))
@@ -41,7 +40,6 @@ def get_db():
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("PRAGMA foreign_keys=ON")
     try:
         yield conn
@@ -137,9 +135,35 @@ def init_db():
             "container": "mkv", "dovi_convert_p8": "true", "replace_original": "true",
             "temp_path": "/temp/byte_work", "gpu": "RTX 5080", "processing_enabled": "false",
             "auto_accept": "false", "skip_transcoded": "true", "theme": "dark",
-            "max_dovi_concurrent": "2", "processing_mode": "transcode",
-            "staged_limit": "10", "transcode_gpu_count": "4", "healthcheck_gpu_count": "4",
             "auth_user": "admin", "auth_hash": "",
+            # v3.2 — Subtitle Generation + AI Translation
+            "claude_api_key": "",
+            "claude_model": "claude-sonnet-4-6",
+            "whisper_model": "large-v3",
+            "whisper_device": "auto",
+            "whisper_compute": "auto",
+            "subgen_target_lang": "jpn",
+            "subgen_translate_chunk": "40",
+            # v3.4 — Per-job-type processing toggles. Each defaults to "true";
+            # the master `processing_enabled` is the gatekeeper (must be "true"
+            # for ANY job to process). When master is on, only job types with
+            # their own flag set to "true" are claimed by workers.
+            "processing_enabled_transcode": "true",
+            "processing_enabled_subgen": "true",
+            "processing_enabled_remuxclean": "true",
+            "processing_enabled_dv78only": "true",
+            # v3.5 — Server→Node path translation. The server stores library
+            # paths from its own viewpoint (e.g. /media/data/media/movies because
+            # /mnt/media is bind-mounted to /media inside Docker). The node runs
+            # on Windows where it accesses the same files via SMB at Z:\data\media\.
+            # Empty `node_path_local_prefix` disables translation (pass-through).
+            "node_path_remote_prefix": "/media/",
+            "node_path_local_prefix": "Z:\\",
+            # v3.6 — Where the node writes temporary work files (HEVC dumps,
+            # SRT extracts, audio chunks, etc.). Empty = node auto-detects:
+            #   Windows → C:\\Byte_Engine_temp
+            #   Linux   → /tmp/byte_work
+            "node_temp_path": "F:\\Byte_Engine_temp",
         }
         for k, v in defaults.items():
             db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
@@ -152,11 +176,83 @@ def init_db():
                 'eta': 'TEXT DEFAULT ""', 'worker_id': 'TEXT', 'output_path': 'TEXT',
                 'output_size_gb': 'REAL', 'reduction_pct': 'REAL', 'error_message': 'TEXT',
                 'started_at': 'TEXT', 'completed_at': 'TEXT', 'accepted': 'INTEGER DEFAULT 0',
-                'skipped_reason': 'TEXT', 'probe_data': 'TEXT', 'progress': 'REAL DEFAULT 0', 'duration_str': 'TEXT DEFAULT ""'}
+                'skipped_reason': 'TEXT', 'probe_data': 'TEXT', 'progress': 'REAL DEFAULT 0', 'duration_str': 'TEXT DEFAULT ""',
+                'job_type': "TEXT DEFAULT 'transcode'"}
             for col, typedef in queue_needed.items():
                 if col not in queue_cols:
                     db.execute(f'ALTER TABLE queue ADD COLUMN {col} {typedef}')
                     log.info(f"Migration: added queue.{col}")
+                    if col == 'job_type':
+                        db.execute("UPDATE queue SET job_type='transcode' WHERE job_type IS NULL OR job_type=''")
+
+            # v3.1 migration: file_path UNIQUE → (file_path, job_type) UNIQUE
+            # so the same file can be queued for both transcode and remuxclean.
+            try:
+                table_sql_row = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='queue'").fetchone()
+                table_sql = (table_sql_row['sql'] if table_sql_row else '') or ''
+                old_unique = 'file_path TEXT NOT NULL UNIQUE' in table_sql
+                new_unique_present = 'UNIQUE (file_path, job_type)' in table_sql or 'UNIQUE(file_path, job_type)' in table_sql
+                if old_unique and not new_unique_present:
+                    log.info("Migration: rebuilding queue table with UNIQUE (file_path, job_type)")
+                    cur_cols = [r[1] for r in db.execute('PRAGMA table_info(queue)').fetchall()]
+                    db.execute("ALTER TABLE queue RENAME TO _queue_pre_v31")
+                    db.executescript("""
+                        CREATE TABLE queue (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            file_path TEXT NOT NULL,
+                            file_name TEXT NOT NULL,
+                            file_size_gb REAL NOT NULL,
+                            duration_min REAL DEFAULT 0,
+                            duration_str TEXT DEFAULT '',
+                            video_codec TEXT DEFAULT '',
+                            resolution TEXT DEFAULT '',
+                            fps TEXT DEFAULT '',
+                            hdr_type TEXT DEFAULT 'SDR',
+                            has_dovi INTEGER DEFAULT 0,
+                            dovi_profile INTEGER,
+                            audio_summary TEXT DEFAULT '',
+                            audio_track_count INTEGER DEFAULT 0,
+                            subtitle_track_count INTEGER DEFAULT 0,
+                            library_id INTEGER,
+                            library_name TEXT DEFAULT '',
+                            priority INTEGER DEFAULT 999,
+                            status TEXT DEFAULT 'pending',
+                            health_status TEXT DEFAULT 'pending',
+                            progress REAL DEFAULT 0,
+                            current_step TEXT DEFAULT '',
+                            eta TEXT DEFAULT '',
+                            worker_id TEXT,
+                            output_path TEXT,
+                            output_size_gb REAL,
+                            reduction_pct REAL,
+                            error_message TEXT,
+                            started_at TEXT,
+                            completed_at TEXT,
+                            created_at TEXT DEFAULT (datetime('now','localtime')),
+                            accepted INTEGER DEFAULT 0,
+                            skipped_reason TEXT,
+                            probe_data TEXT,
+                            job_type TEXT DEFAULT 'transcode',
+                            FOREIGN KEY (library_id) REFERENCES libraries(id),
+                            UNIQUE (file_path, job_type)
+                        );
+                    """)
+                    # Copy ALL old columns (job_type already added above; if somehow missing, default applies)
+                    common = [c for c in cur_cols if c in (
+                        'id','file_path','file_name','file_size_gb','duration_min','duration_str',
+                        'video_codec','resolution','fps','hdr_type','has_dovi','dovi_profile',
+                        'audio_summary','audio_track_count','subtitle_track_count','library_id','library_name',
+                        'priority','status','health_status','progress','current_step','eta','worker_id',
+                        'output_path','output_size_gb','reduction_pct','error_message','started_at',
+                        'completed_at','created_at','accepted','skipped_reason','probe_data','job_type'
+                    )]
+                    cols_csv = ", ".join(common)
+                    db.execute(f"INSERT INTO queue ({cols_csv}) SELECT {cols_csv} FROM _queue_pre_v31")
+                    db.execute("DROP TABLE _queue_pre_v31")
+                    log.info("Migration: queue UNIQUE constraint updated to (file_path, job_type)")
+            except Exception as me:
+                log.error(f"UNIQUE-migration error (continuing): {me}")
+
             worker_cols = [r[1] for r in db.execute('PRAGMA table_info(workers)').fetchall()]
             for col in ['cpu_usage','ram_usage','gpu_usage','vram_usage']:
                 if col not in worker_cols:
@@ -165,34 +261,24 @@ def init_db():
             # Fix any NULL health statuses
             db.execute('UPDATE queue SET health_status="pending" WHERE health_status IS NULL')
             db.execute('UPDATE queue SET progress=0 WHERE progress IS NULL')
+            db.execute("UPDATE queue SET job_type='transcode' WHERE job_type IS NULL OR job_type=''")
             # Reset stuck scanning libraries on startup
             stuck = db.execute("UPDATE libraries SET status='idle' WHERE status='scanning'")
             if stuck.rowcount > 0:
                 log.warning(f"Reset {stuck.rowcount} stuck library scans on startup")
-            # Reset stuck processing jobs on startup — put them back in queue for automatic retry
-            stuck_jobs = db.execute("""UPDATE queue SET status='queued', health_status='healthy',
-                error_message=NULL, progress=0, current_step='', worker_id=NULL,
-                started_at=NULL WHERE status='processing'""")
+            # Reset stuck processing jobs on startup (worker probably died)
+            stuck_jobs = db.execute("UPDATE queue SET status='error', error_message='Server restarted — job was interrupted' WHERE status='processing'")
             if stuck_jobs.rowcount > 0:
-                log.warning(f"Reset {stuck_jobs.rowcount} interrupted jobs back to queued on startup")
-                add_log(f"Server restart: reset {stuck_jobs.rowcount} interrupted jobs back to queue", db=db)
-            # Reset health checks that were in progress
-            stuck_hc = db.execute("UPDATE queue SET health_status='pending' WHERE health_status='checking'")
-            if stuck_hc.rowcount > 0:
-                log.warning(f"Reset {stuck_hc.rowcount} stuck health checks on startup")
+                log.warning(f"Reset {stuck_jobs.rowcount} stuck processing jobs on startup")
             db.execute("UPDATE workers SET status='idle', current_job_id=NULL")
     except Exception as e:
         log.error(f"Migration error: {e}")
 
-def add_log(msg, level="INFO", source="server", job_id=None, db=None):
+def add_log(msg, level="INFO", source="server", job_id=None):
     try:
-        if db:
+        with get_db() as db:
             db.execute("INSERT INTO logs (level, source, message, job_id) VALUES (?, ?, ?, ?)",
                        (level, source, msg, job_id))
-        else:
-            with get_db() as conn:
-                conn.execute("INSERT INTO logs (level, source, message, job_id) VALUES (?, ?, ?, ?)",
-                           (level, source, msg, job_id))
     except Exception:
         pass
 
@@ -233,8 +319,12 @@ def login_required(f):
         if not auth_hash:  # No password set = no auth required
             return f(*args, **kwargs)
         if not session.get("authenticated"):
-            if request.path.startswith("/api/workers") or request.path.startswith("/api/jobs") or request.path.startswith("/api/settings") or request.path.startswith("/api/queue/"):
+            if request.path.startswith("/api/workers") or request.path.startswith("/api/jobs"):
                 # Node API calls use worker auth, not session
+                return f(*args, **kwargs)
+            # v3.4: nodes need to read settings (worker counts, claude_api_key, etc.)
+            # GET-only — PUT still requires auth so users can't change settings without logging in
+            if request.path == "/api/settings" and request.method == "GET":
                 return f(*args, **kwargs)
             return jsonify({"error": "unauthorized"}), 401
         return f(*args, **kwargs)
@@ -283,23 +373,6 @@ def auth_login():
 @app.route("/api/auth/logout", methods=["POST"])
 def auth_logout():
     session.clear()
-    return jsonify({"ok": True})
-
-@app.route("/api/auth/change-password", methods=["POST"])
-def auth_change_password():
-    """Change password — requires current password verification."""
-    data = request.json
-    current = data.get("current", "")
-    new_pw = data.get("password", "")
-    if not current or not new_pw:
-        return jsonify({"error": "Current and new password required"}), 400
-    if len(new_pw) < 4:
-        return jsonify({"error": "Password must be at least 4 characters"}), 400
-    stored_hash = get_setting("auth_hash")
-    if stored_hash and hash_password(current) != stored_hash:
-        return jsonify({"error": "Current password is incorrect"}), 401
-    set_setting("auth_hash", hash_password(new_pw))
-    add_log("Password changed")
     return jsonify({"ok": True})
 
 
@@ -381,6 +454,83 @@ def probe_file(path):
     }
 
 
+# ─── Cleanup Analysis (RemuxClean) ───────────────────────────────────────────
+KEEP_LANGS = {"eng", "en", "jpn", "ja", "und", ""}  # empty string = no lang tag = treat as und
+
+DIRTY_NAME_KEYWORDS = [
+    "blu-ray", "bluray", "blu ray", "uhd", "web-dl", "web dl", "webrip",
+    "bdrip", "hdrip", "brrip", "remux", "1080p", "2160p", "720p", "4k",
+    "x264", "x265", "hevc-", "ddp", "rarbg", "psa", "tigole", "cee",
+    "subrip", "pgssub", "subtitleedit",
+]
+
+def is_dirty_track_name(name):
+    """Detect if a track title is 'dirty' (contains source/release info or non-ASCII)."""
+    if not name or not isinstance(name, str):
+        return False
+    # Non-ASCII characters (Cyrillic, CJK, etc. — these are foreign-language groups)
+    if any(ord(c) > 127 for c in name):
+        return True
+    name_lower = name.lower()
+    for kw in DIRTY_NAME_KEYWORDS:
+        if kw in name_lower:
+            return True
+    # Excessive separators suggest junk like "Forced / Release Group / SUBRIP"
+    if name.count("/") >= 2:
+        return True
+    if name.count(" - ") >= 4:
+        return True
+    return False
+
+def analyze_for_cleanup(probe_json):
+    """
+    Given parsed ffprobe JSON, return cleanup analysis.
+    Returns dict with: unwanted_audio, unwanted_subs, dirty_names,
+    total_audio, total_subs, needs_cleanup (bool).
+    """
+    if not probe_json:
+        return None
+    streams = probe_json.get("streams", [])
+    audio = [s for s in streams if s.get("codec_type") == "audio"]
+    subs = [s for s in streams if s.get("codec_type") == "subtitle"]
+
+    unwanted_audio = 0
+    unwanted_subs = 0
+    dirty_names = 0
+
+    for s in audio:
+        tags = s.get("tags") or {}
+        lang = (tags.get("language") or "und").lower()
+        if lang not in KEEP_LANGS:
+            unwanted_audio += 1
+        title = tags.get("title") or ""
+        if is_dirty_track_name(title):
+            dirty_names += 1
+
+    # Safety net: if EVERY audio track is non-keep-lang, scanner shouldn't
+    # mark this as needing cleanup unless there's exactly one — node will keep
+    # the first audio track regardless. We still queue it because the user
+    # presumably wants OTHER cleanup (e.g., subtitle filtering or name fixes).
+
+    for s in subs:
+        tags = s.get("tags") or {}
+        lang = (tags.get("language") or "und").lower()
+        if lang not in KEEP_LANGS:
+            unwanted_subs += 1
+        title = tags.get("title") or ""
+        if is_dirty_track_name(title):
+            dirty_names += 1
+
+    return {
+        "unwanted_audio": unwanted_audio,
+        "unwanted_subs": unwanted_subs,
+        "dirty_names": dirty_names,
+        "total_audio": len(audio),
+        "total_subs": len(subs),
+        "needs_cleanup": (unwanted_audio + unwanted_subs + dirty_names) > 0,
+    }
+
+
 # ─── Library Scanner ─────────────────────────────────────────────────────────
 def count_video_files(path):
     count = 0
@@ -399,25 +549,29 @@ def scan_library_task(library_id):
         settings = {r["key"]: r["value"] for r in db.execute("SELECT * FROM settings").fetchall()}
         min_size = float(settings.get("min_size_gb", "10"))
         skip_transcoded = settings.get("skip_transcoded", "true") == "true"
-        # Build set of already-queued file paths to skip re-probing
-        existing_paths = set(r[0] for r in db.execute("SELECT file_path FROM queue").fetchall())
 
     path = lib["path"]
     add_log(f"Scanning library: {lib['name']} ({path})")
 
-    # Phase 1: Walk filesystem — collect files needing probe (fast, no I/O per file beyond stat)
+    # Count total files first for progress
     total_files = count_video_files(path)
-    scan_progress[library_id] = {"total": total_files, "scanned": 0, "current_file": "Collecting files...", "eta": "calculating...", "status": "scanning"}
+    scan_progress[library_id] = {"total": total_files, "scanned": 0, "current_file": "", "eta": "calculating...", "status": "scanning"}
     start_time = time.time()
 
-    files_to_probe = []
-    files_undersized = []  # Files below min_size — will be added as skipped
-    file_count, total_size, skipped = 0, 0, 0
+    file_count, total_size, added, skipped = 0, 0, 0, 0
+    ext_breakdown = {}
+    walked_files = 0
+    walked_skipped_ext = 0
 
     for root, dirs, files in os.walk(path):
         for filename in sorted(files):
+            walked_files += 1
             ext = os.path.splitext(filename)[1].lower()
-            if ext not in VIDEO_EXTENSIONS: continue
+            if ext not in VIDEO_EXTENSIONS:
+                walked_skipped_ext += 1
+                continue
+            ext_breakdown[ext] = ext_breakdown.get(ext, 0) + 1
+
             filepath = os.path.join(root, filename)
             try: size_gb = os.path.getsize(filepath) / (1024**3)
             except OSError: continue
@@ -425,58 +579,33 @@ def scan_library_task(library_id):
             file_count += 1
             total_size += size_gb
 
-            # Update progress (fast phase)
-            scan_progress[library_id]["scanned"] = file_count
-            scan_progress[library_id]["current_file"] = filename
-
-            if filepath in existing_paths: skipped += 1; continue
-            if size_gb < min_size:
-                files_undersized.append((filepath, filename, size_gb))
-                continue
-
-            files_to_probe.append((filepath, filename, size_gb))
-
-    # Phase 2: Parallel probe — 6 workers for NAS I/O concurrency
-    added = 0
-    probe_total = len(files_to_probe)
-    probe_done = 0
-    scan_progress[library_id]["current_file"] = f"Probing {probe_total} new files..."
-    scan_progress[library_id]["total"] = probe_total
-    scan_progress[library_id]["scanned"] = 0
-
-    def probe_one(args):
-        fpath, fname, sgb = args
-        try:
-            info = probe_file(fpath)
-            return (fpath, fname, sgb, info)
-        except Exception as e:
-            log.warning(f"Probe failed for {fname}: {e}")
-            return (fpath, fname, sgb, None)
-
-    probe_workers = min(6, max(1, probe_total))
-    with ThreadPoolExecutor(max_workers=probe_workers) as executor:
-        futures = {executor.submit(probe_one, f): f for f in files_to_probe}
-        for future in as_completed(futures):
-            fpath, fname, sgb, info = future.result()
-            probe_done += 1
-
+            # Update progress
             elapsed = time.time() - start_time
-            rate = probe_done / elapsed if elapsed > 0 else 1
-            remaining = (probe_total - probe_done) / rate if rate > 0 else 0
+            rate = file_count / elapsed if elapsed > 0 else 1
+            remaining = (total_files - file_count) / rate if rate > 0 else 0
             eta_min = remaining / 60
             eta_str = f"{int(eta_min)}m {int(remaining % 60)}s" if eta_min >= 1 else f"{int(remaining)}s"
             scan_progress[library_id] = {
-                "total": probe_total, "scanned": probe_done,
-                "current_file": fname, "eta": eta_str, "status": "scanning"
+                "total": total_files, "scanned": file_count,
+                "current_file": filename, "eta": eta_str, "status": "scanning"
             }
 
+            if size_gb < min_size: skipped += 1; continue
+
+            with get_db() as db:
+                exists = db.execute("SELECT id FROM queue WHERE file_path = ?", (filepath,)).fetchone()
+                if exists: skipped += 1; continue
+
+            info = None
+            try:
+                info = probe_file(filepath)
+            except Exception as e:
+                log.warning(f"Probe failed for {filename}: {e}")
             if not info: skipped += 1; continue
             if skip_transcoded and info["already_transcoded"]: skipped += 1; continue
 
             with get_db() as db:
-                # Double-check not added by another scan
-                exists = db.execute("SELECT id FROM queue WHERE file_path = ?", (fpath,)).fetchone()
-                if exists: skipped += 1; continue
+                # Set priority based on queue position
                 max_pri = db.execute("SELECT COALESCE(MAX(priority), 0) FROM queue").fetchone()[0]
                 db.execute("""INSERT INTO queue (
                     file_path, file_name, file_size_gb, duration_min, duration_str,
@@ -485,7 +614,7 @@ def scan_library_task(library_id):
                     subtitle_track_count, library_id, library_name,
                     status, health_status, priority, probe_data
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', ?, ?)""",
-                (fpath, fname, info["file_size_gb"], info["duration_min"], info["duration_str"],
+                (filepath, filename, info["file_size_gb"], info["duration_min"], info["duration_str"],
                  info["video_codec"], info["resolution"], info["fps"],
                  info["hdr_type"], int(info["has_dovi"]), info["dovi_profile"],
                  info["audio_summary"], info["audio_track_count"],
@@ -493,42 +622,590 @@ def scan_library_task(library_id):
                  max_pri + 1, info["probe_data"]))
                 added += 1
 
-    # Phase 3: Insert undersized files as 'skipped' so they appear in the queue
-    skipped_added = 0
-    for fpath, fname, sgb in files_undersized:
-        with get_db() as db:
-            exists = db.execute("SELECT id FROM queue WHERE file_path = ?", (fpath,)).fetchone()
-            if exists: continue
-            max_pri = db.execute("SELECT COALESCE(MAX(priority), 0) FROM queue").fetchone()[0]
-            db.execute("""INSERT INTO queue (
-                file_path, file_name, file_size_gb, library_id, library_name,
-                status, health_status, priority, skipped_reason
-            ) VALUES (?, ?, ?, ?, ?, 'skipped', 'skipped', ?, ?)""",
-            (fpath, fname, sgb, library_id, lib["name"],
-             max_pri + 1, f"Below minimum file size ({min_size} GB)"))
-            skipped_added += 1
-
     with get_db() as db:
         db.execute("UPDATE libraries SET file_count=?, total_size_gb=?, last_scanned=datetime('now','localtime'), status='scanned' WHERE id=?",
                    (file_count, total_size, library_id))
 
     scan_progress[library_id] = {"total": total_files, "scanned": total_files, "current_file": "", "eta": "done", "status": "complete"}
-    add_log(f"Scan complete: {lib['name']} — {added} queued, {skipped_added} undersized, {skipped} skipped, {file_count} total")
+    ext_summary = ", ".join(f"{e}:{n}" for e, n in sorted(ext_breakdown.items())) if ext_breakdown else "none"
+    add_log(f"Scan complete: {lib['name']} — {added} queued, {skipped} skipped, {file_count} video files matched. "
+            f"Walked {walked_files} files total ({walked_skipped_ext} non-video). Extensions: {ext_summary}")
     if get_setting("ntfy_on_scan") == "true":
         send_notification("Scan Complete", f"{lib['name']}: {added} new files queued, {file_count} total")
 
 
+def scan_remuxclean_task(library_id):
+    """
+    Scan a library for files that need RemuxClean (track removal + name cleanup).
+    Inserts queue entries with job_type='remuxclean'.
+    A separate scan_progress key 'remuxclean_<lid>' is used so it doesn't
+    collide with the regular transcode scan.
+    """
+    global scan_progress
+    pkey = f"remuxclean_{library_id}"
+    with get_db() as db:
+        lib = db.execute("SELECT * FROM libraries WHERE id = ?", (library_id,)).fetchone()
+        if not lib:
+            return
+    path = lib["path"]
+    add_log(f"[RemuxClean Scan] {lib['name']} ({path})")
+
+    # Cleanup is MKV-only (mkvmerge can only filter MKV containers cleanly)
+    cleanup_exts = {'.mkv'}
+    total_files = 0
+    for root, dirs, files in os.walk(path):
+        for f in files:
+            if os.path.splitext(f)[1].lower() in cleanup_exts:
+                total_files += 1
+
+    scan_progress[pkey] = {"total": total_files, "scanned": 0, "current_file": "",
+                           "eta": "calculating...", "status": "scanning"}
+    start_time = time.time()
+    file_count, added, skipped, skipped_clean, skipped_dup = 0, 0, 0, 0, 0
+
+    for root, dirs, files in os.walk(path):
+        for filename in sorted(files):
+            ext = os.path.splitext(filename)[1].lower()
+            if ext not in cleanup_exts:
+                continue
+            filepath = os.path.join(root, filename)
+            try:
+                size_gb = os.path.getsize(filepath) / (1024**3)
+            except OSError:
+                continue
+
+            file_count += 1
+            elapsed = time.time() - start_time
+            rate = file_count / elapsed if elapsed > 0 else 1
+            remaining = (total_files - file_count) / rate if rate > 0 else 0
+            eta_str = (f"{int(remaining/60)}m {int(remaining%60)}s" if remaining >= 60 else f"{int(remaining)}s")
+            scan_progress[pkey] = {
+                "total": total_files, "scanned": file_count,
+                "current_file": filename, "eta": eta_str, "status": "scanning"
+            }
+
+            # Skip if a remuxclean job already exists for this file (any status)
+            with get_db() as db:
+                exists = db.execute(
+                    "SELECT id, status FROM queue WHERE file_path = ? AND job_type = 'remuxclean'",
+                    (filepath,)).fetchone()
+                if exists:
+                    skipped_dup += 1
+                    continue
+
+            # Probe to determine if cleanup is needed
+            probe_json = None
+            try:
+                cmd = [FFPROBE, "-v", "quiet", "-print_format", "json",
+                       "-show_format", "-show_streams", filepath]
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                if r.returncode == 0:
+                    probe_json = json.loads(r.stdout)
+            except Exception as e:
+                log.warning(f"[RemuxClean Scan] FFprobe failed on {filename}: {e}")
+                continue
+
+            if not probe_json:
+                skipped += 1
+                continue
+
+            cleanup = analyze_for_cleanup(probe_json)
+            if not cleanup or not cleanup["needs_cleanup"]:
+                skipped_clean += 1
+                continue
+
+            # Build a brief description for the queue row
+            audio_count = cleanup["total_audio"]
+            sub_count = cleanup["total_subs"]
+            note = []
+            if cleanup["unwanted_audio"]:
+                note.append(f"{cleanup['unwanted_audio']} unwanted audio")
+            if cleanup["unwanted_subs"]:
+                note.append(f"{cleanup['unwanted_subs']} unwanted subs")
+            if cleanup["dirty_names"]:
+                note.append(f"{cleanup['dirty_names']} dirty names")
+            current_step = "Pending: " + ", ".join(note)
+
+            # Get duration from probe for display
+            fmt = probe_json.get("format", {})
+            try:
+                dur_min = float(fmt.get("duration", 0)) / 60
+            except Exception:
+                dur_min = 0
+            dur_str = f"{int(dur_min//60)}h {int(dur_min%60)}m" if dur_min >= 60 else f"{int(dur_min)}m"
+
+            # Pull video codec/resolution for display consistency
+            v = next((s for s in probe_json.get("streams", []) if s.get("codec_type") == "video"), {})
+            vcodec = v.get("codec_name", "")
+            res = f"{v.get('width', 0)}x{v.get('height', 0)}"
+
+            with get_db() as db:
+                max_pri = db.execute("SELECT COALESCE(MAX(priority), 0) FROM queue").fetchone()[0]
+                try:
+                    db.execute("""INSERT INTO queue (
+                        file_path, file_name, file_size_gb, duration_min, duration_str,
+                        video_codec, resolution, hdr_type, audio_track_count, subtitle_track_count,
+                        library_id, library_name, status, health_status, priority, probe_data,
+                        job_type, current_step
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'SDR', ?, ?, ?, ?, 'pending', 'pending', ?, ?, 'remuxclean', ?)""",
+                    (filepath, filename, size_gb, dur_min, dur_str,
+                     vcodec, res, audio_count, sub_count,
+                     library_id, lib["name"], max_pri + 1, json.dumps(probe_json),
+                     current_step))
+                    added += 1
+                except sqlite3.IntegrityError:
+                    skipped_dup += 1
+
+    scan_progress[pkey] = {"total": total_files, "scanned": total_files,
+                           "current_file": "", "eta": "done", "status": "complete"}
+    add_log(f"[RemuxClean Scan] {lib['name']} — {added} queued, "
+            f"{skipped_clean} already clean, {skipped_dup} already in queue, "
+            f"{skipped} probe-failed, {file_count} total MKVs")
+    if get_setting("ntfy_on_scan") == "true":
+        send_notification("Cleanup Scan Complete",
+            f"{lib['name']}: {added} files queued for cleanup ({skipped_clean} already clean)")
+
+
+# ─── DV7→8 Only Scan ─────────────────────────────────────────────────────────
+def analyze_for_dv78(probe_json):
+    """Detect DoVi Profile 7 files. Returns dict with profile + has_dovi info."""
+    if not probe_json:
+        return None
+    streams = probe_json.get("streams", [])
+    video = next((s for s in streams if s.get("codec_type") == "video"
+                  and s.get("codec_name") in ("hevc", "h264")), None)
+    if not video:
+        return None
+
+    has_dovi = False
+    dovi_profile = None
+    for sd in video.get("side_data_list", []):
+        sdt = sd.get("side_data_type", "")
+        if "DOVI" in sdt:
+            has_dovi = True
+            dovi_profile = sd.get("dv_profile")
+            break
+
+    return {
+        "has_dovi": has_dovi,
+        "dovi_profile": dovi_profile,
+        "needs_conversion": has_dovi and (dovi_profile == 7 or str(dovi_profile) == "7"),
+    }
+
+def scan_dv78only_task(library_id):
+    """
+    Scan a library for DoVi Profile 7 files. Queues 'dv78only' jobs.
+    These are fast jobs — RPU extraction + profile conversion + remux,
+    no re-encoding.
+    """
+    global scan_progress
+    pkey = f"dv78only_{library_id}"
+    with get_db() as db:
+        lib = db.execute("SELECT * FROM libraries WHERE id = ?", (library_id,)).fetchone()
+        if not lib:
+            return
+    path = lib["path"]
+    add_log(f"[DV7→8 Scan] {lib['name']} ({path})")
+
+    cleanup_exts = {'.mkv'}
+    total_files = 0
+    for root, dirs, files in os.walk(path):
+        for f in files:
+            if os.path.splitext(f)[1].lower() in cleanup_exts:
+                total_files += 1
+
+    scan_progress[pkey] = {"total": total_files, "scanned": 0, "current_file": "",
+                           "eta": "calculating...", "status": "scanning"}
+    start_time = time.time()
+    file_count, added, skipped_dup, skipped_no_p7, skipped_probe = 0, 0, 0, 0, 0
+
+    for root, dirs, files in os.walk(path):
+        for filename in sorted(files):
+            ext = os.path.splitext(filename)[1].lower()
+            if ext not in cleanup_exts:
+                continue
+            filepath = os.path.join(root, filename)
+            try:
+                size_gb = os.path.getsize(filepath) / (1024**3)
+            except OSError:
+                continue
+
+            file_count += 1
+            elapsed = time.time() - start_time
+            rate = file_count / elapsed if elapsed > 0 else 1
+            remaining = (total_files - file_count) / rate if rate > 0 else 0
+            eta_str = (f"{int(remaining/60)}m {int(remaining%60)}s" if remaining >= 60 else f"{int(remaining)}s")
+            scan_progress[pkey] = {
+                "total": total_files, "scanned": file_count,
+                "current_file": filename, "eta": eta_str, "status": "scanning"
+            }
+
+            with get_db() as db:
+                exists = db.execute(
+                    "SELECT id FROM queue WHERE file_path = ? AND job_type = 'dv78only'",
+                    (filepath,)).fetchone()
+                if exists:
+                    skipped_dup += 1
+                    continue
+
+            probe_json = None
+            try:
+                cmd = [FFPROBE, "-v", "quiet", "-print_format", "json",
+                       "-show_format", "-show_streams", filepath]
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                if r.returncode == 0:
+                    probe_json = json.loads(r.stdout)
+            except Exception as e:
+                log.warning(f"[DV7→8 Scan] FFprobe failed on {filename}: {e}")
+                skipped_probe += 1
+                continue
+
+            if not probe_json:
+                skipped_probe += 1
+                continue
+
+            dv = analyze_for_dv78(probe_json)
+            if not dv or not dv["needs_conversion"]:
+                skipped_no_p7 += 1
+                continue
+
+            fmt = probe_json.get("format", {})
+            try:
+                dur_min = float(fmt.get("duration", 0)) / 60
+            except Exception:
+                dur_min = 0
+            dur_str = f"{int(dur_min//60)}h {int(dur_min%60)}m" if dur_min >= 60 else f"{int(dur_min)}m"
+            v = next((s for s in probe_json.get("streams", []) if s.get("codec_type") == "video"), {})
+            vcodec = v.get("codec_name", "")
+            res = f"{v.get('width', 0)}x{v.get('height', 0)}"
+
+            with get_db() as db:
+                max_pri = db.execute("SELECT COALESCE(MAX(priority), 0) FROM queue").fetchone()[0]
+                try:
+                    db.execute("""INSERT INTO queue (
+                        file_path, file_name, file_size_gb, duration_min, duration_str,
+                        video_codec, resolution, hdr_type, has_dovi, dovi_profile,
+                        library_id, library_name, status, health_status, priority, probe_data,
+                        job_type, current_step
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'DoVi', 1, 7, ?, ?, 'pending', 'pending', ?, ?, 'dv78only', ?)""",
+                    (filepath, filename, size_gb, dur_min, dur_str,
+                     vcodec, res, library_id, lib["name"], max_pri + 1, json.dumps(probe_json),
+                     "Pending: DV Profile 7 → 8 conversion"))
+                    added += 1
+                except sqlite3.IntegrityError:
+                    skipped_dup += 1
+
+    scan_progress[pkey] = {"total": total_files, "scanned": total_files,
+                           "current_file": "", "eta": "done", "status": "complete"}
+    add_log(f"[DV7→8 Scan] {lib['name']} — {added} queued, "
+            f"{skipped_no_p7} not P7, {skipped_dup} already in queue, "
+            f"{skipped_probe} probe-failed, {file_count} total MKVs")
+
+
+# ─── Subtitle Generation Scan ────────────────────────────────────────────────
+def has_subtitle_lang(probe_json, target_langs):
+    """
+    Returns True if any subtitle stream has language in target_langs set.
+    Distinguishes text-based subtitles (subrip, ass, etc.) from PGS/image subs.
+    """
+    if not probe_json:
+        return False
+    target_langs = set(l.lower() for l in target_langs)
+    for s in probe_json.get("streams", []):
+        if s.get("codec_type") != "subtitle":
+            continue
+        tags = s.get("tags") or {}
+        lang = (tags.get("language") or "").lower()
+        if lang in target_langs:
+            return True
+    return False
+
+def has_text_subtitle_lang(probe_json, target_langs):
+    """Returns True if a TEXT-based subtitle exists in target_langs (not PGS)."""
+    if not probe_json:
+        return False
+    target_langs = set(l.lower() for l in target_langs)
+    text_codecs = {"subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text"}
+    for s in probe_json.get("streams", []):
+        if s.get("codec_type") != "subtitle":
+            continue
+        codec = (s.get("codec_name") or "").lower()
+        if codec not in text_codecs:
+            continue
+        tags = s.get("tags") or {}
+        lang = (tags.get("language") or "").lower()
+        if lang in target_langs:
+            return True
+    return False
+
+def scan_subgen_task(library_id):
+    """
+    Scan a library for files needing Japanese subtitle generation.
+
+    v3.5 behavior change: ALL video files are recorded.
+      - Files MISSING Japanese subs → queued as 'pending' (real subgen jobs)
+      - Files that already have Japanese audio or text subs → recorded as 'skipped'
+        with a `skipped_reason` tag like "Has Japanese subs" or "Has Japanese audio".
+      This way the AI Subtitles tab reflects the FULL library; the user can see
+      which files have JP already (in the Skipped tab) and which still need work.
+    """
+    global scan_progress
+    pkey = f"subgen_{library_id}"
+    with get_db() as db:
+        lib = db.execute("SELECT * FROM libraries WHERE id = ?", (library_id,)).fetchone()
+        if not lib:
+            return
+    path = lib["path"]
+    add_log(f"[SubGen Scan] {lib['name']} ({path})")
+
+    target_lang = (get_setting("subgen_target_lang") or "jpn").lower()
+    has_target_set = {"jpn", "ja"} if target_lang in ("jpn", "ja") else {target_lang}
+
+    # All video extensions count for subtitle generation. Keep this in sync with VIDEO_EXTENSIONS at top of file.
+    video_exts = {'.mkv', '.mp4', '.m4v', '.avi', '.mov', '.wmv', '.flv', '.webm', '.ts', '.m2ts', '.mpg', '.mpeg'}
+    total_files = 0
+    for root, dirs, files in os.walk(path):
+        for f in files:
+            if os.path.splitext(f)[1].lower() in video_exts:
+                total_files += 1
+
+    scan_progress[pkey] = {"total": total_files, "scanned": 0, "current_file": "",
+                           "eta": "calculating...", "status": "scanning"}
+    start_time = time.time()
+    file_count = 0
+    queued = 0           # Real subgen jobs (need translation)
+    auto_skipped = 0     # Files with JP already → recorded as skipped
+    skipped_dup = 0      # Already in queue
+    skipped_probe = 0    # Probe failed
+    ext_breakdown = {}
+
+    for root, dirs, files in os.walk(path):
+        for filename in sorted(files):
+            ext = os.path.splitext(filename)[1].lower()
+            if ext not in video_exts:
+                continue
+            ext_breakdown[ext] = ext_breakdown.get(ext, 0) + 1
+            filepath = os.path.join(root, filename)
+            try:
+                size_gb = os.path.getsize(filepath) / (1024**3)
+            except OSError:
+                continue
+
+            file_count += 1
+            elapsed = time.time() - start_time
+            rate = file_count / elapsed if elapsed > 0 else 1
+            remaining = (total_files - file_count) / rate if rate > 0 else 0
+            eta_str = (f"{int(remaining/60)}m {int(remaining%60)}s" if remaining >= 60 else f"{int(remaining)}s")
+            scan_progress[pkey] = {
+                "total": total_files, "scanned": file_count,
+                "current_file": filename, "eta": eta_str, "status": "scanning"
+            }
+
+            with get_db() as db:
+                exists = db.execute(
+                    "SELECT id FROM queue WHERE file_path = ? AND job_type = 'subgen'",
+                    (filepath,)).fetchone()
+                if exists:
+                    skipped_dup += 1
+                    continue
+
+            probe_json = None
+            try:
+                cmd = [FFPROBE, "-v", "quiet", "-print_format", "json",
+                       "-show_format", "-show_streams", filepath]
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                if r.returncode == 0:
+                    probe_json = json.loads(r.stdout)
+            except Exception as e:
+                log.warning(f"[SubGen Scan] FFprobe failed on {filename}: {e}")
+                skipped_probe += 1
+                continue
+
+            if not probe_json:
+                skipped_probe += 1
+                continue
+
+            # Determine what JP content already exists (if any)
+            audio_streams = [s for s in probe_json.get("streams", []) if s.get("codec_type") == "audio"]
+            audio_langs = set()
+            for a in audio_streams:
+                tags = a.get("tags") or {}
+                lng = (tags.get("language") or "und").lower()
+                audio_langs.add(lng)
+            has_jp_audio = bool(has_target_set & audio_langs)
+            has_any_jp_sub = has_subtitle_lang(probe_json, has_target_set)
+            has_jp_text_sub = has_text_subtitle_lang(probe_json, has_target_set)
+
+            # Build common metadata
+            fmt = probe_json.get("format", {})
+            try:
+                dur_min = float(fmt.get("duration", 0)) / 60
+            except Exception:
+                dur_min = 0
+            dur_str = f"{int(dur_min//60)}h {int(dur_min%60)}m" if dur_min >= 60 else f"{int(dur_min)}m"
+            v = next((s for s in probe_json.get("streams", []) if s.get("codec_type") == "video"), {})
+            vcodec = v.get("codec_name", "")
+            res = f"{v.get('width', 0)}x{v.get('height', 0)}"
+            sub_count = sum(1 for s in probe_json.get("streams", []) if s.get("codec_type") == "subtitle")
+
+            # ── Decision ────────────────────────────────────────────────────
+            if has_jp_text_sub:
+                # Already has text-based JP subs (subrip/ass/etc) — fully covered
+                status = "skipped"
+                reason = "Has Japanese text subs"
+                step = "Skipped: Japanese text subtitles already present"
+                health = "skipped"
+            elif has_any_jp_sub:
+                # Has JP subs but only image-based (PGS) — flag but skip for now
+                status = "skipped"
+                reason = "Has Japanese PGS (image) subs"
+                step = "Skipped: Japanese image subs already present"
+                health = "skipped"
+            elif has_jp_audio:
+                # JP audio means viewer can hear in Japanese — skip subs generation
+                status = "skipped"
+                reason = "Has Japanese audio"
+                step = "Skipped: Japanese audio track already present"
+                health = "skipped"
+            else:
+                # Genuinely needs JP subs — queue for processing
+                # Determine which path the node will take
+                if has_text_subtitle_lang(probe_json, {"eng", "en"}):
+                    pipeline_label = "English text subs → Claude translate"
+                elif "eng" in audio_langs or "en" in audio_langs:
+                    pipeline_label = "English audio → Whisper + Claude translate"
+                else:
+                    pipeline_label = "Audio → Whisper + Claude translate"
+                status = "pending"
+                reason = None
+                step = f"Pending: {pipeline_label}"
+                health = "pending"
+
+            with get_db() as db:
+                max_pri = db.execute("SELECT COALESCE(MAX(priority), 0) FROM queue").fetchone()[0]
+                try:
+                    db.execute("""INSERT INTO queue (
+                        file_path, file_name, file_size_gb, duration_min, duration_str,
+                        video_codec, resolution, hdr_type, audio_track_count, subtitle_track_count,
+                        library_id, library_name, status, health_status, priority, probe_data,
+                        job_type, current_step, skipped_reason
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'SDR', ?, ?, ?, ?, ?, ?, ?, ?, 'subgen', ?, ?)""",
+                    (filepath, filename, size_gb, dur_min, dur_str,
+                     vcodec, res, len(audio_streams), sub_count,
+                     library_id, lib["name"], status, health, max_pri + 1, json.dumps(probe_json),
+                     step, reason))
+                    if status == "skipped":
+                        auto_skipped += 1
+                    else:
+                        queued += 1
+                except sqlite3.IntegrityError:
+                    skipped_dup += 1
+
+    scan_progress[pkey] = {"total": total_files, "scanned": total_files,
+                           "current_file": "", "eta": "done", "status": "complete"}
+
+    ext_summary = ", ".join(f"{e}:{n}" for e, n in sorted(ext_breakdown.items())) if ext_breakdown else "none"
+    add_log(f"[SubGen Scan] {lib['name']} — {queued} queued (need JP), "
+            f"{auto_skipped} skipped (already have JP), "
+            f"{skipped_dup} already in queue, {skipped_probe} probe-failed, "
+            f"{file_count} total video files. Extensions: {ext_summary}")
+    if get_setting("ntfy_on_scan") == "true":
+        send_notification("SubGen Scan Complete",
+            f"{lib['name']}: {queued} need Japanese subs, {auto_skipped} already have them ({file_count} total)")
+
+
+
 # ─── Health Check ────────────────────────────────────────────────────────────
 def health_check_task():
-    """Server-side cleanup only — actual health checks run on nodes (Tdarr-style).
-    This only resets items stuck in 'checking' state if a node died mid-check."""
+    """Run health checks on pending items — verify files exist, are readable, and have valid media streams."""
     with get_db() as db:
-        # Reset items stuck in 'checking' for >5 minutes (node probably died)
-        stuck = db.execute("""UPDATE queue SET health_status='pending', current_step=''
-            WHERE health_status='checking'
-            AND created_at < datetime('now','localtime', '-120 seconds')""")
-        if stuck.rowcount > 0:
-            add_log(f"Reset {stuck.rowcount} stuck health checks back to pending", level="WARN", db=db)
+        # Limit to 3 concurrent health checks (like Tdarr)
+        active_hc = db.execute("SELECT COUNT(*) as c FROM queue WHERE health_status='checking'").fetchone()["c"]
+        limit = max(0, 3 - active_hc)
+        if limit == 0:
+            return
+        pending = db.execute("SELECT * FROM queue WHERE health_status = 'pending' ORDER BY priority LIMIT ?", (limit,)).fetchall()
+
+    for item in pending:
+        path = item["file_path"]
+        job_id = item["id"]
+        filename = item["file_name"]
+        status = "healthy"
+        error = None
+
+        # Mark as checking
+        with get_db() as db:
+            db.execute("UPDATE queue SET health_status='checking', current_step='Health check starting...' WHERE id=?", (job_id,))
+
+        add_log(f"[Health Check] Starting: {filename}", source="healthcheck", job_id=job_id)
+
+        # Step 1: File exists
+        add_log(f"[Health Check] Step 1: Checking file exists", source="healthcheck", job_id=job_id)
+        if not os.path.exists(path):
+            status = "missing"
+            error = "File not found on disk"
+            add_log(f"[Health Check] FAILED: {error}", level="ERROR", source="healthcheck", job_id=job_id)
+        elif os.path.getsize(path) == 0:
+            status = "corrupt"
+            error = "File is empty (0 bytes)"
+            add_log(f"[Health Check] FAILED: {error}", level="ERROR", source="healthcheck", job_id=job_id)
+        else:
+            file_size = os.path.getsize(path)
+            add_log(f"[Health Check] Step 1: File exists ({file_size/(1024**3):.2f} GB)", source="healthcheck", job_id=job_id)
+
+            # Step 2: Read test
+            add_log(f"[Health Check] Step 2: Read test", source="healthcheck", job_id=job_id)
+            try:
+                with open(path, "rb") as f:
+                    f.read(65536)  # Read 64KB
+                add_log(f"[Health Check] Step 2: Read test passed", source="healthcheck", job_id=job_id)
+            except Exception as e:
+                status = "unreadable"
+                error = f"Cannot read file: {str(e)}"
+                add_log(f"[Health Check] FAILED: {error}", level="ERROR", source="healthcheck", job_id=job_id)
+
+            # Step 3: FFprobe validation (only if read test passed)
+            if status == "healthy":
+                add_log(f"[Health Check] Step 3: FFprobe media validation", source="healthcheck", job_id=job_id)
+                try:
+                    with get_db() as db:
+                        db.execute("UPDATE queue SET current_step='Health check: FFprobe validation...' WHERE id=?", (job_id,))
+                    cmd = [FFPROBE, "-v", "error", "-show_entries", "format=duration,size,nb_streams", "-of", "json", path]
+                    r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                    if r.returncode != 0:
+                        status = "corrupt"
+                        error = f"FFprobe failed: {r.stderr[:200] if r.stderr else 'Unknown error'}"
+                        add_log(f"[Health Check] FAILED: {error}", level="ERROR", source="healthcheck", job_id=job_id)
+                    else:
+                        probe = json.loads(r.stdout)
+                        streams = int(probe.get("format", {}).get("nb_streams", 0))
+                        duration = float(probe.get("format", {}).get("duration", 0))
+                        if streams == 0:
+                            status = "corrupt"
+                            error = "No media streams found"
+                            add_log(f"[Health Check] FAILED: {error}", level="ERROR", source="healthcheck", job_id=job_id)
+                        elif duration < 1:
+                            status = "corrupt"
+                            error = "Duration is 0 — file may be corrupt"
+                            add_log(f"[Health Check] FAILED: {error}", level="WARN", source="healthcheck", job_id=job_id)
+                        else:
+                            add_log(f"[Health Check] Step 3: Valid media ({streams} streams, {duration/60:.1f} min)", source="healthcheck", job_id=job_id)
+                except subprocess.TimeoutExpired:
+                    status = "timeout"
+                    error = "FFprobe timed out after 120s"
+                    add_log(f"[Health Check] FAILED: {error}", level="ERROR", source="healthcheck", job_id=job_id)
+                except Exception as e:
+                    add_log(f"[Health Check] Step 3: FFprobe unavailable, skipping ({e})", level="WARN", source="healthcheck", job_id=job_id)
+
+        # Final result
+        with get_db() as db:
+            if status == "healthy":
+                db.execute("UPDATE queue SET health_status='healthy', status='queued', current_step='Health check passed' WHERE id=?", (job_id,))
+                add_log(f"[Health Check] PASSED: {filename}", source="healthcheck", job_id=job_id)
+            else:
+                db.execute("UPDATE queue SET health_status=?, status='error', error_message=?, current_step='Health check failed' WHERE id=?",
+                           (status, error, job_id))
+                add_log(f"[Health Check] FAILED: {filename} — {error}", level="ERROR", source="healthcheck", job_id=job_id)
 
 def start_health_check_loop():
     def loop():
@@ -547,7 +1224,7 @@ def start_health_check_loop():
                         AND last_scanned < datetime('now','localtime', '-30 minutes')""")
                     if stuck_libs.rowcount > 0:
                         log.warning(f"Auto-reset {stuck_libs.rowcount} stuck library scans")
-                        add_log(f"Auto-reset {stuck_libs.rowcount} stuck library scans (>30min)", level="WARN", db=db)
+                        add_log(f"Auto-reset {stuck_libs.rowcount} stuck library scans (>30min)", level="WARN")
 
                     # Also reset libraries stuck with no last_scanned timestamp
                     stuck_libs2 = db.execute("""UPDATE libraries SET status='idle'
@@ -556,21 +1233,19 @@ def start_health_check_loop():
                     if stuck_libs2.rowcount > 0:
                         log.warning(f"Auto-reset {stuck_libs2.rowcount} stuck new library scans")
 
-                    # Reset processing jobs with no progress update for > 2 hours — put back in queue
+                    # Reset processing jobs with no progress update for > 2 hours
                     stuck_jobs = db.execute("""SELECT id, worker_id, file_name FROM queue
                         WHERE status='processing' AND started_at < datetime('now','localtime', '-7200 seconds')
                         AND (progress = 0 OR progress IS NULL)""").fetchall()
                     for sj in stuck_jobs:
-                        db.execute("""UPDATE queue SET status='queued', health_status='healthy',
-                            progress=0, current_step='', worker_id=NULL, started_at=NULL
-                            WHERE id=?""", (sj["id"],))
+                        db.execute("UPDATE queue SET status='error', error_message='Stuck — no progress for 2+ hours', completed_at=datetime('now','localtime') WHERE id=?", (sj["id"],))
                         if sj["worker_id"]:
                             db.execute("UPDATE workers SET status='idle', current_job_id=NULL WHERE id=?", (sj["worker_id"],))
-                        add_log(f"Auto-reset stuck job #{sj['id']}: {sj['file_name']} — back to queue", level="WARN", job_id=sj["id"], db=db)
+                        add_log(f"Auto-cancelled stuck job #{sj['id']}: {sj['file_name']}", level="WARN", job_id=sj["id"])
 
                     # Clean up workers with stale heartbeats (> 5 minutes) that show as active
                     db.execute("""UPDATE workers SET status='idle', current_job_id=NULL
-                        WHERE status='active' AND last_heartbeat < datetime('now','localtime', '-60 seconds')""")
+                        WHERE status='active' AND last_heartbeat < datetime('now','localtime', '-300 seconds')""")
 
                     # Auto-delete workers with no heartbeat for 30+ minutes (dead nodes)
                     deleted = db.execute("""DELETE FROM workers
@@ -581,7 +1256,7 @@ def start_health_check_loop():
             except Exception as e:
                 log.error(f"Auto-recovery error: {e}")
 
-            time.sleep(30)  # Server HC is fallback — nodes do primary health checking
+            time.sleep(5)
     t = threading.Thread(target=loop, daemon=True)
     t.start()
 
@@ -628,8 +1303,7 @@ def api_add_library():
 @login_required
 def api_del_library(lid):
     with get_db() as db:
-        # Only delete pending/queued items — preserve completed/error history
-        db.execute("DELETE FROM queue WHERE library_id=? AND status IN ('pending','queued','skipped')", (lid,))
+        db.execute("DELETE FROM queue WHERE library_id=? AND status IN ('pending','queued')", (lid,))
         db.execute("DELETE FROM libraries WHERE id=?", (lid,))
     return jsonify({"ok": True})
 
@@ -638,6 +1312,57 @@ def api_del_library(lid):
 def api_scan_library(lid):
     threading.Thread(target=scan_library_task, args=(lid,), daemon=True).start()
     return jsonify({"ok": True, "message": "Scan started"})
+
+@app.route("/api/libraries/<int:lid>/scan-remuxclean", methods=["POST"])
+@login_required
+def api_scan_remuxclean(lid):
+    """Scan a library for files needing track cleanup. Queues remuxclean jobs."""
+    threading.Thread(target=scan_remuxclean_task, args=(lid,), daemon=True).start()
+    return jsonify({"ok": True, "message": "RemuxClean scan started"})
+
+@app.route("/api/libraries/scan-remuxclean-all", methods=["POST"])
+@login_required
+def api_scan_remuxclean_all():
+    """Run remuxclean scan across all libraries."""
+    with get_db() as db:
+        libs = db.execute("SELECT id FROM libraries").fetchall()
+    for lib in libs:
+        threading.Thread(target=scan_remuxclean_task, args=(lib["id"],), daemon=True).start()
+    return jsonify({"ok": True, "message": f"RemuxClean scan started for {len(libs)} libraries"})
+
+@app.route("/api/libraries/<int:lid>/scan-dv78only", methods=["POST"])
+@login_required
+def api_scan_dv78only(lid):
+    """Scan a library for DoVi Profile 7 files. Queues dv78only jobs."""
+    threading.Thread(target=scan_dv78only_task, args=(lid,), daemon=True).start()
+    return jsonify({"ok": True, "message": "DV7→8 scan started"})
+
+@app.route("/api/libraries/scan-dv78only-all", methods=["POST"])
+@login_required
+def api_scan_dv78only_all():
+    """Run DV7→8 scan across all libraries."""
+    with get_db() as db:
+        libs = db.execute("SELECT id FROM libraries").fetchall()
+    for lib in libs:
+        threading.Thread(target=scan_dv78only_task, args=(lib["id"],), daemon=True).start()
+    return jsonify({"ok": True, "message": f"DV7→8 scan started for {len(libs)} libraries"})
+
+@app.route("/api/libraries/<int:lid>/scan-subgen", methods=["POST"])
+@login_required
+def api_scan_subgen(lid):
+    """Scan a library for files missing Japanese subtitles. Queues subgen jobs."""
+    threading.Thread(target=scan_subgen_task, args=(lid,), daemon=True).start()
+    return jsonify({"ok": True, "message": "Subtitle generation scan started"})
+
+@app.route("/api/libraries/scan-subgen-all", methods=["POST"])
+@login_required
+def api_scan_subgen_all():
+    """Run subtitle generation scan across all libraries."""
+    with get_db() as db:
+        libs = db.execute("SELECT id FROM libraries").fetchall()
+    for lib in libs:
+        threading.Thread(target=scan_subgen_task, args=(lib["id"],), daemon=True).start()
+    return jsonify({"ok": True, "message": f"SubGen scan started for {len(libs)} libraries"})
 
 @app.route("/api/libraries/scan-all", methods=["POST"])
 @login_required
@@ -651,18 +1376,17 @@ def api_scan_all():
 @app.route("/api/libraries/<int:lid>/refresh", methods=["POST"])
 @login_required
 def api_refresh_library(lid):
-    """Re-scan and update changed files — preserves job history."""
+    """Re-scan and update changed files."""
     with get_db() as db:
-        # Remove ONLY pending/queued items whose files no longer exist
-        # Completed/error items are history and should be preserved even if file was replaced
-        items = db.execute("SELECT id, file_path FROM queue WHERE library_id=? AND status IN ('pending','queued','skipped')", (lid,)).fetchall()
+        # Remove queue items whose files no longer exist
+        items = db.execute("SELECT id, file_path FROM queue WHERE library_id=?", (lid,)).fetchall()
         removed = 0
         for item in items:
             if not os.path.exists(item["file_path"]):
                 db.execute("DELETE FROM queue WHERE id=?", (item["id"],))
                 removed += 1
         if removed:
-            add_log(f"Refresh: removed {removed} missing files from library #{lid}", db=db)
+            add_log(f"Refresh: removed {removed} missing files from library #{lid}")
     # Then do a fresh scan to pick up new files
     threading.Thread(target=scan_library_task, args=(lid,), daemon=True).start()
     return jsonify({"ok": True, "removed": removed})
@@ -681,6 +1405,7 @@ def api_list_queue():
     lib = request.args.get("library")
     sort = request.args.get("sort", "priority")
     search = request.args.get("search", "")
+    job_type = request.args.get("job_type")  # NEW: filter by job type
 
     q = "SELECT * FROM queue WHERE 1=1"
     p = []
@@ -688,6 +1413,7 @@ def api_list_queue():
     if hdr: q += " AND hdr_type=?"; p.append(hdr)
     if lib: q += " AND library_name=?"; p.append(lib)
     if search: q += " AND file_name LIKE ?"; p.append(f"%{search}%")
+    if job_type and job_type != "all": q += " AND job_type=?"; p.append(job_type)
 
     sorts = {"priority": "priority ASC,id ASC", "size-desc": "file_size_gb DESC", "size-asc": "file_size_gb ASC", "name": "file_name ASC", "hdr": "hdr_type ASC", "status": "status ASC,priority ASC", "queue-number": "id ASC"}
     q += f" ORDER BY {sorts.get(sort, 'priority ASC,id ASC')}"
@@ -721,7 +1447,7 @@ def api_cancel(jid):
             return jsonify({"error": "Job not found"}), 404
         db.execute("UPDATE queue SET status='cancelled', error_message='Cancelled by user', progress=0, current_step='Cancelled' WHERE id=? AND status IN ('queued','processing','pending')", (jid,))
         # Free up the worker if it was processing this job
-        if job["status"] == "processing" and job["worker_id"]:
+        if job["status"] == "processing" and job.get("worker_id"):
             db.execute("UPDATE workers SET status='idle', current_job_id=NULL WHERE id=?", (job["worker_id"],))
         # Set cancel flag for the node to pick up
         db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, 'true')", (f"cancel_{jid}",))
@@ -739,42 +1465,9 @@ def api_skip(jid):
 @app.route("/api/queue/<int:jid>/accept", methods=["POST"])
 @login_required
 def api_accept(jid):
-    """Accept a completed transcode — replaces original with transcoded file if keep-both mode."""
     with get_db() as db:
-        job = db.execute("SELECT * FROM queue WHERE id=?", (jid,)).fetchone()
-        if not job:
-            return jsonify({"error": "Job not found"}), 404
         db.execute("UPDATE queue SET accepted=1 WHERE id=?", (jid,))
-
-        # If keep-both mode and output exists on NAS, replace original
-        output_path = job["output_path"] if job["output_path"] else ""
-        original_path = job["file_path"]
-        if output_path and output_path != original_path and os.path.exists(output_path):
-            try:
-                # Safety: verify output is reasonable size
-                out_size = os.path.getsize(output_path)
-                if out_size > 1024:  # At least 1KB
-                    base, _ = os.path.splitext(original_path)
-                    final_path = base + os.path.splitext(output_path)[1]  # Keep output extension
-                    if os.path.exists(original_path):
-                        os.remove(original_path)
-                        add_log(f"Accept: deleted original {os.path.basename(original_path)}", job_id=jid, db=db)
-                    os.rename(output_path, final_path)
-                    db.execute("UPDATE queue SET output_path=?, file_path=? WHERE id=?", (final_path, final_path, jid))
-                    add_log(f"Accept: replaced with transcode {os.path.basename(final_path)} ({out_size/(1024**3):.2f} GB)", job_id=jid, db=db)
-            except Exception as e:
-                add_log(f"Accept: file replacement failed for #{jid}: {e}", level="ERROR", job_id=jid, db=db)
-        elif output_path == original_path:
-            # Replace mode — original already replaced by node, just mark accepted
-            add_log(f"Accept: #{jid} already replaced", job_id=jid, db=db)
     return jsonify({"ok": True})
-
-@app.route("/api/queue/<int:jid>", methods=["GET"])
-def api_get_job(jid):
-    with get_db() as db:
-        job = db.execute("SELECT * FROM queue WHERE id=?", (jid,)).fetchone()
-    if not job: return jsonify({"error": "Not found"}), 404
-    return jsonify({k:v for k,v in dict(job).items() if k != "probe_data"})
 
 @app.route("/api/queue/<int:jid>", methods=["DELETE"])
 @login_required
@@ -795,6 +1488,37 @@ def api_start():
 def api_pause():
     set_setting("processing_enabled", "false")
     add_log("Processing paused — state preserved")
+    return jsonify({"ok": True})
+
+# v3.4 — per-job-type pipeline controls
+VALID_JOB_TYPES = ("transcode", "subgen", "remuxclean", "dv78only")
+JOB_TYPE_LABELS = {
+    "transcode": "Transcode",
+    "subgen": "AI Subtitles",
+    "remuxclean": "Audio/Track Cleanup",
+    "dv78only": "DV7→8 Only",
+}
+
+@app.route("/api/queue/start/<string:jobtype>", methods=["POST"])
+@login_required
+def api_start_jobtype(jobtype):
+    if jobtype not in VALID_JOB_TYPES:
+        return jsonify({"error": f"Invalid job type. Must be one of {VALID_JOB_TYPES}"}), 400
+    set_setting(f"processing_enabled_{jobtype}", "true")
+    # Auto-enable the master switch when a specific pipeline is started
+    if get_setting("processing_enabled") != "true":
+        set_setting("processing_enabled", "true")
+        add_log(f"Master processing enabled (auto, due to {jobtype} start)")
+    add_log(f"{JOB_TYPE_LABELS.get(jobtype, jobtype)} pipeline: STARTED")
+    return jsonify({"ok": True})
+
+@app.route("/api/queue/pause/<string:jobtype>", methods=["POST"])
+@login_required
+def api_pause_jobtype(jobtype):
+    if jobtype not in VALID_JOB_TYPES:
+        return jsonify({"error": f"Invalid job type. Must be one of {VALID_JOB_TYPES}"}), 400
+    set_setting(f"processing_enabled_{jobtype}", "false")
+    add_log(f"{JOB_TYPE_LABELS.get(jobtype, jobtype)} pipeline: PAUSED")
     return jsonify({"ok": True})
 
 @app.route("/api/queue/clear/<string:status>", methods=["POST"])
@@ -839,16 +1563,41 @@ def api_requeue_library():
     add_log(f"Requeued {count} items" + (f" for library #{lid}" if lid else ""))
     return jsonify({"ok": True, "count": count})
 
+@app.route("/api/queue/requeue-status/<string:status>", methods=["POST"])
+@login_required
+def api_requeue_by_status(status):
+    """Bulk-requeue all jobs in a given status, optionally filtered by job_type. Single SQL UPDATE — much faster than per-row."""
+    if status not in ("error", "skipped", "cancelled", "complete"):
+        return jsonify({"error": f"Cannot requeue items with status '{status}'"}), 400
+    job_type = request.json.get("job_type") if request.json else None
+    with get_db() as db:
+        if job_type:
+            db.execute("""UPDATE queue SET status='pending', health_status='pending',
+                progress=0, current_step='', eta='', error_message=NULL,
+                worker_id=NULL, started_at=NULL, completed_at=NULL,
+                accepted=0, skipped_reason=NULL
+                WHERE status=? AND COALESCE(NULLIF(job_type,''),'transcode')=?""",
+                (status, job_type))
+        else:
+            db.execute("""UPDATE queue SET status='pending', health_status='pending',
+                progress=0, current_step='', eta='', error_message=NULL,
+                worker_id=NULL, started_at=NULL, completed_at=NULL,
+                accepted=0, skipped_reason=NULL
+                WHERE status=?""", (status,))
+        count = db.execute("SELECT changes()").fetchone()[0]
+    add_log(f"Bulk requeue: {count} jobs from status '{status}'" + (f" (type {job_type})" if job_type else ""))
+    return jsonify({"ok": True, "count": count})
+
 @app.route("/api/queue/clear-library", methods=["POST"])
 @login_required
 def api_clear_library():
-    """Clear pending/queued/skipped items for a library — preserves complete/error history."""
+    """Clear all queue items for a specific library."""
     lid = request.json.get("library_id")
     if not lid: return jsonify({"error": "library_id required"}), 400
     with get_db() as db:
-        db.execute("DELETE FROM queue WHERE library_id=? AND status IN ('pending','queued','skipped')", (lid,))
+        db.execute("DELETE FROM queue WHERE library_id=? AND status NOT IN ('processing')", (lid,))
         count = db.execute("SELECT changes()").fetchone()[0]
-    add_log(f"Cleared {count} pending/queued items from library #{lid} (history preserved)")
+    add_log(f"Cleared {count} items from library #{lid}")
     return jsonify({"ok": True, "count": count})
 
 @app.route("/api/queue/<int:jid>/requeue", methods=["POST"])
@@ -1004,17 +1753,6 @@ def api_workers():
             FROM workers w LEFT JOIN queue q ON w.current_job_id=q.id ORDER BY w.registered_at""").fetchall()
     return jsonify([dict(w) for w in ws])
 
-@app.route("/api/worker-counts")
-def api_worker_counts():
-    """Public endpoint — returns worker count settings for node startup. No auth required."""
-    return jsonify({
-        "transcode_gpu_count": get_setting("transcode_gpu_count") or "1",
-        "transcode_cpu_count": get_setting("transcode_cpu_count") or "0",
-        "healthcheck_gpu_count": get_setting("healthcheck_gpu_count") or "3",
-        "healthcheck_cpu_count": get_setting("healthcheck_cpu_count") or "0",
-        "max_dovi_concurrent": get_setting("max_dovi_concurrent") or "2",
-    })
-
 @app.route("/api/workers/register", methods=["POST"])
 def api_register_worker():
     d = request.json
@@ -1034,25 +1772,11 @@ def api_heartbeat():
                    (d.get("cpu", 0), d.get("ram", 0), d.get("gpu_usage", 0), d.get("vram", 0), d.get("id", "")))
     return jsonify({"ok": True})
 
-@app.route("/api/workers/<string:wid>/reset-jobs", methods=["POST"])
-def api_reset_worker_jobs(wid):
-    """Reset any jobs stuck as 'processing' for this worker back to queued. Called by node on startup."""
-    with get_db() as db:
-        stuck = db.execute("""UPDATE queue SET status='queued', health_status='healthy',
-            progress=0, current_step='', worker_id=NULL, started_at=NULL
-            WHERE status='processing' AND worker_id=?""", (wid,))
-        count = stuck.rowcount
-        if count > 0:
-            add_log(f"Node {wid} reconnected: reset {count} stuck jobs to queued", db=db)
-        db.execute("UPDATE workers SET status='idle', current_job_id=NULL WHERE id=?", (wid,))
-    return jsonify({"ok": True, "reset": count})
-
 # Jobs
 @app.route("/api/jobs/next", methods=["POST"])
 def api_next_job():
     d = request.json
     wid = d.get("worker_id", "")
-    prefer_non_dovi = d.get("prefer_non_dovi", False)
     with get_db() as db:
         if get_setting("processing_enabled") != "true":
             return jsonify({"job": None, "reason": "Processing paused"})
@@ -1065,81 +1789,40 @@ def api_next_job():
         if active >= max_w: return jsonify({"job": None, "reason": "Max workers reached"})
         if active >= staged_limit: return jsonify({"job": None, "reason": "Staged limit reached"})
 
-        # DoVi concurrency limit — check server-side too
-        max_dovi = int(get_setting("max_dovi_concurrent") or "2")
-        active_dovi = db.execute("SELECT COUNT(*) as c FROM queue WHERE status='processing' AND has_dovi=1").fetchone()["c"]
-        dovi_full = active_dovi >= max_dovi
+        # v3.4: only claim jobs whose type's pipeline is enabled
+        all_types = ('transcode', 'subgen', 'remuxclean', 'dv78only')
+        allowed_types = []
+        for jt in all_types:
+            if get_setting(f"processing_enabled_{jt}") != "false":
+                allowed_types.append(jt)
+        if not allowed_types:
+            return jsonify({"job": None, "reason": "All job types paused"})
+        # Build IN clause
+        placeholders = ",".join("?" * len(allowed_types))
+        query = (f"SELECT * FROM queue WHERE status='queued' AND health_status='healthy' "
+                 f"AND COALESCE(NULLIF(job_type,''),'transcode') IN ({placeholders}) "
+                 f"ORDER BY priority ASC, id ASC LIMIT 1")
+        job = db.execute(query, allowed_types).fetchone()
+        if not job:
+            disabled = [jt for jt in all_types if jt not in allowed_types]
+            reason = "No jobs ready"
+            if disabled:
+                reason += f" (paused: {', '.join(disabled)})"
+            return jsonify({"job": None, "reason": reason})
 
-        # Atomic claim — try non-DoVi first if DoVi slots are full or node requests it
-        claimed = False
-        if dovi_full or prefer_non_dovi:
-            # Try non-DoVi job first
-            db.execute("""UPDATE queue SET status='processing', worker_id=?, started_at=datetime('now','localtime'),
-                current_step='Starting...' WHERE id = (SELECT id FROM queue WHERE status='queued'
-                AND health_status='healthy' AND has_dovi=0 ORDER BY priority ASC, id ASC LIMIT 1)""", (wid,))
-            claimed = db.execute("SELECT changes()").fetchone()[0] > 0
-            if not claimed and not dovi_full:
-                # Node preferred non-DoVi but none available, and DoVi slots open — take a DoVi job
-                db.execute("""UPDATE queue SET status='processing', worker_id=?, started_at=datetime('now','localtime'),
-                    current_step='Starting...' WHERE id = (SELECT id FROM queue WHERE status='queued'
-                    AND health_status='healthy' ORDER BY priority ASC, id ASC LIMIT 1)""", (wid,))
-                claimed = db.execute("SELECT changes()").fetchone()[0] > 0
-
-        if not claimed:
-            # Normal claim — any job (DoVi slots available)
-            db.execute("""UPDATE queue SET status='processing', worker_id=?, started_at=datetime('now','localtime'),
-                current_step='Starting...' WHERE id = (SELECT id FROM queue WHERE status='queued'
-                AND health_status='healthy' ORDER BY priority ASC, id ASC LIMIT 1)""", (wid,))
-            if db.execute("SELECT changes()").fetchone()[0] == 0:
-                if dovi_full:
-                    return jsonify({"job": None, "reason": f"DoVi limit reached ({max_dovi}), no non-DoVi jobs ready"})
-                return jsonify({"job": None, "reason": "No jobs ready"})
-
-        job = db.execute("SELECT * FROM queue WHERE status='processing' AND worker_id=? ORDER BY id DESC LIMIT 1", (wid,)).fetchone()
-        if not job: return jsonify({"job": None, "reason": "Claim failed"})
+        # Atomic claim — only succeed if status is still 'queued'
+        result = db.execute(
+            "UPDATE queue SET status='processing', worker_id=?, started_at=datetime('now','localtime'), "
+            "current_step='Starting...' WHERE id=? AND status='queued'",
+            (wid, job["id"]))
+        if result.rowcount == 0:
+            return jsonify({"job": None, "reason": "Race — another worker claimed it"})
         db.execute("UPDATE workers SET status='active', current_job_id=? WHERE id=?", (job["id"], wid))
         settings = {r["key"]: r["value"] for r in db.execute("SELECT * FROM settings").fetchall()}
         jd = dict(job)
         jd["settings"] = settings
-    add_log(f"Job #{job['id']} → {wid}: {job['file_name']}", job_id=job["id"])
+    add_log(f"Job #{job['id']} [{job['job_type'] or 'transcode'}] → {wid}: {job['file_name']}", job_id=job["id"])
     return jsonify({"job": jd})
-
-@app.route("/api/jobs/next-healthcheck", methods=["POST"])
-def api_next_healthcheck():
-    """Claim a pending health check job atomically (prevents race condition with concurrent workers)."""
-    d = request.json
-    wid = d.get("worker_id", "")
-    with get_db() as db:
-        active_hc = db.execute("SELECT COUNT(*) as c FROM queue WHERE health_status='checking'").fetchone()["c"]
-        if active_hc >= 6:
-            return jsonify({"job": None, "reason": "Max health checks reached"})
-        # Atomic claim — UPDATE with subquery prevents two workers claiming the same job
-        db.execute("""UPDATE queue SET health_status='checking', current_step='Health check starting...'
-            WHERE id = (SELECT id FROM queue WHERE status='pending' AND health_status='pending'
-            ORDER BY priority ASC, id ASC LIMIT 1)""")
-        if db.execute("SELECT changes()").fetchone()[0] == 0:
-            return jsonify({"job": None, "reason": "No pending health checks"})
-        job = db.execute("SELECT * FROM queue WHERE health_status='checking' AND current_step='Health check starting...' ORDER BY id DESC LIMIT 1").fetchone()
-        if not job:
-            return jsonify({"job": None, "reason": "Claim failed"})
-        jd = dict(job)
-    return jsonify({"job": jd})
-
-@app.route("/api/jobs/<int:jid>/health-result", methods=["POST"])
-def api_health_result(jid):
-    """Receive health check result from node."""
-    d = request.json
-    status = d.get("status", "healthy")
-    error = d.get("error")
-    with get_db() as db:
-        if status == "healthy":
-            db.execute("UPDATE queue SET health_status='healthy', status='queued', current_step='Health check passed' WHERE id=?", (jid,))
-            add_log(f"[Health Check] PASSED: job #{jid}", source="healthcheck", job_id=jid, db=db)
-        else:
-            db.execute("UPDATE queue SET health_status=?, status='error', error_message=?, current_step='Health check failed' WHERE id=?",
-                       (status, error, jid))
-            add_log(f"[Health Check] FAILED: job #{jid} — {error}", level="ERROR", source="healthcheck", job_id=jid, db=db)
-    return jsonify({"ok": True})
 
 @app.route("/api/queue/<int:jid>/force-start", methods=["POST"])
 @login_required
@@ -1162,18 +1845,9 @@ def api_force_start(jid):
 def api_progress(jid):
     d = request.json
     with get_db() as db:
-        # Always update progress and step
-        db.execute("UPDATE queue SET progress=?, current_step=? WHERE id=?",
-                   (d.get("progress",0), d.get("step",""), jid))
-        # Only update ETA if non-empty (don't wipe last known good value)
-        if d.get("eta"):
-            db.execute("UPDATE queue SET eta=? WHERE id=?", (d["eta"], jid))
-        # Only update FPS if non-empty
-        if d.get("fps"):
-            db.execute("UPDATE queue SET fps=? WHERE id=?", (d["fps"], jid))
-        # Only update compression if non-zero
-        if d.get("compression"):
-            db.execute("UPDATE queue SET reduction_pct=? WHERE id=?", (d["compression"], jid))
+        db.execute("UPDATE queue SET progress=?, current_step=?, eta=?, fps=?, reduction_pct=? WHERE id=?",
+                   (d.get("progress",0), d.get("step",""), d.get("eta",""),
+                    d.get("fps",""), d.get("compression",0), jid))
     return jsonify({"ok": True})
 
 @app.route("/api/jobs/<int:jid>/complete", methods=["POST"])
@@ -1184,13 +1858,6 @@ def api_complete(jid):
     with get_db() as db:
         db.execute("UPDATE queue SET status='complete', progress=100, current_step='Done', output_path=?, output_size_gb=?, reduction_pct=?, completed_at=datetime('now','localtime'), accepted=? WHERE id=?",
                    (d.get("output_path",""), d.get("output_size_gb",0), d.get("reduction_pct",0), int(auto), jid))
-    # Auto-accept: trigger file replacement immediately
-    if auto:
-        try:
-            with app.test_request_context():
-                api_accept(jid)
-        except Exception as e:
-            log.warning(f"Auto-accept file replacement failed for #{jid}: {e}")
         db.execute("UPDATE workers SET status='idle', current_job_id=NULL, jobs_completed=jobs_completed+1, total_saved_gb=total_saved_gb+? WHERE id=?",
                    (d.get("saved_gb",0), wid))
     add_log(f"Job #{jid} complete: {d.get('reduction_pct',0):.0f}% reduction", job_id=jid)
@@ -1228,65 +1895,11 @@ def api_get_settings():
 @app.route("/api/settings", methods=["PUT"])
 @login_required
 def api_put_settings():
-    data = request.json
-    # Track if min_size_gb changed for retroactive filtering
-    old_min_size = get_setting("min_size_gb")
-    for k, v in data.items():
+    for k, v in request.json.items():
         if k not in ("auth_hash",):  # Don't allow hash override via settings
             set_setting(k, v)
-
-    # Retroactive min_size filter: move undersized queued/pending files to skipped
-    new_min_size = data.get("min_size_gb")
-    if new_min_size and new_min_size != old_min_size:
-        try:
-            threshold = float(new_min_size)
-            if threshold > 0:
-                with get_db() as db:
-                    result = db.execute(
-                        "UPDATE queue SET status='skipped', skipped_reason=? WHERE status IN ('queued','pending') AND file_size_gb < ?",
-                        (f"Below minimum size threshold ({threshold} GB)", threshold))
-                    moved = result.rowcount
-                if moved > 0:
-                    add_log(f"Min size changed to {threshold} GB — moved {moved} undersized files to Skipped")
-        except (ValueError, TypeError):
-            pass
-
     add_log(f"Settings updated")
     return jsonify({"ok": True})
-
-# SSE Log Streaming — real-time log viewer for active jobs
-@app.route("/api/jobs/<int:jid>/log-stream")
-def api_log_stream(jid):
-    """Stream log entries for a job via Server-Sent Events."""
-    def generate():
-        last_id = 0
-        stale_count = 0
-        while True:
-            try:
-                with get_db() as db:
-                    # Check if job is still processing
-                    job = db.execute("SELECT status FROM queue WHERE id=?", (jid,)).fetchone()
-                    if not job or job["status"] not in ("processing", "pending"):
-                        yield f"data: {json.dumps({'type': 'done'})}\n\n"
-                        return
-                    # Fetch new log entries
-                    rows = db.execute("SELECT * FROM logs WHERE job_id=? AND id>? ORDER BY id ASC LIMIT 50", (jid, last_id)).fetchall()
-                for row in rows:
-                    entry = dict(row)
-                    last_id = entry["id"]
-                    stale_count = 0
-                    yield f"data: {json.dumps(entry)}\n\n"
-                if not rows:
-                    stale_count += 1
-                    if stale_count > 300:  # 5 minutes no activity
-                        yield f"data: {json.dumps({'type': 'done'})}\n\n"
-                        return
-            except Exception as e:
-                log.warning(f"SSE stream error for job #{jid}: {e}")
-                yield f"data: {json.dumps({'type': 'done'})}\n\n"
-                return
-            time.sleep(1)
-    return Response(generate(), mimetype='text/event-stream', headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
 # Logs
 @app.route("/api/logs", methods=["GET"])
@@ -1316,40 +1929,40 @@ def api_download_logs():
 def api_dashboard():
     with get_db() as db:
         ss = db.execute("SELECT status, COUNT(*) as c, COALESCE(SUM(file_size_gb),0) as gb FROM queue GROUP BY status").fetchall()
+        # v3.3: per-job-type status counts for the dashboard's nested tabs
+        ssj = db.execute("SELECT COALESCE(job_type,'transcode') as job_type, status, COUNT(*) as c FROM queue GROUP BY job_type, status").fetchall()
         hs = db.execute("SELECT hdr_type, COUNT(*) as c FROM queue WHERE status NOT IN ('complete','cancelled','skipped') GROUP BY hdr_type").fetchall()
-        cs = db.execute("SELECT video_codec, COUNT(*) as c FROM queue WHERE video_codec != '' GROUP BY video_codec").fetchall()
-        # Container format from file extension
-        fs = db.execute("""SELECT CASE
-            WHEN file_name LIKE '%.mkv' THEN 'MKV' WHEN file_name LIKE '%.mp4' THEN 'MP4'
-            WHEN file_name LIKE '%.avi' THEN 'AVI' WHEN file_name LIKE '%.ts' THEN 'TS'
-            WHEN file_name LIKE '%.m2ts' THEN 'M2TS' WHEN file_name LIKE '%.wmv' THEN 'WMV'
-            WHEN file_name LIKE '%.mov' THEN 'MOV' WHEN file_name LIKE '%.webm' THEN 'WEBM'
-            ELSE 'Other' END as container, COUNT(*) as c FROM queue GROUP BY container""").fetchall()
         ws = db.execute("""SELECT w.*, q.file_name as current_file, q.progress as job_progress,
             q.current_step, q.eta as job_eta, q.hdr_type, q.dovi_profile, q.file_size_gb, q.audio_summary
             FROM workers w LEFT JOIN queue q ON w.current_job_id=q.id
-            WHERE w.last_heartbeat > datetime('now','localtime','-60 seconds')""").fetchall()
+            WHERE w.last_heartbeat > datetime('now','localtime','-300 seconds')""").fetchall()
         saved = db.execute("SELECT COALESCE(SUM(file_size_gb-COALESCE(output_size_gb,file_size_gb)),0) as s FROM queue WHERE status='complete'").fetchone()
         processing = db.execute("SELECT * FROM queue WHERE status='processing' ORDER BY priority").fetchall()
         recent_complete = db.execute("SELECT * FROM queue WHERE status='complete' ORDER BY completed_at DESC LIMIT 10").fetchall()
-        # Staging: health checks in progress + next queued files (Tdarr-style)
-        health_checking = db.execute("SELECT * FROM queue WHERE health_status='checking' ORDER BY priority").fetchall()
-        staged_limit = int(get_setting("staged_limit") or "100")
-        next_queued = db.execute("SELECT * FROM queue WHERE status='queued' AND health_status='healthy' ORDER BY priority ASC, id ASC LIMIT ?", (staged_limit,)).fetchall()
         settings = {r["key"]: r["value"] for r in db.execute("SELECT * FROM settings").fetchall()}
+
+    # Build {job_type: {status: count}}
+    status_stats_by_type = {}
+    for row in ssj:
+        jt = row["job_type"] or "transcode"
+        status_stats_by_type.setdefault(jt, {})[row["status"]] = row["c"]
+
     return jsonify({
         "status_stats": {s["status"]: {"count": s["c"], "total_gb": s["gb"]} for s in ss},
+        "status_stats_by_type": status_stats_by_type,
         "hdr_stats": {h["hdr_type"]: h["c"] for h in hs},
-        "codec_stats": {c["video_codec"]: c["c"] for c in cs if c["video_codec"]},
-        "container_stats": {f["container"]: f["c"] for f in fs if f["container"]},
         "workers": [dict(w) for w in ws],
         "processing": [{k:v for k,v in dict(p).items() if k!="probe_data"} for p in processing],
         "recent_complete": [{k:v for k,v in dict(c).items() if k!="probe_data"} for c in recent_complete],
-        "health_checking": [{k:v for k,v in dict(h).items() if k!="probe_data"} for h in health_checking],
-        "next_queued": [{k:v for k,v in dict(q).items() if k!="probe_data"} for q in next_queued],
         "saved_gb": saved["s"],
         "settings": settings,
         "processing_enabled": settings.get("processing_enabled","false") == "true",
+        # v3.4 — per-job-type processing flags so the UI can render
+        # individual Start/Pause buttons on each job-type tab
+        "processing_enabled_by_type": {
+            jt: settings.get(f"processing_enabled_{jt}", "true") == "true"
+            for jt in ("transcode", "subgen", "remuxclean", "dv78only")
+        },
         "scan_progress": dict(scan_progress),
     })
 
