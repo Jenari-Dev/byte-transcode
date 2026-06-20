@@ -215,7 +215,7 @@ class NodeEngine(threading.Thread):
 
         # Main loop — TW threads handle job polling, GUI just stays alive
         while not self._stop_event.is_set():
-            pass
+            time.sleep(1)
 
             # Wait with check for stop
             for _ in range(cfg["poll_interval"] * 2):

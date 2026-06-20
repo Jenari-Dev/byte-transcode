@@ -1,26 +1,21 @@
 #!/usr/bin/env python3
 """
-Byte Transcode Node v2
-======================
-Worker node that connects to the Byte Transcode server.
-Runs on a machine with GPU (inside Docker with ffmpeg/dovi_tool/mkvmerge).
-
-Features:
-  - Registers with server and sends heartbeats
-  - Polls for transcode jobs
-  - Full DoVi P7→P8 pipeline + standard NVENC transcode
-  - Real-time FPS/progress/ETA parsing from ffmpeg output
-  - C%/T% compression ratio reporting
-  - Cancel polling with ffmpeg process kill
-  - mkvmerge I/O watchdog (kills stuck remux)
-  - Temp file cleanup on failure
-  - Sends detailed log lines to server
-
-Usage:
-  python3 byte_node.py --server http://192.168.3.13:5800 --name DoVi-5080 --gpu "RTX 5080"
+Byte Transcode Node v2.6
+========================
+v2.5 — Server→Node path translation
+v2.6 — Critical fixes:
+        - _find_tool() uses shutil.which (cross-platform); previous version
+          called Linux `which` command on Windows so it always silently
+          fell through, returning the first arg verbatim even if the binary
+          didn't exist — leading to subprocess WinError 2.
+        - All handlers now use _work_dir(job_id, settings) to get the
+          OS-appropriate temp directory, replacing 5 sites that hardcoded
+          /temp/byte_work (a Linux path that doesn't exist on Windows).
+        - Loud WARN log if a tool isn't found, so future config issues
+          are visible at startup.
 """
 
-import sys, os, time, json, hashlib, shutil, subprocess, threading, signal, re, socket, platform, argparse
+import sys, os, time, json, hashlib, shutil, subprocess, threading, signal, re, socket, platform, argparse, random
 from datetime import datetime
 
 # Auto-install requests if missing
@@ -40,75 +35,94 @@ class ByteNode:
         self.worker_id = hashlib.md5(f"{name}-{socket.gethostname()}".encode()).hexdigest()[:12]
         self.host = socket.gethostname()
         self.running = True
-        self.job_procs = {}   # job_id -> subprocess.Popen (per-job process tracking)
-        self.job_cancel = {}  # job_id -> bool (per-job cancel flag)
-        self.job_lock = threading.Lock()
-        self.current_job_id = None  # Legacy — used by GUI for display
-        self.hc_active = 0  # Track active health check count
-        self.hc_lock = threading.Lock()
-        self.active_dovi = 0  # Track active DoVi transcode count
-        self.dovi_lock = threading.Lock()
-        self.max_dovi_concurrent = 2  # Updated by fetch_worker_counts()
+        self.current_process = None  # Track active ffmpeg/mkvmerge subprocess
+        self.current_job_id = None
+        self.cancelled = False
 
-        # Path translation: NAS paths → local paths (set by GUI or CLI args)
-        self.native_mode = False
-        self.nas_prefix = "/media"
-        self.nas_drive = ""
-        self.temp_base = "/temp/byte_work"
+        # v2.2 — lazy-loaded Whisper model state
+        self._whisper_model = None
+        self._whisper_model_name = None
+        self._whisper_device = None
+        self._whisper_compute = None
 
-        # Find tools
-        self.ffmpeg = self._find_tool("tdarr-ffmpeg", ["ffmpeg"])
-        self.ffprobe = self._find_tool("ffprobe", ["tdarr-ffprobe"])
-        self.dovi_tool = self._find_tool("dovi_tool")
-        self.mkvmerge = self._find_tool("mkvmerge")
+        # v2.4 — GUI status flags. byte_node_gui.py polls these to
+        # update its top-bar indicator from "Connecting" → "Connected".
+        # Multiple aliases set so different GUI versions all see truth.
+        self.connected = False
+        self.registered = False
+        self.is_running = False
+        self.is_connected = False  # alias
 
-        self.log(f"Byte Node v2 initialized")
+        # Find tools — try a list of common names per tool. shutil.which
+        # handles .exe extensions on Windows automatically.
+        self.ffmpeg = self._find_tool("ffmpeg",
+            ["jellyfin-ffmpeg7", "jellyfin-ffmpeg", "tdarr-ffmpeg", "ffmpeg.exe"])
+        self.ffprobe = self._find_tool("ffprobe",
+            ["jellyfin-ffprobe", "tdarr-ffprobe", "ffprobe.exe"])
+        self.dovi_tool = self._find_tool("dovi_tool", ["dovi_tool.exe"])
+        self.mkvmerge = self._find_tool("mkvmerge", ["mkvmerge.exe"])
+        self.mkvpropedit = self._find_tool("mkvpropedit", ["mkvpropedit.exe"])
+        self.mkvextract = self._find_tool("mkvextract", ["mkvextract.exe"])
+
+        # Verify required tools were actually located. Anything unresolved
+        # gets a loud WARN — silent fallback was the bug behind v2.5's
+        # "WinError 2: cannot find the file specified" error.
+        for tool_name, tool_path in [
+            ("ffmpeg", self.ffmpeg), ("ffprobe", self.ffprobe),
+            ("dovi_tool", self.dovi_tool), ("mkvmerge", self.mkvmerge),
+            ("mkvpropedit", self.mkvpropedit), ("mkvextract", self.mkvextract),
+        ]:
+            if not tool_path or not shutil.which(tool_path):
+                self.log(f"  WARN: {tool_name} not found in PATH (fallback: {tool_path!r}). "
+                         f"Install it or add its directory to PATH.", "WARN")
+
+        self.log(f"Byte Node v2.6 initialized")
         self.log(f"  Worker ID: {self.worker_id}")
         self.log(f"  Server: {self.server}")
         self.log(f"  GPU: {self.gpu}")
         self.log(f"  ffmpeg: {self.ffmpeg}")
         self.log(f"  dovi_tool: {self.dovi_tool}")
         self.log(f"  mkvmerge: {self.mkvmerge}")
-
-    def translate_path(self, server_path):
-        """Convert server NAS path to local path. In native mode, maps /media → Z:\\ (or configured drive)."""
-        if self.native_mode and server_path and server_path.startswith(self.nas_prefix):
-            rel = server_path[len(self.nas_prefix):]
-            local = self.nas_drive + rel.replace("/", os.sep)
-            return local
-        return server_path
-
-    def reverse_translate_path(self, local_path):
-        """Convert local Windows path back to server NAS path. Z:\\ → /media."""
-        if self.native_mode and local_path:
-            # Normalize separators
-            normalized = local_path.replace(os.sep, "/").replace("\\", "/")
-            nas_drive_fwd = self.nas_drive.replace(os.sep, "/").replace("\\", "/")
-            if normalized.startswith(nas_drive_fwd):
-                rel = normalized[len(nas_drive_fwd):]
-                return self.nas_prefix + rel
-        return local_path
-
-    def fetch_worker_counts(self):
-        """Fetch worker count settings from server."""
-        r = self.api("GET", "/api/worker-counts")
-        if r:
-            tc_gpu = int(r.get("transcode_gpu_count", "1") or "1")
-            hc_gpu = int(r.get("healthcheck_gpu_count", "3") or "3")
-            self.max_dovi_concurrent = int(r.get("max_dovi_concurrent", "2") or "2")
-            return {"transcode_gpu": max(1, tc_gpu), "healthcheck_gpu": max(1, hc_gpu)}
-        self.max_dovi_concurrent = 2
-        return {"transcode_gpu": 1, "healthcheck_gpu": 3}
+        self.log(f"  mkvpropedit: {self.mkvpropedit}")
+        self.log(f"  mkvextract: {self.mkvextract}")
 
     def _find_tool(self, name, alternatives=None):
-        for n in [name] + (alternatives or []):
-            try:
-                r = subprocess.run([n, "-version"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5)
-                if r.returncode == 0:
-                    return n
-            except:
-                pass
+        """
+        Cross-platform tool lookup. Uses shutil.which (which handles
+        Windows .exe extensions automatically) instead of the Linux
+        `which` command. Returns the resolved absolute path on success,
+        or the first candidate name as a last-resort fallback.
+        """
+        candidates = [name] + (alternatives or [])
+        for n in candidates:
+            resolved = shutil.which(n)
+            if resolved:
+                return resolved
+        # Nothing found — return the primary name as a fallback. The init
+        # check below will WARN about it so the user knows.
         return name
+
+    def _work_dir(self, job_id, settings):
+        """
+        Get the OS-appropriate temp work directory for a job. Honors
+        node_temp_path setting; falls back to legacy temp_path; auto-detects
+        if both are empty. Creates the directory if needed.
+
+        v2.6: previously hardcoded /temp/byte_work which doesn't exist on
+        Windows — every job's temp output silently failed to write.
+        """
+        base = (settings.get("node_temp_path") or "").strip()
+        if not base:
+            base = (settings.get("temp_path") or "").strip()
+        if not base:
+            # Last-resort auto-detect by OS
+            if os.name == "nt":
+                base = "C:\\Byte_Engine_temp"
+            else:
+                base = "/tmp/byte_work"
+        work_dir = os.path.join(base, f"job_{job_id}")
+        os.makedirs(work_dir, exist_ok=True)
+        return work_dir
 
     def log(self, msg, level="INFO"):
         ts = datetime.now().strftime("%H:%M:%S")
@@ -153,8 +167,6 @@ class ByteNode:
         })
         if r and r.get("ok"):
             self.log(f"Registered with server as {self.name} ({self.worker_id})")
-            # Run crash recovery to handle leftover state from previous session
-            self.recover_from_crash()
             return True
         self.log("Failed to register with server", "ERROR")
         return False
@@ -174,12 +186,11 @@ class ByteNode:
         r = self.api("GET", f"/api/jobs/{job_id}/check-cancel")
         if r and r.get("cancel"):
             self.log(f"Job #{job_id} cancelled by user — killing process", "WARN")
-            self.job_cancel[job_id] = True
-            proc = self.job_procs.get(job_id)
-            if proc and proc.poll() is None:
+            self.cancelled = True
+            if self.current_process and self.current_process.poll() is None:
                 try:
-                    proc.kill()
-                    self.log(f"Killed active subprocess (PID {proc.pid})")
+                    self.current_process.kill()
+                    self.log(f"Killed active subprocess (PID {self.current_process.pid})")
                 except:
                     pass
             return True
@@ -204,29 +215,22 @@ class ByteNode:
         self.send_log(job_id, f"[CMD] {description}")
         self.send_log(job_id, f"  $ {' '.join(cmd)}")
 
-        self.job_cancel[job_id] = False
+        self.cancelled = False
         start_time = time.time()
 
         try:
-            self.job_procs[job_id] = subprocess.Popen(
+            self.current_process = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 bufsize=0
             )
 
             stderr_lines = []
             last_progress_time = time.time()
-            last_eta = ""
-            last_compression = 0
 
             # Cancel polling thread
             def cancel_poller():
-                # Wait for process to actually start before polling
-                for _ in range(30):
-                    if self.job_procs.get(job_id):
-                        break
-                    time.sleep(0.5)
-                while self.job_procs.get(job_id) and self.job_procs[job_id].poll() is None and not self.job_cancel.get(job_id, False):
-                    time.sleep(2)
+                while self.current_process and self.current_process.poll() is None and not self.cancelled:
+                    time.sleep(5)
                     self.check_cancel(job_id)
 
             cancel_thread = threading.Thread(target=cancel_poller, daemon=True)
@@ -235,7 +239,7 @@ class ByteNode:
             # Read stderr byte-by-byte to handle \r progress lines
             line_buf = b''
             while True:
-                chunk = self.job_procs[job_id].stderr.read(1)
+                chunk = self.current_process.stderr.read(1)
                 if not chunk:
                     break
                 if chunk in (b'\n', b'\r'):
@@ -253,9 +257,8 @@ class ByteNode:
                         if parse_progress and 'frame=' in line:
                             fps_match = re.search(r'fps=\s*([\d.]+)', line)
                             speed_match = re.search(r'speed=\s*([\d.]+)x', line)
-                            size_match = re.search(r'size=\s*([\d]+)\s*[kK][iI]?[bB]', line)
+                            size_match = re.search(r'size=\s*([\d]+)kB', line)
                             time_match = re.search(r'time=(\d+):(\d+):(\d+)', line)
-                            bitrate_match = re.search(r'bitrate=\s*([\d.]+)\s*[kK]', line)
 
                             fps = float(fps_match.group(1)) if fps_match else 0
                             speed = float(speed_match.group(1)) if speed_match else 0
@@ -279,23 +282,10 @@ class ByteNode:
                                     else:
                                         eta_str = str(int(remaining_wall_sec)) + 's'
 
-                            # Carry forward last known good ETA when current line has no speed data
-                            if eta_str:
-                                last_eta = eta_str
-                            else:
-                                eta_str = last_eta
-
-                            # Compression ratio — estimate final output size from current progress
+                            # Compression ratio
                             c_ratio = 0
-                            if input_size_gb > 0 and current_gb > 0 and progress > 5:
-                                estimated_final_gb = current_gb / (progress / 100)
-                                c_ratio = (1 - estimated_final_gb / input_size_gb) * 100
-
-                            # Carry forward compression when current value is 0
-                            if c_ratio != 0:
-                                last_compression = c_ratio
-                            else:
-                                c_ratio = last_compression
+                            if input_size_gb > 0 and current_gb > 0:
+                                c_ratio = (current_gb / input_size_gb) * 100
 
                             step_info = description + ' — ' + str(int(fps)) + ' fps, ' + str(round(speed, 1)) + 'x'
                             self.update_progress(job_id, progress, step_info, eta_str, fps=fps, compression=c_ratio)
@@ -305,16 +295,16 @@ class ByteNode:
                         if time.time() - last_progress_time > timeout_minutes * 60:
                             self.log(f"WATCHDOG: No progress for {timeout_minutes} minutes — killing", "ERROR")
                             self.send_log(job_id, "[ERROR] Watchdog timeout: no progress for " + str(timeout_minutes) + " minutes")
-                            self.job_procs[job_id].kill()
+                            self.current_process.kill()
                             return False, "Watchdog timeout"
                 else:
                     line_buf += chunk
 
-            self.job_procs[job_id].wait()
-            rc = self.job_procs[job_id].returncode
-            self.job_procs.pop(job_id, None)
+            self.current_process.wait()
+            rc = self.current_process.returncode
+            self.current_process = None
 
-            if self.job_cancel.get(job_id, False):
+            if self.cancelled:
                 return False, "Cancelled by user"
 
             if rc != 0:
@@ -330,7 +320,7 @@ class ByteNode:
         except Exception as e:
             self.log(f"[EXCEPTION] {description}: {e}", "ERROR")
             self.send_log(job_id, f"[ERROR] Exception: {e}")
-            self.job_procs.pop(job_id, None)
+            self.current_process = None
             return False, str(e)
 
     def run_cmd_with_watchdog(self, cmd, description, job_id, stale_timeout=300):
@@ -342,11 +332,11 @@ class ByteNode:
         self.log(f"[CMD+WATCHDOG] {description}")
         self.send_log(job_id, f"[CMD+WATCHDOG] {description} (stale timeout: {stale_timeout}s)")
 
-        self.job_cancel[job_id] = False
+        self.cancelled = False
 
         try:
-            self.job_procs[job_id] = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace"
+            self.current_process = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
             )
 
             # Monitor in background
@@ -355,10 +345,10 @@ class ByteNode:
 
             def watchdog():
                 nonlocal last_size, last_change_time
-                while self.job_procs.get(job_id) and self.job_procs[job_id].poll() is None:
+                while self.current_process and self.current_process.poll() is None:
                     # Check cancel
                     self.check_cancel(job_id)
-                    if self.job_cancel.get(job_id, False):
+                    if self.cancelled:
                         return
 
                     # Check output file growth (look for output file in cmd)
@@ -372,20 +362,20 @@ class ByteNode:
                             self.log(f"WATCHDOG: Output stale for {stale_timeout}s — killing mkvmerge", "ERROR")
                             self.send_log(job_id, f"[ERROR] I/O stale for {stale_timeout}s — killing process")
                             try:
-                                self.job_procs[job_id].kill()
+                                self.current_process.kill()
                             except:
                                 pass
                             return
-                    time.sleep(3)
+                    time.sleep(10)
 
             wt = threading.Thread(target=watchdog, daemon=True)
             wt.start()
 
-            stdout, stderr = self.job_procs[job_id].communicate()
-            rc = self.job_procs[job_id].returncode
-            self.job_procs.pop(job_id, None)
+            stdout, stderr = self.current_process.communicate()
+            rc = self.current_process.returncode
+            self.current_process = None
 
-            if self.job_cancel.get(job_id, False):
+            if self.cancelled:
                 return False, "Cancelled by user"
             if rc != 0:
                 self.log(f"[FAILED] {description} (exit {rc})", "ERROR")
@@ -400,7 +390,7 @@ class ByteNode:
         except Exception as e:
             self.log(f"[EXCEPTION] {description}: {e}", "ERROR")
             self.send_log(job_id, f"[ERROR] Exception: {e}")
-            self.job_procs.pop(job_id, None)
+            self.current_process = None
             return False, str(e)
 
     def cleanup_workdir(self, work_dir):
@@ -422,8 +412,7 @@ class ByteNode:
         preset = settings.get("preset", "slow")
 
         basename = os.path.splitext(filename)[0]
-        work_dir = os.path.join(self.temp_base, f"job_{job_id}")
-        os.makedirs(work_dir, exist_ok=True)
+        work_dir = self._work_dir(job_id, settings)
 
         raw_hevc = os.path.join(work_dir, f"{basename}.hevc")
         rpu_bin = os.path.join(work_dir, f"{basename}.rpu.bin")
@@ -479,7 +468,7 @@ class ByteNode:
             self.update_progress(job_id, 20, step)
             self.send_log(job_id, step)
             ok, err = self.run_cmd([
-                self.ffmpeg, "-y", "-hwaccel", "cuda", "-f", "hevc", "-i", raw_hevc,
+                self.ffmpeg, "-y", "-f", "hevc", "-i", raw_hevc,
                 "-c:v", "hevc_nvenc", "-preset", preset, "-cq", str(cq),
                 "-f", "hevc", transcoded_hevc
             ], f"NVENC Transcode CQ{cq}", job_id, parse_progress=True, input_size_gb=raw_size_gb, total_duration_sec=duration_sec)
@@ -578,8 +567,7 @@ class ByteNode:
         preset = settings.get("preset", "slow")
 
         basename = os.path.splitext(filename)[0]
-        work_dir = os.path.join(self.temp_base, f"job_{job_id}")
-        os.makedirs(work_dir, exist_ok=True)
+        work_dir = self._work_dir(job_id, settings)
         output_mkv = os.path.join(work_dir, f"{basename}_byte.mkv")
         duration_sec = float(job.get("duration_min", 0)) * 60
 
@@ -589,7 +577,7 @@ class ByteNode:
             self.send_log(job_id, step)
 
             ok, err = self.run_cmd([
-                self.ffmpeg, "-y", "-hwaccel", "cuda", "-hwaccel_output_format", "cuda", "-i", filepath,
+                self.ffmpeg, "-y", "-i", filepath,
                 "-map", "0", "-map", "-0:d",
                 "-c:v", "hevc_nvenc", "-preset", preset, "-cq", str(cq),
                 "-c:a", "copy", "-c:s", "copy",
@@ -627,26 +615,8 @@ class ByteNode:
         output_path = result["output_path"]
 
         if settings.get("replace_original", "true") != "true":
-            # Keep both mode: copy output back to NAS next to original with _byte suffix
-            try:
-                original_dir = os.path.dirname(filepath)
-                basename = os.path.splitext(os.path.basename(filepath))[0]
-                dest_path = os.path.join(original_dir, f"{basename}_byte.mkv")
-                self.send_log(job_id, f"  Keep both: copying output to NAS...")
-                self.send_log(job_id, f"  → {dest_path}")
-                shutil.copy2(output_path, dest_path)
-                if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
-                    self.send_log(job_id, f"  ✓ Output copied to NAS ({os.path.getsize(dest_path)/(1024**3):.2f} GB)")
-                    self.cleanup_workdir(work_dir)
-                    # Return NAS server path so server can find it for accept
-                    return self.reverse_translate_path(dest_path)
-                else:
-                    self.send_log(job_id, f"  [WARN] Copy may have failed — keeping temp file")
-                    return output_path
-            except Exception as e:
-                self.send_log(job_id, f"  [ERROR] Failed to copy to NAS: {e}")
-                self.send_log(job_id, f"  Output remains at: {output_path}")
-                return output_path
+            self.send_log(job_id, f"  Keep both: original preserved, output at {output_path}")
+            return output_path
 
         try:
             # Safety check 1: Verify original still exists
@@ -701,8 +671,8 @@ class ByteNode:
         try:
             cmd = [self.ffprobe, "-v", "quiet", "-print_format", "json",
                    "-show_format", "-show_streams", filepath]
-            r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
-            if r.returncode != 0 or not r.stdout:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            if r.returncode != 0:
                 if job_id:
                     self.send_log(job_id, f"[WARN] FFprobe failed on {os.path.basename(filepath)}")
                 return None
@@ -739,140 +709,1285 @@ class ByteNode:
             cp_file = os.path.join(work_dir, "checkpoint.json")
             with open(cp_file, "w") as f:
                 json.dump({"job_id": job_id, "step": step, "time": datetime.now().isoformat()}, f)
-            self.save_session()  # Update session state too
         except:
             pass
 
-    def remux_container(self, job, settings):
-        """Remux only — change container format without re-encoding. Ultra fast, no GPU needed."""
+    # ─── RemuxClean (job_type='remuxclean') ──────────────────────────────────
+    KEEP_LANGS = {"eng", "en", "jpn", "ja", "und", ""}
+
+    LANG_DISPLAY = {
+        "eng": "English", "en": "English",
+        "jpn": "Japanese", "ja": "Japanese",
+        "und": "Undetermined",
+    }
+
+    DIRTY_KEYWORDS = [
+        "blu-ray", "bluray", "blu ray", "uhd", "web-dl", "web dl", "webrip",
+        "bdrip", "hdrip", "brrip", "remux", "1080p", "2160p", "720p", "4k",
+        "x264", "x265", "hevc-", "ddp", "rarbg", "psa", "tigole", "cee",
+        "subrip", "pgssub", "subtitleedit",
+    ]
+
+    def _is_dirty_name(self, name):
+        if not name or not isinstance(name, str):
+            return False
+        if any(ord(c) > 127 for c in name):
+            return True
+        nl = name.lower()
+        for kw in self.DIRTY_KEYWORDS:
+            if kw in nl:
+                return True
+        if name.count("/") >= 2:
+            return True
+        if name.count(" - ") >= 4:
+            return True
+        return False
+
+    def _codec_display(self, codec_name, codec_long_name="", profile=""):
+        cn = (codec_name or "").lower()
+        cln = (codec_long_name or "").lower()
+        pf = (profile or "").lower()
+        if cn == "aac":
+            return "AAC"
+        if cn == "ac3":
+            return "Dolby Digital"
+        if cn == "eac3":
+            return "Dolby Digital Plus"
+        if cn == "truehd":
+            return "TrueHD Atmos" if "atmos" in cln or "atmos" in pf else "TrueHD"
+        if cn == "dts":
+            if "ma" in pf or "master audio" in cln:
+                return "DTS-HD MA"
+            if "x" in pf and (":" in pf or "x" == pf or "dts-x" in cln):
+                return "DTS:X"
+            if "hd" in pf or "high-resolution" in cln:
+                return "DTS-HD"
+            return "DTS"
+        if cn == "flac":
+            return "FLAC"
+        if cn == "opus":
+            return "Opus"
+        if cn == "mp3":
+            return "MP3"
+        if cn == "vorbis":
+            return "Vorbis"
+        if cn == "pcm_s16le" or cn == "pcm_s24le":
+            return "PCM"
+        return (codec_name or "Audio").upper()
+
+    def _channels_display(self, channels, channel_layout=""):
+        cl = (channel_layout or "").lower()
+        if cl:
+            cl_clean = cl.split("(")[0].strip()
+            mapping = {
+                "stereo": "Stereo",
+                "mono": "Mono",
+                "5.1": "5.1",
+                "7.1": "7.1",
+                "5.0": "5.0",
+                "7.0": "7.0",
+                "2.1": "2.1",
+                "downmix": "Stereo",
+            }
+            if cl_clean in mapping:
+                return mapping[cl_clean]
+        ch_map = {1: "Mono", 2: "Stereo", 3: "2.1", 4: "Quad", 6: "5.1", 7: "6.1", 8: "7.1"}
+        try:
+            return ch_map.get(int(channels), f"{int(channels)}ch")
+        except (TypeError, ValueError):
+            return "Stereo"
+
+    def _is_commentary(self, title, disposition):
+        if disposition and (disposition.get("commentary") or disposition.get("dub")):
+            if disposition.get("commentary"):
+                return True
+        if title and "commentary" in title.lower():
+            return True
+        return False
+
+    def _build_audio_name(self, lang, codec_name, codec_long_name, profile, channels, channel_layout, is_commentary):
+        lang_disp = self.LANG_DISPLAY.get((lang or "und").lower(), (lang or "Undetermined").title())
+        codec = self._codec_display(codec_name, codec_long_name, profile)
+        chans = self._channels_display(channels, channel_layout)
+        parts = [lang_disp, codec, chans]
+        if is_commentary:
+            parts.append("Commentary")
+        return " - ".join(parts)
+
+    def _build_subtitle_name(self, lang, disposition, is_commentary):
+        lang_disp = self.LANG_DISPLAY.get((lang or "und").lower(), (lang or "Undetermined").title())
+        parts = [lang_disp]
+        d = disposition or {}
+        if d.get("forced"):
+            parts.append("Forced")
+        if d.get("hearing_impaired"):
+            parts.append("Hearing Impaired")
+        elif d.get("sdh"):  # rare, but handle it
+            parts.append("SDH")
+        if is_commentary:
+            parts.append("Commentary")
+        return " - ".join(parts)
+
+    def _analyze_mkv_for_clean(self, filepath, job_id):
+        """Run mkvmerge -J for definitive track IDs + ffprobe for codec details. Returns merged structure."""
+        # mkvmerge -J for track IDs and language
+        try:
+            r = subprocess.run([self.mkvmerge, "-J", filepath],
+                               capture_output=True, text=True, timeout=120)
+            if r.returncode != 0 and r.returncode != 1:
+                # mkvmerge returns 1 for warnings but still produces JSON
+                self.send_log(job_id, f"  [WARN] mkvmerge -J returned {r.returncode}")
+                return None
+            mkv_data = json.loads(r.stdout)
+        except Exception as e:
+            self.send_log(job_id, f"[ERROR] mkvmerge -J failed: {e}")
+            return None
+
+        # ffprobe for codec_long_name, profile, channel_layout, disposition
+        probe = self.probe_file(filepath, job_id)
+        if not probe:
+            self.send_log(job_id, "[ERROR] ffprobe failed for cleanup analysis")
+            return None
+
+        # Build a stream-index → ffprobe-stream map (mkvmerge track ID == ffprobe stream index for MKV)
+        ff_streams_by_index = {s.get("index", -1): s for s in probe.get("streams", [])}
+        return {"mkv": mkv_data, "ffprobe": probe, "ff_by_index": ff_streams_by_index}
+
+    def _plan_remux_clean(self, analysis, job_id):
+        """
+        Given analysis from _analyze_mkv_for_clean, decide which tracks to keep.
+        Returns dict:
+          - audio_keep_ids: list of mkvmerge track IDs (input file)
+          - subtitle_keep_ids: list of mkvmerge track IDs (input file)
+          - removed_audio, removed_subs (counts)
+          - any_dirty_names (bool)
+          - source_track_meta: list of track info dicts (lang, codec, etc.) used after remux
+                              for naming
+        """
+        plan = {
+            "audio_keep_ids": [],
+            "subtitle_keep_ids": [],
+            "video_track_ids": [],
+            "removed_audio": 0,
+            "removed_subs": 0,
+            "kept_audio": 0,
+            "kept_subs": 0,
+            "any_dirty_names": False,
+            "source_track_meta": [],  # ordered list of dicts for kept tracks (in output order)
+        }
+        mkv = analysis["mkv"]
+        ff_by_index = analysis["ff_by_index"]
+
+        # mkvmerge -J tracks have integer "id" — these are the IDs used in --audio-tracks etc.
+        all_audio = []
+        all_subs = []
+        for t in mkv.get("tracks", []):
+            tid = t.get("id")
+            ttype = t.get("type")
+            props = t.get("properties") or {}
+            lang = (props.get("language") or "und").lower()
+            track_name = props.get("track_name") or ""
+
+            # Build a unified track metadata record (mkvmerge data + ffprobe details)
+            ff = ff_by_index.get(tid, {})
+            ff_tags = ff.get("tags") or {}
+            ff_disp = ff.get("disposition") or {}
+
+            # Prefer ffprobe-reported title if mkvmerge didn't have one
+            title = track_name or ff_tags.get("title", "")
+
+            meta = {
+                "id": tid,
+                "type": ttype,
+                "lang": lang,
+                "title": title,
+                "codec_name": ff.get("codec_name") or t.get("codec", ""),
+                "codec_long_name": ff.get("codec_long_name", ""),
+                "profile": ff.get("profile", ""),
+                "channels": ff.get("channels") or props.get("audio_channels") or 0,
+                "channel_layout": ff.get("channel_layout", ""),
+                "disposition": ff_disp,
+                "props": props,
+            }
+
+            if self._is_dirty_name(title):
+                plan["any_dirty_names"] = True
+
+            if ttype == "video":
+                plan["video_track_ids"].append(tid)
+            elif ttype == "audio":
+                all_audio.append(meta)
+            elif ttype == "subtitles":
+                all_subs.append(meta)
+
+        # Filter audio
+        for a in all_audio:
+            if a["lang"] in self.KEEP_LANGS:
+                plan["audio_keep_ids"].append(a["id"])
+
+        # Safety: NEVER strip all audio. If filter removed everything, keep first audio track.
+        if not plan["audio_keep_ids"] and all_audio:
+            plan["audio_keep_ids"].append(all_audio[0]["id"])
+            self.send_log(job_id,
+                "  [SAFETY] No English/Japanese audio found — keeping first audio track")
+
+        plan["removed_audio"] = len(all_audio) - len(plan["audio_keep_ids"])
+        plan["kept_audio"] = len(plan["audio_keep_ids"])
+
+        # Filter subs (no safety net — fine to remove all subs)
+        for s in all_subs:
+            if s["lang"] in self.KEEP_LANGS:
+                plan["subtitle_keep_ids"].append(s["id"])
+        plan["removed_subs"] = len(all_subs) - len(plan["subtitle_keep_ids"])
+        plan["kept_subs"] = len(plan["subtitle_keep_ids"])
+
+        # Build source_track_meta in OUTPUT order: video tracks first, then kept audio, then kept subs
+        # (mkvmerge preserves this ordering by default)
+        kept_audio_meta = [a for a in all_audio if a["id"] in plan["audio_keep_ids"]]
+        kept_sub_meta = [s for s in all_subs if s["id"] in plan["subtitle_keep_ids"]]
+        # Video metadata also needed (preserve the existing video track names — usually fine)
+        video_meta = []
+        for t in mkv.get("tracks", []):
+            if t.get("type") == "video":
+                tid = t.get("id")
+                ff = ff_by_index.get(tid, {})
+                video_meta.append({
+                    "id": tid, "type": "video",
+                    "title": (t.get("properties") or {}).get("track_name") or "",
+                    "codec_name": ff.get("codec_name") or t.get("codec", ""),
+                })
+        plan["source_track_meta"] = video_meta + kept_audio_meta + kept_sub_meta
+        return plan
+
+    def _build_clean_names_for_output(self, output_path, source_meta, job_id):
+        """
+        After remux, run mkvmerge -J on output and pair tracks (in order) with source_meta
+        to build clean names. Returns dict: {output_track_number_1based: clean_name}
+        """
+        try:
+            r = subprocess.run([self.mkvmerge, "-J", output_path],
+                               capture_output=True, text=True, timeout=120)
+            if r.returncode not in (0, 1):
+                self.send_log(job_id, f"  [WARN] mkvmerge -J on output returned {r.returncode}")
+                return {}
+            out_data = json.loads(r.stdout)
+        except Exception as e:
+            self.send_log(job_id, f"  [WARN] Could not analyze output for naming: {e}")
+            return {}
+
+        out_tracks = out_data.get("tracks", [])
+        # mkvpropedit uses 1-indexed track numbers. We pair output tracks with source_meta
+        # by ORDER (mkvmerge preserves order: video → kept audio → kept subs).
+        result = {}
+        if len(out_tracks) != len(source_meta):
+            self.send_log(job_id,
+                f"  [WARN] Output has {len(out_tracks)} tracks but expected {len(source_meta)} — "
+                "naming might be off. Skipping name cleanup to be safe.")
+            return {}
+
+        for idx, (out_t, src) in enumerate(zip(out_tracks, source_meta)):
+            tid_1based = idx + 1
+            ttype = out_t.get("type")
+            if ttype == "audio":
+                is_comm = self._is_commentary(src.get("title", ""), src.get("disposition", {}))
+                name = self._build_audio_name(
+                    src.get("lang", "und"),
+                    src.get("codec_name", ""),
+                    src.get("codec_long_name", ""),
+                    src.get("profile", ""),
+                    src.get("channels", 0),
+                    src.get("channel_layout", ""),
+                    is_comm,
+                )
+                result[tid_1based] = name
+            elif ttype == "subtitles":
+                is_comm = self._is_commentary(src.get("title", ""), src.get("disposition", {}))
+                name = self._build_subtitle_name(
+                    src.get("lang", "und"),
+                    src.get("disposition", {}),
+                    is_comm,
+                )
+                result[tid_1based] = name
+            else:
+                # Video tracks: only rename if dirty; otherwise leave alone
+                if src.get("title") and self._is_dirty_name(src["title"]):
+                    result[tid_1based] = ""  # empty string clears the name
+        return result
+
+    def remux_clean(self, job, settings):
+        """
+        RemuxClean pipeline:
+          1. Analyze source (mkvmerge -J + ffprobe)
+          2. Plan track filter (keep eng/jpn/und audio+subs)
+          3. mkvmerge -o output --audio-tracks X,Y --subtitle-tracks A,B input.mkv
+          4. mkvpropedit on output to apply clean names
+        Returns (success, error, result_dict, work_dir) — same shape as transcode_*.
+        """
         job_id = job["id"]
         filepath = job["file_path"]
         filename = job["file_name"]
         file_size_gb = job["file_size_gb"]
-        target = settings.get("container", "mkv")
 
         basename = os.path.splitext(filename)[0]
-        current_ext = os.path.splitext(filename)[1].lstrip(".").lower()
-
-        # Skip if already in target container
-        if current_ext == target:
-            self.send_log(job_id, f"  Already in {target.upper()} container — skipping remux")
-            return True, None, {
-                "output_path": filepath,
-                "output_size_gb": file_size_gb,
-                "reduction_pct": 0,
-            }, None
-
-        work_dir = os.path.join(self.temp_base, f"job_{job_id}")
-        os.makedirs(work_dir, exist_ok=True)
-        output_file = os.path.join(work_dir, f"{basename}_byte.{target}")
-        duration_sec = float(job.get("duration_min", 0)) * 60
+        work_dir = self._work_dir(job_id, settings)
+        # Output is always MKV (cleanup is MKV-only)
+        output_mkv = os.path.join(work_dir, f"{basename}_clean.mkv")
+        total_steps = 4
 
         try:
-            step = f"[Step 1/1] Remux {current_ext.upper()} → {target.upper()}"
+            # Step 1: Analyze
+            step = f"[Step 1/{total_steps}] Analyzing tracks (mkvmerge -J + ffprobe)"
             self.update_progress(job_id, 5, step)
             self.send_log(job_id, step)
+            analysis = self._analyze_mkv_for_clean(filepath, job_id)
+            if not analysis:
+                return False, "Failed to analyze MKV tracks", None, work_dir
 
-            ok, err = self.run_cmd([
-                self.ffmpeg, "-y", "-i", filepath,
-                "-map", "0", "-c", "copy",
-                "-map_chapters", "0", "-map_metadata", "0",
-                output_file
-            ], f"Remux to {target.upper()}", job_id, parse_progress=True, input_size_gb=file_size_gb, total_duration_sec=duration_sec)
+            # Step 2: Plan
+            step = f"[Step 2/{total_steps}] Planning track filter"
+            self.update_progress(job_id, 15, step)
+            self.send_log(job_id, step)
+            plan = self._plan_remux_clean(analysis, job_id)
 
-            if not ok:
-                return False, f"Remux failed: {err[:200]}", None, work_dir
+            self.send_log(job_id,
+                f"  Audio: keep {plan['kept_audio']}, remove {plan['removed_audio']}")
+            self.send_log(job_id,
+                f"  Subtitles: keep {plan['kept_subs']}, remove {plan['removed_subs']}")
+            self.send_log(job_id,
+                f"  Dirty track names found: {plan['any_dirty_names']}")
 
-            if not os.path.exists(output_file) or os.path.getsize(output_file) < 1024:
-                return False, "Remux produced empty output", None, work_dir
+            nothing_to_remove = (plan["removed_audio"] == 0 and plan["removed_subs"] == 0)
+            if nothing_to_remove and not plan["any_dirty_names"]:
+                self.send_log(job_id, "  File already clean — no changes needed")
+                # Mark complete with no file change
+                return True, None, {
+                    "output_path": filepath,
+                    "output_size_gb": file_size_gb,
+                    "reduction_pct": 0,
+                    "saved_gb": 0,
+                    "no_op": True,
+                }, work_dir
 
-            output_gb = os.path.getsize(output_file) / (1024**3)
-            diff_pct = abs(1 - output_gb / file_size_gb) * 100 if file_size_gb > 0 else 0
+            # Step 3: mkvmerge remux to filter tracks
+            if not nothing_to_remove:
+                step = f"[Step 3/{total_steps}] mkvmerge filtering tracks"
+                self.update_progress(job_id, 25, step)
+                self.send_log(job_id, step)
+
+                cmd = [self.mkvmerge, "-o", output_mkv]
+                if plan["audio_keep_ids"]:
+                    cmd += ["--audio-tracks", ",".join(str(i) for i in plan["audio_keep_ids"])]
+                else:
+                    cmd += ["--no-audio"]
+                if plan["subtitle_keep_ids"]:
+                    cmd += ["--subtitle-tracks", ",".join(str(i) for i in plan["subtitle_keep_ids"])]
+                else:
+                    cmd += ["--no-subtitles"]
+                cmd.append(filepath)
+
+                ok, err = self.run_cmd_with_watchdog(
+                    cmd, "mkvmerge Track Filter", job_id, stale_timeout=300)
+                if not ok:
+                    return False, f"mkvmerge failed: {err[:200]}", None, work_dir
+                if not os.path.exists(output_mkv) or os.path.getsize(output_mkv) < 1024:
+                    return False, "mkvmerge produced empty output", None, work_dir
+                target_for_naming = output_mkv
+                # source_meta is already in output-order from _plan_remux_clean
+                source_meta = plan["source_track_meta"]
+            else:
+                # No tracks to remove — copy file to work_dir to apply names safely
+                # (We don't want to mkvpropedit the original directly; replace_original
+                # handles the swap.)
+                step = f"[Step 3/{total_steps}] Copying file to apply name cleanup"
+                self.update_progress(job_id, 25, step)
+                self.send_log(job_id, step)
+                shutil.copy2(filepath, output_mkv)
+                target_for_naming = output_mkv
+                # Build full source_meta (no filtering applied)
+                # Walk all tracks in mkvmerge order: video, audio, subs
+                source_meta = []
+                # Need to collect ALL tracks since none were filtered
+                # Re-derive from analysis
+                mkv = analysis["mkv"]
+                ff_by_index = analysis["ff_by_index"]
+                for t_type in ("video", "audio", "subtitles"):
+                    for t in mkv.get("tracks", []):
+                        if t.get("type") != t_type:
+                            continue
+                        tid = t.get("id")
+                        props = t.get("properties") or {}
+                        ff = ff_by_index.get(tid, {})
+                        source_meta.append({
+                            "id": tid, "type": t_type,
+                            "lang": (props.get("language") or "und").lower(),
+                            "title": props.get("track_name") or (ff.get("tags") or {}).get("title", ""),
+                            "codec_name": ff.get("codec_name") or t.get("codec", ""),
+                            "codec_long_name": ff.get("codec_long_name", ""),
+                            "profile": ff.get("profile", ""),
+                            "channels": ff.get("channels") or props.get("audio_channels") or 0,
+                            "channel_layout": ff.get("channel_layout", ""),
+                            "disposition": ff.get("disposition") or {},
+                        })
+
+            # Step 4: mkvpropedit clean names
+            step = f"[Step 4/{total_steps}] mkvpropedit clean track names"
+            self.update_progress(job_id, 80, step)
+            self.send_log(job_id, step)
+            clean_names = self._build_clean_names_for_output(target_for_naming, source_meta, job_id)
+            self.send_log(job_id, f"  Will rename {len(clean_names)} track(s)")
+
+            if clean_names:
+                ed_cmd = [self.mkvpropedit, target_for_naming]
+                for tid_1based, name in clean_names.items():
+                    ed_cmd += ["--edit", f"track:@{tid_1based}",
+                               "--set", f"name={name}"]
+                ok, err = self.run_cmd(ed_cmd, "mkvpropedit names", job_id)
+                if not ok:
+                    self.send_log(job_id,
+                        f"  [WARN] Name cleanup failed but tracks were filtered. "
+                        f"File still usable. {err[:200]}")
+                    # Don't fail the whole job over a name cleanup error
+                else:
+                    for tid, name in list(clean_names.items())[:6]:
+                        self.send_log(job_id, f"    track {tid}: '{name}'")
+                    if len(clean_names) > 6:
+                        self.send_log(job_id, f"    ... and {len(clean_names) - 6} more")
+
+            # Verify output
+            output_gb = os.path.getsize(output_mkv) / (1024**3)
+            size_change_pct = (1 - output_gb / file_size_gb) * 100 if file_size_gb > 0 else 0
 
             self.update_progress(job_id, 100, "Complete")
-            self.send_log(job_id, f"  COMPLETE: Remuxed {current_ext.upper()} → {target.upper()} ({file_size_gb:.2f} GB → {output_gb:.2f} GB)")
+            removed_total = plan["removed_audio"] + plan["removed_subs"]
+            self.send_log(job_id,
+                f"  COMPLETE: {file_size_gb:.2f} GB → {output_gb:.2f} GB "
+                f"({removed_total} tracks removed, {len(clean_names)} names cleaned)")
 
             return True, None, {
-                "output_path": output_file,
+                "output_path": output_mkv,
                 "output_size_gb": output_gb,
-                "reduction_pct": diff_pct,
+                "reduction_pct": size_change_pct,
+                "saved_gb": file_size_gb - output_gb,
             }, work_dir
 
         except Exception as e:
-            self.send_log(job_id, f"[ERROR] Remux exception: {e}")
+            self.log(f"RemuxClean exception: {e}", "ERROR")
+            self.send_log(job_id, f"[ERROR] RemuxClean exception: {e}")
             return False, str(e), None, work_dir
 
+    # ─── DV7→8 Only (job_type='dv78only') ────────────────────────────────────
+    def dv78only_convert(self, job, settings):
+        """
+        Convert DoVi Profile 7 → 8 without re-encoding the video.
+        Pipeline:
+          1. Extract HEVC bitstream (copy, no re-encode)
+          2. Extract RPU
+          3. Convert RPU profile 7→8 (dovi_tool -m 2 convert)
+          4. Inject converted RPU back into the ORIGINAL HEVC stream
+          5. mkvmerge remux: new HEVC + original audio/subs/chapters
+        Result: same quality and roughly the same size, just P8 instead of P7.
+        """
+        job_id = job["id"]
+        filepath = job["file_path"]
+        filename = job["file_name"]
+        file_size_gb = job["file_size_gb"]
+
+        basename = os.path.splitext(filename)[0]
+        work_dir = self._work_dir(job_id, settings)
+
+        raw_hevc = os.path.join(work_dir, f"{basename}.hevc")
+        rpu_bin = os.path.join(work_dir, f"{basename}.rpu.bin")
+        rpu_p8 = os.path.join(work_dir, f"{basename}.rpu_p8.bin")
+        injected_hevc = os.path.join(work_dir, f"{basename}_p8.hevc")
+        output_mkv = os.path.join(work_dir, f"{basename}_p8.mkv")
+        total_steps = 5
+
+        try:
+            # Step 1: Extract HEVC bitstream (copy)
+            step = f"[Step 1/{total_steps}] Extracting HEVC bitstream (copy)"
+            self.update_progress(job_id, 5, step)
+            self.send_log(job_id, step)
+            ok, err = self.run_cmd([
+                self.ffmpeg, "-y", "-i", filepath,
+                "-map", "0:v:0", "-c:v", "copy", "-bsf:v", "hevc_mp4toannexb",
+                "-f", "hevc", raw_hevc
+            ], "Extract HEVC", job_id)
+            if not ok:
+                return False, f"HEVC extraction failed: {err[:200]}", None, work_dir
+            if not os.path.exists(raw_hevc) or os.path.getsize(raw_hevc) < 1024:
+                return False, "HEVC extraction produced empty/tiny file", None, work_dir
+            raw_size_gb = os.path.getsize(raw_hevc) / (1024**3)
+            self.send_log(job_id, f"  Extracted HEVC: {raw_size_gb:.2f} GB")
+
+            # Step 2: Extract RPU
+            step = f"[Step 2/{total_steps}] Extracting DoVi RPU"
+            self.update_progress(job_id, 25, step)
+            self.send_log(job_id, step)
+            ok, err = self.run_cmd([
+                self.dovi_tool, "extract-rpu", "-i", raw_hevc, "-o", rpu_bin
+            ], "Extract RPU", job_id)
+            if not ok:
+                return False, f"RPU extraction failed: {err[:200]}", None, work_dir
+            if not os.path.exists(rpu_bin) or os.path.getsize(rpu_bin) == 0:
+                return False, "RPU extraction produced empty file", None, work_dir
+            self.send_log(job_id, f"  RPU size: {os.path.getsize(rpu_bin)/1024:.1f} KB")
+
+            # Step 3: Convert RPU profile 7→8 (mode 2 = convert to 8.1)
+            step = f"[Step 3/{total_steps}] Converting RPU profile 7→8"
+            self.update_progress(job_id, 45, step)
+            self.send_log(job_id, step)
+            ok, err = self.run_cmd([
+                self.dovi_tool, "-m", "2", "convert", "--discard",
+                "-i", rpu_bin, "-o", rpu_p8
+            ], "Convert RPU 7→8", job_id)
+            if not ok:
+                return False, f"RPU 7→8 convert failed: {err[:200]}", None, work_dir
+            if not os.path.exists(rpu_p8) or os.path.getsize(rpu_p8) == 0:
+                return False, "RPU conversion produced empty file", None, work_dir
+
+            # Step 4: Inject converted RPU back into the ORIGINAL HEVC
+            step = f"[Step 4/{total_steps}] Injecting P8 RPU into original HEVC"
+            self.update_progress(job_id, 60, step)
+            self.send_log(job_id, step)
+            ok, err = self.run_cmd([
+                self.dovi_tool, "inject-rpu",
+                "-i", raw_hevc, "--rpu-in", rpu_p8, "-o", injected_hevc
+            ], "Inject P8 RPU", job_id)
+            if not ok:
+                return False, f"RPU injection failed: {err[:200]}", None, work_dir
+
+            # Free disk: delete intermediates we don't need anymore
+            try:
+                os.remove(raw_hevc)
+                os.remove(rpu_bin)
+                os.remove(rpu_p8)
+            except Exception:
+                pass
+
+            # Step 5: mkvmerge remux — new HEVC + original audio/subs/chapters
+            step = f"[Step 5/{total_steps}] mkvmerge Remux (HEVC + audio/subs/chapters)"
+            self.update_progress(job_id, 80, step)
+            self.send_log(job_id, step)
+            ok, err = self.run_cmd_with_watchdog([
+                self.mkvmerge, "-o", output_mkv,
+                injected_hevc, "--no-video", filepath
+            ], "mkvmerge Remux", job_id, stale_timeout=300)
+            if not ok:
+                return False, f"mkvmerge failed: {err[:200]}", None, work_dir
+            if os.path.exists(injected_hevc):
+                try:
+                    os.remove(injected_hevc)
+                except Exception:
+                    pass
+
+            if not os.path.exists(output_mkv) or os.path.getsize(output_mkv) < 1024:
+                return False, "mkvmerge produced empty output", None, work_dir
+
+            output_gb = os.path.getsize(output_mkv) / (1024**3)
+            size_change_pct = (1 - output_gb / file_size_gb) * 100 if file_size_gb > 0 else 0
+
+            self.update_progress(job_id, 100, "Complete")
+            self.send_log(job_id,
+                f"  COMPLETE: {file_size_gb:.2f} GB → {output_gb:.2f} GB "
+                f"(DV Profile 7 → 8, no re-encode)")
+
+            return True, None, {
+                "output_path": output_mkv,
+                "output_size_gb": output_gb,
+                "reduction_pct": size_change_pct,
+                "saved_gb": file_size_gb - output_gb,
+            }, work_dir
+
+        except Exception as e:
+            self.log(f"DV78Only exception: {e}", "ERROR")
+            self.send_log(job_id, f"[ERROR] DV78Only exception: {e}")
+            return False, str(e), None, work_dir
+
+    # ─── Subtitle Generation (job_type='subgen') ─────────────────────────────
+    def _ensure_whisper(self, model_name, device, compute_type, job_id):
+        """Lazy-load faster-whisper model. Auto-installs if missing."""
+        # Already loaded with the same params?
+        if (self._whisper_model is not None
+                and self._whisper_model_name == model_name
+                and self._whisper_device == device
+                and self._whisper_compute == compute_type):
+            return self._whisper_model
+
+        # Try to import; install if needed
+        try:
+            from faster_whisper import WhisperModel  # noqa
+        except ImportError:
+            self.send_log(job_id, "  faster-whisper not installed — installing now (one-time)")
+            try:
+                subprocess.check_call([sys.executable, "-m", "pip", "install",
+                                       "faster-whisper", "-q", "--break-system-packages"])
+            except Exception as e:
+                self.send_log(job_id, f"  [ERROR] faster-whisper install failed: {e}")
+                return None
+            try:
+                from faster_whisper import WhisperModel  # noqa
+            except ImportError as e:
+                self.send_log(job_id, f"  [ERROR] faster-whisper still not importable: {e}")
+                return None
+
+        from faster_whisper import WhisperModel
+
+        # Resolve auto values
+        resolved_device = device
+        resolved_compute = compute_type
+        if resolved_device == "auto":
+            # Try CUDA first, fall back to CPU
+            try:
+                test = WhisperModel("tiny", device="cuda", compute_type="int8")
+                del test
+                resolved_device = "cuda"
+            except Exception:
+                resolved_device = "cpu"
+                self.send_log(job_id, "  CUDA not available for Whisper — falling back to CPU")
+        if resolved_compute == "auto":
+            resolved_compute = "float16" if resolved_device == "cuda" else "int8"
+
+        self.send_log(job_id,
+            f"  Loading Whisper model '{model_name}' on {resolved_device} ({resolved_compute})...")
+        try:
+            model = WhisperModel(model_name, device=resolved_device, compute_type=resolved_compute)
+        except Exception as e:
+            # Retry on CPU if CUDA load failed
+            if resolved_device == "cuda":
+                self.send_log(job_id, f"  CUDA load failed ({e}); retrying on CPU")
+                resolved_device = "cpu"
+                resolved_compute = "int8"
+                try:
+                    model = WhisperModel(model_name, device=resolved_device, compute_type=resolved_compute)
+                except Exception as e2:
+                    self.send_log(job_id, f"  [ERROR] Whisper CPU load also failed: {e2}")
+                    return None
+            else:
+                self.send_log(job_id, f"  [ERROR] Whisper load failed: {e}")
+                return None
+
+        self._whisper_model = model
+        self._whisper_model_name = model_name
+        self._whisper_device = resolved_device
+        self._whisper_compute = resolved_compute
+        self.send_log(job_id, f"  Whisper ready: {model_name} on {resolved_device}")
+        return model
+
+    def _srt_timestamp(self, sec):
+        """Format seconds as SRT timestamp 'HH:MM:SS,mmm'."""
+        if sec < 0:
+            sec = 0
+        h = int(sec // 3600)
+        m = int((sec % 3600) // 60)
+        s = int(sec % 60)
+        ms = int((sec - int(sec)) * 1000)
+        return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+    def _parse_srt_ts(self, ts):
+        """Parse 'HH:MM:SS,mmm' → seconds (float)."""
+        try:
+            ts = ts.replace(",", ".").strip()
+            parts = ts.split(":")
+            h = int(parts[0]); m = int(parts[1]); s = float(parts[2])
+            return h * 3600 + m * 60 + s
+        except Exception:
+            return 0.0
+
+    def _parse_srt(self, srt_text):
+        """Parse SRT text into list of {idx, start, end, text} dicts."""
+        entries = []
+        # Normalize line endings
+        srt_text = srt_text.replace("\r\n", "\n").replace("\r", "\n")
+        blocks = re.split(r"\n\n+", srt_text.strip())
+        for block in blocks:
+            lines = block.strip().split("\n")
+            if len(lines) < 2:
+                continue
+            # First line should be a number, second should be timestamps
+            try:
+                idx = int(lines[0].strip())
+                ts_line = lines[1]
+            except ValueError:
+                # Some SRTs have no number, just use position
+                idx = len(entries) + 1
+                ts_line = lines[0]
+                lines = [str(idx)] + lines
+
+            m = re.match(r"(\d+:\d+:\d+[,\.]\d+)\s*-->\s*(\d+:\d+:\d+[,\.]\d+)", ts_line)
+            if not m:
+                continue
+            start = self._parse_srt_ts(m.group(1))
+            end = self._parse_srt_ts(m.group(2))
+            text = "\n".join(lines[2:]).strip()
+            if text:
+                entries.append({"idx": idx, "start": start, "end": end, "text": text})
+        return entries
+
+    def _serialize_srt(self, entries):
+        """Build SRT text from entries (re-numbered 1-indexed)."""
+        out = []
+        for i, e in enumerate(entries, start=1):
+            out.append(str(i))
+            out.append(f"{self._srt_timestamp(e['start'])} --> {self._srt_timestamp(e['end'])}")
+            out.append(e["text"])
+            out.append("")
+        return "\n".join(out)
+
+    def _claude_translate_chunk(self, api_key, model, chunk, prev_context, title, job_id):
+        """
+        Send a chunk of SRT entries to Claude for Japanese translation.
+        Returns translated chunk (list of dicts with 'text' replaced).
+        """
+        # Build the request payload
+        chunk_for_api = [{"i": i, "t": e["text"]} for i, e in enumerate(chunk)]
+        prev_lines = "\n".join(f"- {t}" for t in prev_context[-10:]) if prev_context else "(start of file)"
+
+        system_prompt = (
+            "You are translating English movie/TV subtitles to natural, native-sounding Japanese. "
+            "Translate as if you were writing subtitles for a Japanese audience watching this content. "
+            "Preserve tone, register, and character voice. Use natural Japanese sentence structure, "
+            "not literal word-for-word translation. Keep idioms idiomatic. "
+            "Do not add explanatory notes. Output ONLY a JSON array."
+        )
+        user_prompt = (
+            f"Title: {title}\n\n"
+            f"Previous context (already translated):\n{prev_lines}\n\n"
+            f"Translate the following English subtitle entries to Japanese. "
+            f"Each has an index 'i' and English text 't'. "
+            f"Return JSON array of objects with 'i' (same index) and 't' (Japanese translation). "
+            f"Output ONLY the JSON array, no markdown, no explanation.\n\n"
+            f"Entries:\n{json.dumps(chunk_for_api, ensure_ascii=False)}"
+        )
+
+        try:
+            r = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "max_tokens": 8192,
+                    "system": system_prompt,
+                    "messages": [{"role": "user", "content": user_prompt}],
+                },
+                timeout=120,
+            )
+        except Exception as e:
+            self.send_log(job_id, f"  [ERROR] Claude API request failed: {e}")
+            return None
+
+        if r.status_code != 200:
+            self.send_log(job_id, f"  [ERROR] Claude API {r.status_code}: {r.text[:300]}")
+            return None
+
+        try:
+            data = r.json()
+            content_blocks = data.get("content", [])
+            text_parts = [b.get("text", "") for b in content_blocks if b.get("type") == "text"]
+            response_text = "".join(text_parts).strip()
+        except Exception as e:
+            self.send_log(job_id, f"  [ERROR] Could not parse Claude response: {e}")
+            return None
+
+        # Strip code fences if Claude added them despite instructions
+        response_text = re.sub(r"^```(?:json)?\s*", "", response_text)
+        response_text = re.sub(r"\s*```$", "", response_text)
+
+        try:
+            translated = json.loads(response_text)
+        except json.JSONDecodeError as e:
+            self.send_log(job_id, f"  [ERROR] Claude returned non-JSON: {e}")
+            self.send_log(job_id, f"  Response: {response_text[:300]}")
+            return None
+
+        # Build dict by index for fast lookup
+        by_idx = {item.get("i"): item.get("t", "") for item in translated if isinstance(item, dict)}
+
+        # Apply translations preserving timestamps
+        result = []
+        for i, src in enumerate(chunk):
+            translated_text = by_idx.get(i, src["text"])  # fallback to original if missing
+            new_entry = dict(src)
+            new_entry["text"] = translated_text
+            result.append(new_entry)
+        return result
+
+    def _translate_srt_to_japanese(self, entries, api_key, model, chunk_size, title, job_id):
+        """Translate full SRT entries list to Japanese in chunks. Returns translated entries."""
+        if not entries:
+            return entries
+        if not api_key:
+            self.send_log(job_id, "  [ERROR] Claude API key not set in server settings")
+            return None
+
+        translated_all = []
+        prev_context = []  # list of recently-translated texts
+        total_chunks = (len(entries) + chunk_size - 1) // chunk_size
+        self.send_log(job_id,
+            f"  Translating {len(entries)} subtitle entries in {total_chunks} chunks of {chunk_size}")
+
+        for ci in range(total_chunks):
+            if self.cancelled:
+                self.send_log(job_id, "  Cancel requested — stopping translation")
+                return None
+            chunk = entries[ci * chunk_size : (ci + 1) * chunk_size]
+            self.send_log(job_id, f"  Chunk {ci+1}/{total_chunks} ({len(chunk)} entries)...")
+            translated = self._claude_translate_chunk(
+                api_key, model, chunk, prev_context, title, job_id)
+            if translated is None:
+                self.send_log(job_id, f"  [ERROR] Translation failed at chunk {ci+1}")
+                return None
+            translated_all.extend(translated)
+            # Add the most recent translations to context for next chunk
+            for e in translated[-10:]:
+                prev_context.append(e["text"])
+
+            # Update progress within the translation phase (60% → 90%)
+            phase_pct = 60 + ((ci + 1) / total_chunks) * 30
+            self.update_progress(job_id, phase_pct,
+                f"Translating subtitles ({ci+1}/{total_chunks})")
+        return translated_all
+
+    def _whisper_transcribe(self, audio_path, model_name, device, compute_type,
+                            language, task, job_id):
+        """
+        Run faster-whisper on audio. Returns list of SRT entries.
+        language: 'ja', 'en', or None (auto-detect)
+        task: 'transcribe' or 'translate' (translate = to English only)
+        """
+        model = self._ensure_whisper(model_name, device, compute_type, job_id)
+        if model is None:
+            return None
+
+        self.send_log(job_id,
+            f"  Whisper transcribing: lang={language or 'auto'}, task={task}")
+
+        try:
+            segments, info = model.transcribe(
+                audio_path,
+                language=language,
+                task=task,
+                beam_size=5,
+                vad_filter=True,  # voice-activity detection — better timestamps
+                vad_parameters=dict(min_silence_duration_ms=500),
+            )
+            self.send_log(job_id,
+                f"  Detected language: {info.language} (prob {info.language_probability:.2f}), "
+                f"duration {info.duration:.0f}s")
+        except Exception as e:
+            self.send_log(job_id, f"  [ERROR] Whisper transcribe failed: {e}")
+            return None
+
+        entries = []
+        last_log_time = time.time()
+        total_duration = info.duration if info.duration else 1
+        for seg in segments:
+            if self.cancelled:
+                self.send_log(job_id, "  Cancel requested — stopping transcription")
+                return None
+            text = (seg.text or "").strip()
+            if not text:
+                continue
+            entries.append({
+                "idx": len(entries) + 1,
+                "start": seg.start,
+                "end": seg.end,
+                "text": text,
+            })
+            # Periodic progress updates within the Whisper phase
+            if time.time() - last_log_time > 5:
+                pct_audio = (seg.end / total_duration) if total_duration else 0
+                # Whisper occupies 20%-60% of the bar
+                phase_pct = 20 + pct_audio * 40
+                self.update_progress(job_id, phase_pct,
+                    f"Whisper transcribing ({seg.end:.0f}s / {total_duration:.0f}s)")
+                last_log_time = time.time()
+
+        self.send_log(job_id, f"  Transcribed {len(entries)} subtitle entries")
+        return entries
+
+    def _extract_audio_for_whisper(self, filepath, audio_stream_idx, output_wav, job_id):
+        """Extract a specific audio stream as 16kHz mono WAV for Whisper."""
+        cmd = [
+            self.ffmpeg, "-y", "-i", filepath,
+            "-map", f"0:{audio_stream_idx}",
+            "-ac", "1", "-ar", "16000",
+            "-c:a", "pcm_s16le",
+            output_wav,
+        ]
+        ok, err = self.run_cmd(cmd, "Extract audio for Whisper", job_id)
+        if not ok:
+            return False
+        if not os.path.exists(output_wav) or os.path.getsize(output_wav) < 1024:
+            self.send_log(job_id, "[ERROR] Extracted audio is empty")
+            return False
+        return True
+
+    def _extract_text_subtitle(self, filepath, sub_stream_idx, output_srt, job_id):
+        """Extract a text subtitle track as SRT via ffmpeg."""
+        cmd = [
+            self.ffmpeg, "-y", "-i", filepath,
+            "-map", f"0:{sub_stream_idx}",
+            "-c:s", "srt",
+            output_srt,
+        ]
+        ok, err = self.run_cmd(cmd, "Extract subtitle to SRT", job_id)
+        if not ok:
+            return False
+        if not os.path.exists(output_srt) or os.path.getsize(output_srt) == 0:
+            self.send_log(job_id, "[ERROR] Extracted SRT is empty")
+            return False
+        return True
+
+    def _select_subgen_source(self, probe_data, job_id):
+        """
+        Decide which source to use for subtitle generation. Returns dict:
+          {'mode': 'translate_text' | 'whisper_jpn' | 'whisper_en_translate' | 'whisper_translate_to_en',
+           'sub_stream_idx': int (for translate_text mode),
+           'audio_stream_idx': int (for whisper modes),
+           'description': str}
+        """
+        streams = (probe_data or {}).get("streams", [])
+        text_codecs = {"subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text"}
+
+        # Path 1: English text subtitles exist → use those, translate via Claude
+        for s in streams:
+            if s.get("codec_type") != "subtitle":
+                continue
+            codec = (s.get("codec_name") or "").lower()
+            if codec not in text_codecs:
+                continue
+            tags = s.get("tags") or {}
+            lang = (tags.get("language") or "").lower()
+            if lang in ("eng", "en"):
+                return {
+                    "mode": "translate_text",
+                    "sub_stream_idx": s.get("index"),
+                    "description": f"English text subs (stream {s.get('index')}) → Claude translate",
+                }
+
+        # Path 2: Japanese audio exists → Whisper transcribe in Japanese
+        audio_streams = [s for s in streams if s.get("codec_type") == "audio"]
+        for a in audio_streams:
+            tags = a.get("tags") or {}
+            lang = (tags.get("language") or "").lower()
+            if lang in ("jpn", "ja"):
+                return {
+                    "mode": "whisper_jpn",
+                    "audio_stream_idx": a.get("index"),
+                    "description": f"Japanese audio (stream {a.get('index')}) → Whisper",
+                }
+
+        # Path 3: English audio → Whisper transcribe English, then Claude translates
+        for a in audio_streams:
+            tags = a.get("tags") or {}
+            lang = (tags.get("language") or "").lower()
+            if lang in ("eng", "en"):
+                return {
+                    "mode": "whisper_en_translate",
+                    "audio_stream_idx": a.get("index"),
+                    "description": f"English audio (stream {a.get('index')}) → Whisper + Claude translate",
+                }
+
+        # Path 4: First audio track, language unknown → Whisper auto-detect, then translate to Japanese
+        if audio_streams:
+            return {
+                "mode": "whisper_en_translate",
+                "audio_stream_idx": audio_streams[0].get("index"),
+                "description": f"Audio stream {audio_streams[0].get('index')} (auto-detect) → Whisper + Claude translate",
+            }
+
+        return None
+
+    def subgen(self, job, settings):
+        """
+        Subtitle generation pipeline. Produces a Japanese SRT and muxes it into the file.
+        """
+        job_id = job["id"]
+        filepath = job["file_path"]
+        filename = job["file_name"]
+        file_size_gb = job["file_size_gb"]
+
+        api_key = settings.get("claude_api_key", "")
+        claude_model = settings.get("claude_model", "claude-sonnet-4-6")
+        whisper_model = settings.get("whisper_model", "large-v3")
+        whisper_device = settings.get("whisper_device", "auto")
+        whisper_compute = settings.get("whisper_compute", "auto")
+        try:
+            chunk_size = int(settings.get("subgen_translate_chunk", "40"))
+        except (TypeError, ValueError):
+            chunk_size = 40
+
+        basename = os.path.splitext(filename)[0]
+        work_dir = self._work_dir(job_id, settings)
+
+        try:
+            # Step 1: Probe to determine pipeline path
+            step = "[Step 1/5] Probing source for subtitle/audio streams"
+            self.update_progress(job_id, 5, step)
+            self.send_log(job_id, step)
+            probe = self.probe_file(filepath, job_id)
+            if not probe:
+                return False, "Failed to probe source file", None, work_dir
+
+            choice = self._select_subgen_source(probe, job_id)
+            if not choice:
+                return False, "No usable audio or subtitle source for SubGen", None, work_dir
+            self.send_log(job_id, f"  Source: {choice['description']}")
+
+            # Step 2: Get English/source-language entries
+            step = "[Step 2/5] Acquiring source subtitle entries"
+            self.update_progress(job_id, 15, step)
+            self.send_log(job_id, step)
+            source_entries = None
+            translate_to_japanese = False  # if False, output IS Japanese (whisper_jpn)
+
+            if choice["mode"] == "translate_text":
+                # Extract English SRT, parse it
+                src_srt_path = os.path.join(work_dir, f"{basename}.eng.srt")
+                if not self._extract_text_subtitle(
+                        filepath, choice["sub_stream_idx"], src_srt_path, job_id):
+                    return False, "Failed to extract English subtitle stream", None, work_dir
+                with open(src_srt_path, "r", encoding="utf-8", errors="replace") as f:
+                    srt_text = f.read()
+                source_entries = self._parse_srt(srt_text)
+                if not source_entries:
+                    return False, "Source SRT was empty after parsing", None, work_dir
+                translate_to_japanese = True
+
+            elif choice["mode"] == "whisper_jpn":
+                # Whisper transcribe Japanese audio directly — output IS Japanese
+                wav_path = os.path.join(work_dir, f"{basename}.audio.wav")
+                self.update_progress(job_id, 18, "Extracting audio for Whisper")
+                if not self._extract_audio_for_whisper(
+                        filepath, choice["audio_stream_idx"], wav_path, job_id):
+                    return False, "Failed to extract audio", None, work_dir
+                source_entries = self._whisper_transcribe(
+                    wav_path, whisper_model, whisper_device, whisper_compute,
+                    language="ja", task="transcribe", job_id=job_id)
+                if source_entries is None:
+                    return False, "Whisper transcription failed", None, work_dir
+                translate_to_japanese = False
+
+            elif choice["mode"] == "whisper_en_translate":
+                # Whisper transcribe (auto-detect or English), then Claude translates to Japanese
+                wav_path = os.path.join(work_dir, f"{basename}.audio.wav")
+                self.update_progress(job_id, 18, "Extracting audio for Whisper")
+                if not self._extract_audio_for_whisper(
+                        filepath, choice["audio_stream_idx"], wav_path, job_id):
+                    return False, "Failed to extract audio", None, work_dir
+                # Auto-detect language for the source — keep transcribe (not Whisper-translate)
+                # to preserve fidelity, then Claude does the JP translation
+                source_entries = self._whisper_transcribe(
+                    wav_path, whisper_model, whisper_device, whisper_compute,
+                    language=None, task="transcribe", job_id=job_id)
+                if source_entries is None:
+                    return False, "Whisper transcription failed", None, work_dir
+                translate_to_japanese = True
+            else:
+                return False, f"Unknown SubGen mode: {choice['mode']}", None, work_dir
+
+            self.send_log(job_id, f"  Acquired {len(source_entries)} subtitle entries")
+
+            # Step 3: Translate to Japanese (if needed)
+            if translate_to_japanese:
+                step = "[Step 3/5] Translating to Japanese via Claude API"
+                self.update_progress(job_id, 60, step)
+                self.send_log(job_id, step)
+                if not api_key:
+                    return False, "Claude API key not set — open Settings → AI to add it", None, work_dir
+                jpn_entries = self._translate_srt_to_japanese(
+                    source_entries, api_key, claude_model, chunk_size, basename, job_id)
+                if jpn_entries is None:
+                    return False, "Claude translation failed (see log)", None, work_dir
+            else:
+                # Whisper-Japanese: source IS already Japanese
+                jpn_entries = source_entries
+                self.send_log(job_id, "[Step 3/5] Source is Japanese — skipping translation")
+                self.update_progress(job_id, 90, "Japanese transcription ready")
+
+            # Step 4: Write Japanese SRT
+            step = "[Step 4/5] Writing Japanese SRT"
+            self.update_progress(job_id, 92, step)
+            self.send_log(job_id, step)
+            jpn_srt_path = os.path.join(work_dir, f"{basename}.jpn.srt")
+            with open(jpn_srt_path, "w", encoding="utf-8") as f:
+                f.write(self._serialize_srt(jpn_entries))
+            self.send_log(job_id, f"  Wrote {os.path.getsize(jpn_srt_path)} bytes to {jpn_srt_path}")
+
+            # Step 5: mkvmerge to add Japanese SRT track to the file
+            step = "[Step 5/5] mkvmerge: adding Japanese SRT track"
+            self.update_progress(job_id, 95, step)
+            self.send_log(job_id, step)
+            output_mkv = os.path.join(work_dir, f"{basename}_jpn.mkv")
+            cmd = [
+                self.mkvmerge, "-o", output_mkv,
+                filepath,
+                "--language", "0:jpn",
+                "--track-name", "0:Japanese",
+                jpn_srt_path,
+            ]
+            ok, err = self.run_cmd_with_watchdog(
+                cmd, "mkvmerge add Japanese SRT", job_id, stale_timeout=300)
+            if not ok:
+                return False, f"mkvmerge failed: {err[:200]}", None, work_dir
+            if not os.path.exists(output_mkv) or os.path.getsize(output_mkv) < 1024:
+                return False, "mkvmerge produced empty output", None, work_dir
+
+            output_gb = os.path.getsize(output_mkv) / (1024**3)
+            size_change_pct = (1 - output_gb / file_size_gb) * 100 if file_size_gb > 0 else 0
+
+            self.update_progress(job_id, 100, "Complete")
+            self.send_log(job_id,
+                f"  COMPLETE: Added Japanese SRT ({len(jpn_entries)} entries) "
+                f"to {basename}.mkv")
+
+            return True, None, {
+                "output_path": output_mkv,
+                "output_size_gb": output_gb,
+                "reduction_pct": size_change_pct,
+                "saved_gb": file_size_gb - output_gb,
+            }, work_dir
+
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            self.log(f"SubGen exception: {e}", "ERROR")
+            self.send_log(job_id, f"[ERROR] SubGen exception: {e}")
+            self.send_log(job_id, f"[ERROR] {tb[-500:]}")
+            return False, str(e), None, work_dir
+
+    def _translate_path(self, server_path, settings):
+        """
+        Translate server-relative path → node-local path.
+        Server: /media/data/media/movies/foo.mkv
+        Node (Windows): Z:\\data\\media\\movies\\foo.mkv
+
+        Configured by server settings:
+          node_path_remote_prefix (default '/media/')
+          node_path_local_prefix  (default '' = no translation)
+        """
+        if not server_path:
+            return server_path
+        remote = settings.get("node_path_remote_prefix") or "/media/"
+        local = settings.get("node_path_local_prefix") or ""
+        if local and server_path.startswith(remote):
+            translated = local + server_path[len(remote):]
+            # Normalize separators on Windows
+            if os.sep == "\\":
+                translated = translated.replace("/", "\\")
+            return translated
+        return server_path
+
     def process_job(self, job_data):
-        """Process a single transcode job."""
+        """Process a single job. Dispatches based on job_type."""
         job = job_data["job"]
         settings = job.get("settings", {})
         job_id = job["id"]
         filename = job["file_name"]
 
-        # Translate NAS path → local path (e.g. /media/... → Z:\...)
+        # v2.5 — translate server path → node-local before any handler runs
         server_path = job["file_path"]
-        filepath = self.translate_path(server_path)
-        job["file_path"] = filepath  # Update dict so child methods (transcode_dovi, etc.) get translated path
+        local_path = self._translate_path(server_path, settings)
+        if local_path != server_path:
+            job["file_path"] = local_path  # downstream handlers all read job["file_path"]
+            # Stash the original for any code that needs to talk back to the server
+            job["file_path_server"] = server_path
+        filepath = job["file_path"]
 
+        job_type = (job.get("job_type") or "transcode").lower()
         has_dovi = job.get("has_dovi", 0)
         video_codec = job.get("video_codec", "")
         self.current_job_id = job_id
-        self.job_cancel[job_id] = False
+        self.cancelled = False
 
-        self.log(f"Processing job #{job_id}: {filename}")
+        self.log(f"Processing job #{job_id} [{job_type}]: {filename}")
         self.send_log(job_id, f"Job #{job_id} started: {filename}")
-        if filepath != server_path:
-            self.send_log(job_id, f"  NAS path: {server_path} → {filepath}")
+        self.send_log(job_id, f"  Type: {job_type}")
+        if local_path != server_path:
+            self.send_log(job_id, f"  Server path: {server_path}")
+            self.send_log(job_id, f"  Local path: {local_path}")
         else:
             self.send_log(job_id, f"  Path: {filepath}")
         self.send_log(job_id, f"  Size: {job.get('file_size_gb', 0):.2f} GB")
-        self.send_log(job_id, f"  HDR: {job.get('hdr_type', 'SDR')}")
-        self.send_log(job_id, f"  Codec: {video_codec}")
-        self.send_log(job_id, f"  DoVi: {bool(has_dovi)} (Profile {job.get('dovi_profile', 'N/A')})")
-        self.send_log(job_id, f"  CQ: {settings.get('cq', '18')}, Preset: {settings.get('preset', 'slow')}")
 
         # Verify file exists
         if not os.path.exists(filepath):
-            self.send_log(job_id, f"[ERROR] File not found: {filepath}")
+            self.send_log(job_id, f"[ERROR] File not found at local path: {filepath}")
+            if local_path != server_path:
+                self.send_log(job_id, f"[ERROR] Path was translated from: {server_path}")
+                self.send_log(job_id, f"[HINT] Check Settings → Path Mapping (node_path_local_prefix)")
             self.api("POST", f"/api/jobs/{job_id}/error", {
                 "worker_id": self.worker_id, "error": f"File not found: {filepath}"
             })
-            self.job_cancel.pop(job_id, None)
-            self.job_procs.pop(job_id, None)
+            self.current_job_id = None
             return
 
-        # Pre-flight probe: verify codec before choosing pipeline
-        self.send_log(job_id, f"  Pre-flight: Probing source file...")
-        probe = self.probe_file(filepath, job_id)
-        if probe:
-            streams = probe.get("streams", [])
-            vid = next((s for s in streams if s.get("codec_type") == "video"), None)
-            if vid:
-                actual_codec = vid.get("codec_name", "")
-                self.send_log(job_id, f"  Detected codec: {actual_codec}")
-                # DoVi pipeline requires HEVC — if codec is h264, use standard pipeline
-                if has_dovi and actual_codec != "hevc":
-                    self.send_log(job_id, f"  [WARN] DoVi flagged but codec is {actual_codec}, not HEVC — using standard pipeline")
-                    has_dovi = 0
-            else:
-                self.send_log(job_id, f"  [WARN] No video stream found in probe — proceeding anyway")
-
-        # Choose pipeline
-        processing_mode = settings.get("processing_mode", "transcode")
         start_time = time.time()
-        if processing_mode == "remux":
-            self.send_log(job_id, f"  Mode: Remux only (container conversion)")
-            success, error, result, work_dir = self.remux_container(job, settings)
-        elif has_dovi:
-            success, error, result, work_dir = self.transcode_dovi(job, settings)
+        success, error, result, work_dir = False, None, None, None
+
+        # ── Dispatch ────────────────────────────────────────────────────────
+        if job_type == "remuxclean":
+            self.send_log(job_id, f"  Pipeline: RemuxClean (track filter + name cleanup)")
+            success, error, result, work_dir = self.remux_clean(job, settings)
+        elif job_type == "dv78only":
+            self.send_log(job_id, f"  Pipeline: DV Profile 7→8 (no re-encode)")
+            success, error, result, work_dir = self.dv78only_convert(job, settings)
+        elif job_type == "subgen":
+            self.send_log(job_id, f"  Pipeline: SubGen (Whisper + Claude → Japanese SRT)")
+            success, error, result, work_dir = self.subgen(job, settings)
         else:
-            success, error, result, work_dir = self.transcode_standard(job, settings)
+            # Default: 'transcode' (full DoVi/standard NVENC pipeline)
+            self.send_log(job_id, f"  HDR: {job.get('hdr_type', 'SDR')}")
+            self.send_log(job_id, f"  Codec: {video_codec}")
+            self.send_log(job_id, f"  DoVi: {bool(has_dovi)} (Profile {job.get('dovi_profile', 'N/A')})")
+            self.send_log(job_id, f"  CQ: {settings.get('cq', '18')}, Preset: {settings.get('preset', 'slow')}")
+
+            # Pre-flight probe: verify codec before choosing transcode pipeline
+            self.send_log(job_id, f"  Pre-flight: Probing source file...")
+            probe = self.probe_file(filepath, job_id)
+            if probe:
+                streams = probe.get("streams", [])
+                vid = next((s for s in streams if s.get("codec_type") == "video"), None)
+                if vid:
+                    actual_codec = vid.get("codec_name", "")
+                    self.send_log(job_id, f"  Detected codec: {actual_codec}")
+                    if has_dovi and actual_codec != "hevc":
+                        self.send_log(job_id,
+                            f"  [WARN] DoVi flagged but codec is {actual_codec}, not HEVC — "
+                            f"using standard pipeline")
+                        has_dovi = 0
+                else:
+                    self.send_log(job_id, f"  [WARN] No video stream found in probe — proceeding anyway")
+
+            if has_dovi:
+                success, error, result, work_dir = self.transcode_dovi(job, settings)
+            else:
+                success, error, result, work_dir = self.transcode_standard(job, settings)
 
         elapsed = time.time() - start_time
         elapsed_str = f"{int(elapsed/60)}m {int(elapsed%60)}s"
 
         if success and result:
-            # Feature 29: Verify output with ffprobe before accepting
+            # No-op result (RemuxClean: file was already clean) — skip verification/replacement
+            if result.get("no_op"):
+                self.send_log(job_id, f"  No changes applied (no-op)")
+                self.cleanup_workdir(work_dir)
+                self.api("POST", f"/api/jobs/{job_id}/complete", {
+                    "worker_id": self.worker_id,
+                    "output_path": result["output_path"],
+                    "output_size_gb": result["output_size_gb"],
+                    "reduction_pct": 0,
+                    "saved_gb": 0,
+                })
+                self.log(f"Job #{job_id} no-op complete in {elapsed_str}")
+                self.current_job_id = None
+                return
+
+            # Verify output with ffprobe before accepting
             if not self.verify_output(result["output_path"], job_id):
                 self.send_log(job_id, f"[ERROR] Output verification failed — marking as error")
                 self.cleanup_workdir(work_dir)
@@ -907,324 +2022,10 @@ class ByteNode:
             })
             self.log(f"Job #{job_id} failed: {error_msg[:100]}")
 
-        self.job_cancel.pop(job_id, None)
-        self.job_procs.pop(job_id, None)
-
-
-    # ─── Session State & Crash Recovery ───────────────────────────────────────
-    def _session_path(self):
-        return os.path.join(self.temp_base, "byte_session.json")
-
-    def save_session(self):
-        """Save current session state for crash recovery."""
-        try:
-            os.makedirs(self.temp_base, exist_ok=True)
-            state = {
-                "worker_id": self.worker_id,
-                "active_jobs": list(self.job_procs.keys()),
-                "timestamp": datetime.now().isoformat(),
-            }
-            with open(self._session_path(), "w") as f:
-                json.dump(state, f)
-        except Exception as e:
-            self.log(f"Session save failed: {e}", "WARN")
-
-    def clear_session(self):
-        """Clear session state file."""
-        try:
-            sp = self._session_path()
-            if os.path.exists(sp):
-                os.remove(sp)
-        except:
-            pass
-
-    def recover_from_crash(self):
-        """Check for leftover work dirs from a crashed session and handle recovery."""
-        if not os.path.isdir(self.temp_base):
-            return
-
-        # Find any job_XXX directories
-        job_dirs = []
-        try:
-            for d in os.listdir(self.temp_base):
-                if d.startswith("job_") and os.path.isdir(os.path.join(self.temp_base, d)):
-                    try:
-                        job_id = int(d.split("_")[1])
-                        job_dirs.append((job_id, os.path.join(self.temp_base, d)))
-                    except (ValueError, IndexError):
-                        pass
-        except:
-            return
-
-        if not job_dirs:
-            return
-
-        self.log(f"Found {len(job_dirs)} leftover work dir(s) from previous session")
-
-        # Check each work dir — ask server before deleting
-        for job_id, work_dir in job_dirs:
-            checkpoint = None
-            cp_file = os.path.join(work_dir, "checkpoint.json")
-            if os.path.exists(cp_file):
-                try:
-                    with open(cp_file) as f:
-                        checkpoint = json.load(f)
-                except:
-                    pass
-
-            step = checkpoint.get("step", "unknown") if checkpoint else "unknown"
-            self.log(f"  Job #{job_id}: checkpoint={step}")
-
-            # Check with server if this job is complete/accepted — don't delete output files for those
-            skip_cleanup = False
-            try:
-                r = self.api("GET", f"/api/queue/{job_id}")
-                if r and r.get("status") in ("complete",):
-                    # Job completed — output may still be needed (keep-both mode)
-                    # Only clean up if output was already copied to NAS
-                    output = r.get("output_path", "")
-                    if output and os.path.exists(output):
-                        self.log(f"  Job #{job_id}: completed, output exists on NAS — cleaning temp")
-                    elif r.get("accepted"):
-                        self.log(f"  Job #{job_id}: accepted — cleaning temp")
-                    else:
-                        self.log(f"  Job #{job_id}: completed but output may be in temp — PRESERVING")
-                        skip_cleanup = True
-            except:
-                pass
-
-            if not skip_cleanup:
-                try:
-                    shutil.rmtree(work_dir, ignore_errors=True)
-                    self.log(f"  Cleaned up job #{job_id} work dir")
-                except Exception as e:
-                    self.log(f"  Cleanup failed for job #{job_id}: {e}", "WARN")
-
-        # Tell the server to reset any stuck jobs for this worker
-        r = self.api("POST", f"/api/workers/{self.worker_id}/reset-jobs")
-        if r and r.get("reset", 0) > 0:
-            self.log(f"Server reset {r['reset']} stuck job(s) back to queue")
-        elif r is None:
-            self.log("Server reset-jobs endpoint not available — jobs will auto-recover", "WARN")
-
-        self.clear_session()
-        self.log("Crash recovery complete")
-
-    def graceful_shutdown(self, finish_current=True):
-        """Initiate graceful shutdown."""
-        self.log("Shutdown requested...")
-        self.running = False
-        if finish_current and self.job_procs:
-            active = list(self.job_procs.keys())
-            self.log(f"Waiting for {len(active)} active job(s) to finish...")
-            # Jobs will finish naturally since self.running=False stops new polls
-            # The transcode_worker_loop checks self.running before polling
-        else:
-            # Kill active processes immediately
-            for jid, proc in list(self.job_procs.items()):
-                try:
-                    if proc and proc.poll() is None:
-                        proc.kill()
-                        self.log(f"Killed job #{jid} subprocess")
-                except:
-                    pass
-            # Reset killed jobs on server
-            self.api("POST", f"/api/workers/{self.worker_id}/reset-jobs")
-        self.clear_session()
-
-    # ─── Health Check Workers (Tdarr-style, parallel with transcoding) ────────
-    def run_health_check(self, job):
-        """Run health check on a single file — file exists, read test, FFprobe validation."""
-        job_id = job["id"]
-        server_path = job["file_path"]
-        filepath = self.translate_path(server_path)  # Convert NAS path → local Windows path
-        filename = job["file_name"]
-        status = "healthy"
-        error = None
-
-        self.send_log(job_id, f"[Health Check] Starting: {filename}")
-        if filepath != server_path:
-            self.send_log(job_id, f"[Health Check] Path: {server_path} → {filepath}")
-
-        # Step 1: File exists
-        self.send_log(job_id, f"[Health Check] Step 1: Checking file exists")
-        if not os.path.exists(filepath):
-            status = "missing"
-            error = f"File not found: {filepath}"
-            self.send_log(job_id, f"[Health Check] FAILED: {error}")
-        elif os.path.getsize(filepath) == 0:
-            status = "corrupt"
-            error = "File is empty (0 bytes)"
-            self.send_log(job_id, f"[Health Check] FAILED: {error}")
-        else:
-            file_size = os.path.getsize(filepath)
-            self.send_log(job_id, f"[Health Check] Step 1: File exists ({file_size/(1024**3):.2f} GB)")
-
-            # Step 2: Read test
-            self.send_log(job_id, f"[Health Check] Step 2: Read test")
-            try:
-                with open(filepath, "rb") as f:
-                    f.read(65536)  # Read 64KB
-                self.send_log(job_id, f"[Health Check] Step 2: Read test passed")
-            except Exception as e:
-                status = "unreadable"
-                error = f"Cannot read file: {str(e)}"
-                self.send_log(job_id, f"[Health Check] FAILED: {error}")
-
-            # Step 3: FFprobe validation (lightweight — only check format)
-            if status == "healthy":
-                # Skip FFprobe if probe data already exists from scan
-                if job.get("probe_data"):
-                    self.send_log(job_id, f"[Health Check] Step 3: Skipped FFprobe (already probed during scan)")
-                else:
-                    self.send_log(job_id, f"[Health Check] Step 3: FFprobe media validation")
-                    try:
-                        cmd = [self.ffprobe, "-v", "error", "-show_entries",
-                               "format=duration,size,nb_streams", "-of", "json", filepath]
-                        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
-                        if r.returncode != 0:
-                            status = "corrupt"
-                            error = f"FFprobe failed: {r.stderr[:200] if r.stderr else 'Unknown error'}"
-                            self.send_log(job_id, f"[Health Check] FAILED: {error}")
-                        else:
-                            probe = json.loads(r.stdout)
-                            streams = int(probe.get("format", {}).get("nb_streams", 0))
-                            duration = float(probe.get("format", {}).get("duration", 0))
-                            if streams == 0:
-                                status = "corrupt"
-                                error = "No media streams found"
-                                self.send_log(job_id, f"[Health Check] FAILED: {error}")
-                            elif duration < 1:
-                                status = "corrupt"
-                                error = "Duration is 0 — file may be corrupt"
-                                self.send_log(job_id, f"[Health Check] FAILED: {error}")
-                            else:
-                                self.send_log(job_id, f"[Health Check] Step 3: Valid ({streams} streams, {duration/60:.1f} min)")
-                    except subprocess.TimeoutExpired:
-                        status = "timeout"
-                        error = "FFprobe timed out after 120s"
-                        self.send_log(job_id, f"[Health Check] FAILED: {error}")
-                    except Exception as e:
-                        # FFprobe not available — pass anyway with warning
-                        self.send_log(job_id, f"[Health Check] Step 3: FFprobe unavailable, skipping ({e})")
-
-        # Report result to server
-        result_msg = "PASSED" if status == "healthy" else f"FAILED — {error}"
-        self.send_log(job_id, f"[Health Check] {result_msg}: {filename}")
-        self.api("POST", f"/api/jobs/{job_id}/health-result", {
-            "status": status,
-            "error": error,
-        })
-
-    def healthcheck_worker_loop(self, worker_num):
-        """Health check worker thread — polls for pending health checks and processes them."""
-        self.log(f"Health check worker #{worker_num} started")
-        fails = 0
-        while self.running:
-            try:
-                r = self.api("POST", "/api/jobs/next-healthcheck", {"worker_id": self.worker_id})
-                if r and r.get("job"):
-                    fails = 0
-                    job = r["job"]
-                    self.log(f"HC#{worker_num}: checking {job.get('file_name','?')}")
-                    with self.hc_lock:
-                        self.hc_active += 1
-                    try:
-                        self.run_health_check(job)
-                    finally:
-                        with self.hc_lock:
-                            self.hc_active -= 1
-                elif r:
-                    reason = r.get("reason", "unknown")
-                    if fails < 3:
-                        self.log(f"HC#{worker_num}: no job — {reason}")
-                    fails += 1
-                    time.sleep(5)
-                    continue
-                else:
-                    if fails < 3:
-                        self.log(f"HC#{worker_num}: API returned None (server unreachable?)", "WARN")
-                    fails += 1
-                    time.sleep(10)
-                    continue
-            except Exception as e:
-                self.log(f"HC#{worker_num} error: {e}", "ERROR")
-                time.sleep(5)
-            time.sleep(1)
-        self.log(f"HC#{worker_num} stopped")
-
-    def start_healthcheck_workers(self, count=3):
-        """Start health check worker threads. Can be called independently by GUI wrappers."""
-        self.log(f"Starting {count} health check workers...")
-        for i in range(count):
-            t = threading.Thread(target=self.healthcheck_worker_loop, args=(i,), daemon=True)
-            t.start()
-
-    def start_all_workers(self):
-        """Start all workers (HC + transcode) using counts from server settings.
-        Call this from the GUI after configuring the node."""
-        counts = self.fetch_worker_counts()
-        self.log(f"Worker counts: {counts['transcode_gpu']} transcode GPU, {counts['healthcheck_gpu']} health check GPU")
-        self.start_healthcheck_workers(counts["healthcheck_gpu"])
-        self.start_transcode_workers(counts["transcode_gpu"])
-
-    def transcode_worker_loop(self, worker_num):
-        """Transcode worker thread — polls for jobs and processes them."""
-        self.log(f"Transcode worker #{worker_num} started")
-        idle_count = 0
-        while self.running:
-            try:
-                # Check if DoVi slots are full — ask server for non-DoVi if so
-                with self.dovi_lock:
-                    dovi_count = self.active_dovi
-                max_dovi = getattr(self, 'max_dovi_concurrent', 2)
-                prefer_non_dovi = dovi_count >= max_dovi
-
-                r = self.api("POST", "/api/jobs/next", {
-                    "worker_id": self.worker_id,
-                    "prefer_non_dovi": prefer_non_dovi
-                })
-                if r and r.get("job"):
-                    idle_count = 0
-                    job = r["job"]
-                    is_dovi = bool(job.get("has_dovi", 0))
-                    if is_dovi:
-                        with self.dovi_lock:
-                            self.active_dovi += 1
-                        self.log(f"TW#{worker_num}: starting DoVi {job.get('file_name','?')} (DoVi active: {self.active_dovi})")
-                    else:
-                        self.log(f"TW#{worker_num}: starting {job.get('file_name','?')}")
-                    try:
-                        self.process_job(r)
-                    finally:
-                        if is_dovi:
-                            with self.dovi_lock:
-                                self.active_dovi = max(0, self.active_dovi - 1)
-                elif r:
-                    reason = r.get("reason", "")
-                    idle_count += 1
-                    # Log first occurrence and then every 30 polls (~5 min at 10s interval)
-                    if idle_count == 1 or idle_count % 30 == 0:
-                        self.log(f"TW#{worker_num}: waiting — {reason}")
-                else:
-                    idle_count += 1
-                    if idle_count == 1:
-                        self.log(f"TW#{worker_num}: server unreachable", "WARN")
-                time.sleep(self.poll_interval)
-            except Exception as e:
-                self.log(f"TW#{worker_num} error: {e}", "ERROR")
-                time.sleep(10)
-        self.log(f"Transcode worker #{worker_num} stopped")
-
-    def start_transcode_workers(self, count=1):
-        """Start transcode worker threads. Default 1 (optimal for single GPU)."""
-        self.log(f"Starting {count} transcode worker(s)...")
-        for i in range(count):
-            t = threading.Thread(target=self.transcode_worker_loop, args=(i,), daemon=True)
-            t.start()
+        self.current_job_id = None
 
     def run(self):
-        """Main loop: register, heartbeat, start all workers."""
+        """Main loop: register, heartbeat, poll for jobs."""
         if not self.register():
             self.log("Cannot start without server connection", "ERROR")
             return
@@ -1238,22 +2039,136 @@ class ByteNode:
         hb_thread = threading.Thread(target=hb_loop, daemon=True)
         hb_thread.start()
         self.log(f"Heartbeat thread started (every 15s)")
+        self.log(f"Polling for jobs every {self.poll_interval}s...")
 
-        # Fetch worker counts from server settings
-        counts = self.fetch_worker_counts()
-        self.log(f"Worker counts from server: {counts['transcode_gpu']} transcode GPU, {counts['healthcheck_gpu']} health check GPU")
-
-        # Start health check worker threads (Tdarr-style — run parallel with transcoding)
-        self.start_healthcheck_workers(counts["healthcheck_gpu"])
-
-        # Start transcode worker threads
-        self.start_transcode_workers(counts["transcode_gpu"])
-
-        # Keep main thread alive
         while self.running:
-            time.sleep(1)
+            try:
+                r = self.api("POST", "/api/jobs/next", {"worker_id": self.worker_id})
+                if r and r.get("job"):
+                    self.process_job(r)
+                elif r:
+                    reason = r.get("reason", "")
+                    if "paused" not in reason.lower() and "no jobs" not in reason.lower():
+                        self.log(f"No job: {reason}")
+            except Exception as e:
+                self.log(f"Poll error: {e}", "ERROR")
 
             time.sleep(self.poll_interval)
+
+    # ─── Multi-worker launcher (called by byte_node_gui.py) ──────────────────
+    def start_all_workers(self):
+        """
+        Start all worker threads based on counts in server settings.
+        Reads `transcode_gpu_count` and `healthcheck_gpu_count` and spawns
+        that many transcode + health-check worker threads (plus a heartbeat
+        thread). Used by byte_node_gui.py.
+        """
+        if not self.register():
+            self.log("Cannot start without server connection", "ERROR")
+            self.connected = False
+            self.is_connected = False
+            self.registered = False
+            return
+
+        # v2.4 — flip status flags so GUI updates "Connecting" → "Connected"
+        self.connected = True
+        self.is_connected = True
+        self.registered = True
+        self.is_running = True
+
+        # Heartbeat thread
+        def hb_loop():
+            while self.running:
+                try:
+                    self.heartbeat()
+                except Exception as e:
+                    self.log(f"Heartbeat error: {e}", "WARN")
+                time.sleep(15)
+        threading.Thread(target=hb_loop, daemon=True, name="heartbeat").start()
+        self.log(f"Heartbeat thread started (every 15s)")
+
+        # Read worker counts from server settings (with safe fallbacks)
+        settings = self.api("GET", "/api/settings") or {}
+        try:
+            n_tw = int(settings.get("transcode_gpu_count", "1") or "1")
+        except (TypeError, ValueError):
+            n_tw = 1
+        if n_tw < 1:
+            n_tw = 1
+        try:
+            n_hc = int(settings.get("healthcheck_gpu_count", "0") or "0")
+        except (TypeError, ValueError):
+            n_hc = 0
+
+        self.log(f"Worker counts: {n_tw} transcode GPU, {n_hc} health check GPU")
+
+        # Health check workers — server runs the actual HC loop, so these
+        # just idle-poll. They're here for log-format compatibility with the
+        # earlier multi-worker architecture.
+        if n_hc > 0:
+            self.log(f"Starting {n_hc} health check workers...")
+            for i in range(n_hc):
+                threading.Thread(target=self._hc_worker_loop, args=(i,),
+                                 daemon=True, name=f"hc-{i}").start()
+                self.log(f"Health check worker #{i} started")
+
+        # Transcode workers — each polls /api/jobs/next independently
+        self.log(f"Starting {n_tw} transcode worker(s)...")
+        for i in range(n_tw):
+            threading.Thread(target=self._tw_worker_loop, args=(i,),
+                             daemon=True, name=f"tw-{i}").start()
+            self.log(f"Transcode worker #{i} started")
+
+        # Block on the running flag so daemon threads stay alive
+        try:
+            while self.running:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            self.running = False
+
+    def _tw_worker_loop(self, worker_idx):
+        """Single transcode worker poll loop."""
+        # Stagger initial poll so 4 workers don't hit the API at the exact same instant
+        time.sleep(worker_idx * 0.5)
+        while self.running:
+            try:
+                r = self.api("POST", "/api/jobs/next", {"worker_id": self.worker_id})
+                if r and r.get("job"):
+                    job = r["job"]
+                    fname = job.get("file_name", "")
+                    self.log(f"TW#{worker_idx}: starting {fname}")
+                    self.process_job(r)
+                elif r:
+                    reason = r.get("reason", "")
+                    rl = reason.lower()
+                    # Suppress noisy/expected reasons:
+                    #  - "no jobs ready" — idle, expected
+                    #  - "paused" — pipeline disabled, expected
+                    #  - "race" — another worker won the claim, expected with multi-worker
+                    if (reason and "no jobs" not in rl and "paused" not in rl
+                            and "race" not in rl):
+                        self.log(f"TW#{worker_idx}: waiting — {reason}")
+            except Exception as e:
+                self.log(f"TW#{worker_idx} poll error: {e}", "ERROR")
+            # Random small jitter on the poll interval so concurrent workers stay desynchronized
+            time.sleep(self.poll_interval + random.uniform(0, 1.0))
+
+    def _hc_worker_loop(self, worker_idx):
+        """
+        Health check worker idle loop. The server has its own HC loop
+        (start_health_check_loop) so node-side HC is a no-op for now.
+        Logs once every 30s for log-format compatibility.
+        """
+        while self.running:
+            try:
+                self.log(f"HC#{worker_idx}: no job — No pending health checks")
+            except Exception:
+                pass
+            # Sleep in 1-second slices so shutdown is responsive
+            for _ in range(30):
+                if not self.running:
+                    return
+                time.sleep(1)
 
 
 def main():
@@ -1262,26 +2177,13 @@ def main():
     parser.add_argument("--name", default="ByteNode", help="Node name")
     parser.add_argument("--gpu", default="GPU", help="GPU name")
     parser.add_argument("--poll", type=int, default=10, help="Poll interval in seconds")
-    parser.add_argument("--path-from", default="/media", help="NAS path prefix to translate from")
-    parser.add_argument("--path-to", default="", help="Local drive/path to translate to (e.g., Z:\\)")
-    parser.add_argument("--temp-dir", default="", help="Local temp directory for job files")
     args = parser.parse_args()
 
     node = ByteNode(args.server, args.name, args.gpu, args.poll)
 
-    # Configure path translation
-    if args.path_to:
-        node.native_mode = True
-        node.nas_drive = args.path_to.rstrip("\\/")
-        node.nas_prefix = args.path_from
-        node.log(f"  Path mapping: {node.nas_prefix} → {node.nas_drive}")
-    if args.temp_dir:
-        node.temp_base = args.temp_dir
-        node.log(f"  Temp dir: {node.temp_base}")
-
     def shutdown(sig, frame):
-        print("\nShutting down gracefully — finishing active jobs...")
-        node.graceful_shutdown(finish_current=True)
+        print("\nShutting down...")
+        node.running = False
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 

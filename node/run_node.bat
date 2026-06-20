@@ -1,56 +1,20 @@
 @echo off
-title Byte Transcode Node
-echo.
-echo  ╔══════════════════════════════════════╗
-echo  ║     BYTE TRANSCODE NODE LAUNCHER     ║
-echo  ╚══════════════════════════════════════╝
+echo ========================================
+echo  Byte Transcode Node � Native Windows
+echo ========================================
 echo.
 
-:: Try 'py' first (Python Launcher — official installer)
-py --version >nul 2>&1
-if %ERRORLEVEL% equ 0 (
-    echo  [OK] Found Python via 'py' launcher
-    echo.
-    py "%~dp0byte_node_gui.py"
-    goto :end
-)
+set TOOLS_DIR=%~dp0tools
+set PATH=%TOOLS_DIR%;%PATH%
 
-:: Try 'python' (Microsoft Store or PATH install)
-python --version >nul 2>&1
-if %ERRORLEVEL% equ 0 (
-    :: Verify it's Python 3, not Python 2
-    python -c "import sys; exit(0 if sys.version_info[0]>=3 else 1)" >nul 2>&1
-    if %ERRORLEVEL% equ 0 (
-        echo  [OK] Found Python via 'python'
-        echo.
-        python "%~dp0byte_node_gui.py"
-        goto :end
-    ) else (
-        echo  [WARN] 'python' found but it's Python 2 — need Python 3
-    )
-)
+python "%~dp0byte_node_v2.py" ^
+    --server http://192.168.3.13:5800 ^
+    --name DoVi-5080 ^
+    --gpu "RTX 5080" ^
+    --nas-drive Z: ^
+    --nas-prefix /media ^
+    --temp-dir "F:\Byte_Engine_temp"
 
-:: Try 'python3' (some custom installs)
-python3 --version >nul 2>&1
-if %ERRORLEVEL% equ 0 (
-    echo  [OK] Found Python via 'python3'
-    echo.
-    python3 "%~dp0byte_node_gui.py"
-    goto :end
-)
-
-:: Nothing found
 echo.
-echo  ╔══════════════════════════════════════════════════════╗
-echo  ║  ERROR: Python 3 not found!                         ║
-echo  ║                                                     ║
-echo  ║  Install Python 3.10+ from one of:                  ║
-echo  ║    - https://www.python.org/downloads/              ║
-echo  ║    - Microsoft Store (search "Python 3.12")         ║
-echo  ║                                                     ║
-echo  ║  During install, CHECK "Add Python to PATH"         ║
-echo  ╚══════════════════════════════════════════════════════╝
-echo.
-
-:end
+echo Node stopped. Press any key to exit.
 pause

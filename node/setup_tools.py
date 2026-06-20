@@ -1,217 +1,241 @@
 #!/usr/bin/env python3
 """
-Byte Transcode — Tool Setup
-Downloads ffmpeg, ffprobe, dovi_tool, and mkvmerge into the tools/ folder.
-Run once after cloning the repo: py setup_tools.py
+Byte Transcode Node — Windows Tool Setup
+Downloads ffmpeg (NVENC), dovi_tool, and mkvmerge.
+Run: python setup_tools.py
 """
-
-import os, sys, shutil, zipfile, tarfile, io, platform
-
-# Ensure we have urllib
-from urllib.request import urlopen, Request
-from urllib.error import URLError
-import json
+import os, sys, zipfile, tarfile, io, shutil, subprocess
 
 TOOLS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools")
-HEADERS = {"User-Agent": "Byte-Transcode-Setup/1.0"}
 
-def download(url, desc=""):
-    """Download a URL and return bytes."""
-    print(f"  Downloading {desc or url}...")
-    req = Request(url, headers=HEADERS)
-    try:
-        resp = urlopen(req, timeout=120)
-        data = resp.read()
-        size_mb = len(data) / (1024 * 1024)
-        print(f"  Downloaded {size_mb:.1f} MB")
-        return data
-    except URLError as e:
-        print(f"  ERROR: {e}")
-        return None
+def download(url, desc):
+    """Download a URL with progress."""
+    print(f"  Downloading {desc}...")
+    print(f"  URL: {url}")
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": "ByteTranscode/1.0"})
+    resp = urllib.request.urlopen(req, timeout=120)
+    total = int(resp.headers.get("Content-Length", 0))
+    data = b""
+    while True:
+        chunk = resp.read(1024 * 1024)
+        if not chunk:
+            break
+        data += chunk
+        if total > 0:
+            pct = len(data) / total * 100
+            mb = len(data) / (1024 * 1024)
+            print(f"\r  {mb:.1f} MB ({pct:.0f}%)", end="", flush=True)
+    print(f"\r  Done — {len(data) / (1024*1024):.1f} MB")
+    return data
 
-def get_latest_github_release(repo):
-    """Get latest release tag from GitHub API."""
-    url = f"https://api.github.com/repos/{repo}/releases/latest"
-    req = Request(url, headers=HEADERS)
-    try:
-        resp = urlopen(req, timeout=30)
-        data = json.loads(resp.read())
-        return data.get("tag_name", ""), data.get("assets", [])
-    except Exception as e:
-        print(f"  ERROR fetching release info for {repo}: {e}")
-        return "", []
 
 def setup_ffmpeg():
-    """Download BtbN GPL ffmpeg build with NVENC support."""
-    print("\n[1/3] ffmpeg + ffprobe (BtbN GPL build with NVENC)")
-
-    ffmpeg_path = os.path.join(TOOLS_DIR, "ffmpeg.exe")
-    ffprobe_path = os.path.join(TOOLS_DIR, "ffprobe.exe")
-
-    if os.path.exists(ffmpeg_path) and os.path.exists(ffprobe_path):
-        print("  Already exists — skipping. Delete tools/ffmpeg.exe to re-download.")
+    """Download ffmpeg with NVENC support (BtbN GPL build)."""
+    ffmpeg_exe = os.path.join(TOOLS_DIR, "ffmpeg.exe")
+    ffprobe_exe = os.path.join(TOOLS_DIR, "ffprobe.exe")
+    if os.path.exists(ffmpeg_exe) and os.path.exists(ffprobe_exe):
+        print("[ffmpeg] Already installed")
         return True
 
+    print("[ffmpeg] Downloading BtbN GPL build (includes NVENC)...")
     url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
-    data = download(url, "ffmpeg GPL build")
-    if not data:
-        return False
+    data = download(url, "ffmpeg")
 
-    print("  Extracting ffmpeg.exe and ffprobe.exe...")
-    try:
-        with zipfile.ZipFile(io.BytesIO(data)) as zf:
-            extracted = 0
-            for name in zf.namelist():
-                basename = os.path.basename(name)
-                if basename in ("ffmpeg.exe", "ffprobe.exe"):
-                    target = os.path.join(TOOLS_DIR, basename)
-                    with open(target, "wb") as f:
-                        f.write(zf.read(name))
-                    extracted += 1
+    print("  Extracting...")
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        for member in zf.namelist():
+            basename = os.path.basename(member)
+            if basename in ("ffmpeg.exe", "ffprobe.exe"):
+                with zf.open(member) as src, open(os.path.join(TOOLS_DIR, basename), "wb") as dst:
+                    dst.write(src.read())
                     print(f"  Extracted {basename}")
-            if extracted < 2:
-                print("  WARNING: Could not find ffmpeg.exe/ffprobe.exe in ZIP")
-                return False
-    except Exception as e:
-        print(f"  ERROR extracting: {e}")
+
+    if os.path.exists(ffmpeg_exe):
+        print("[ffmpeg] Installed successfully")
+        return True
+    else:
+        print("[ffmpeg] ERROR: ffmpeg.exe not found after extraction")
         return False
 
-    return True
 
 def setup_dovi_tool():
-    """Download dovi_tool from GitHub releases."""
-    print("\n[2/3] dovi_tool (Dolby Vision metadata)")
-
-    dovi_path = os.path.join(TOOLS_DIR, "dovi_tool.exe")
-    if os.path.exists(dovi_path):
-        print("  Already exists — skipping. Delete tools/dovi_tool.exe to re-download.")
+    """Download dovi_tool Windows binary."""
+    exe = os.path.join(TOOLS_DIR, "dovi_tool.exe")
+    if os.path.exists(exe):
+        print("[dovi_tool] Already installed")
         return True
 
-    tag, assets = get_latest_github_release("quietvoid/dovi_tool")
-    if not tag:
-        print("  ERROR: Could not fetch latest release")
-        return False
-
-    print(f"  Latest release: {tag}")
+    print("[dovi_tool] Finding latest release...")
+    import urllib.request, json
+    req = urllib.request.Request("https://api.github.com/repos/quietvoid/dovi_tool/releases/latest",
+                                 headers={"User-Agent": "ByteTranscode/1.0"})
+    resp = urllib.request.urlopen(req, timeout=30)
+    release = json.loads(resp.read())
+    tag = release["tag_name"]
 
     # Find Windows x86_64 asset
-    target_asset = None
-    for a in assets:
-        name = a.get("name", "")
+    asset_url = None
+    for asset in release.get("assets", []):
+        name = asset["name"].lower()
         if "x86_64" in name and "windows" in name and name.endswith(".zip"):
-            target_asset = a
+            asset_url = asset["browser_download_url"]
             break
 
-    if not target_asset:
-        print("  ERROR: No Windows x86_64 ZIP found in release assets")
-        print("  Available:", [a["name"] for a in assets])
+    if not asset_url:
+        print("[dovi_tool] ERROR: No Windows x86_64 asset found")
         return False
 
-    data = download(target_asset["browser_download_url"], target_asset["name"])
-    if not data:
+    print(f"[dovi_tool] Version {tag}")
+    data = download(asset_url, "dovi_tool")
+
+    print("  Extracting...")
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        for member in zf.namelist():
+            if os.path.basename(member) == "dovi_tool.exe":
+                with zf.open(member) as src, open(exe, "wb") as dst:
+                    dst.write(src.read())
+                print("  Extracted dovi_tool.exe")
+
+    if os.path.exists(exe):
+        print("[dovi_tool] Installed successfully")
+        return True
+    else:
+        print("[dovi_tool] ERROR: extraction failed")
         return False
 
-    print("  Extracting dovi_tool.exe...")
-    try:
-        with zipfile.ZipFile(io.BytesIO(data)) as zf:
-            for name in zf.namelist():
-                if os.path.basename(name) == "dovi_tool.exe":
-                    with open(dovi_path, "wb") as f:
-                        f.write(zf.read(name))
-                    print(f"  Extracted dovi_tool.exe")
-                    return True
-        # If not in zip, try as single file
-        print("  Not found in ZIP, trying as raw binary...")
-    except zipfile.BadZipFile:
-        pass
-
-    # Some releases use .tar.gz
-    for a in assets:
-        name = a.get("name", "")
-        if "x86_64" in name and "windows" in name and ".tar.gz" in name:
-            data = download(a["browser_download_url"], name)
-            if data:
-                try:
-                    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
-                        for m in tf.getmembers():
-                            if m.name.endswith("dovi_tool.exe"):
-                                with open(dovi_path, "wb") as f:
-                                    f.write(tf.extractfile(m).read())
-                                print(f"  Extracted dovi_tool.exe")
-                                return True
-                except Exception as e:
-                    print(f"  ERROR extracting tar.gz: {e}")
-
-    print("  ERROR: Could not extract dovi_tool.exe")
-    return False
 
 def setup_mkvmerge():
-    """Download portable MKVToolNix."""
-    print("\n[3/3] mkvmerge (MKVToolNix)")
-
-    mkvmerge_path = os.path.join(TOOLS_DIR, "mkvmerge.exe")
-    if os.path.exists(mkvmerge_path):
-        print("  Already exists — skipping. Delete tools/mkvmerge.exe to re-download.")
+    """Download MKVToolNix portable."""
+    exe = os.path.join(TOOLS_DIR, "mkvmerge.exe")
+    if os.path.exists(exe):
+        print("[mkvmerge] Already installed")
         return True
 
-    # Try GitHub releases for MKVToolNix portable
-    tag, assets = get_latest_github_release("nmaier/mkvtoolnix")
-    if not tag:
-        # Fallback: try direct fosshub mirror or official site
-        tag, assets = get_latest_github_release("morkt/mkvtoolnix")
+    print("[mkvmerge] Finding latest portable release...")
+    import urllib.request, json, re
+    # Get latest version from MKVToolNix
+    req = urllib.request.Request("https://mkvtoolnix.download/latest-release.xml",
+                                 headers={"User-Agent": "ByteTranscode/1.0"})
+    try:
+        resp = urllib.request.urlopen(req, timeout=30)
+        content = resp.read().decode()
+        ver_match = re.search(r'<version>([\d.]+)</version>', content)
+        if ver_match:
+            ver = ver_match.group(1)
+        else:
+            ver = "89.0"  # fallback
+    except:
+        ver = "89.0"
 
-    # MKVToolNix doesn't always have GitHub releases — try direct download
-    # The portable version is available from the official site
-    print("  MKVToolNix must be downloaded manually:")
-    print("  1. Go to: https://mkvtoolnix.download/downloads.html#windows")
-    print("  2. Download the 'Portable' 64-bit version")
-    print("  3. Extract mkvmerge.exe to: " + TOOLS_DIR)
-    print()
-    print("  Alternatively, install MKVToolNix via the installer and")
-    print("  copy mkvmerge.exe from C:\\Program Files\\MKVToolNix\\")
-    return False
+    print(f"[mkvmerge] Version {ver}")
+    url = f"https://mkvtoolnix.download/windows/releases/{ver}/mkvtoolnix-64-bit-{ver}.7z"
+    # Try zip first since 7z needs special handling
+    url_zip = f"https://mkvtoolnix.download/windows/releases/{ver}/mkvtoolnix-64-bit-{ver}.zip"
+
+    try:
+        data = download(url_zip, "mkvtoolnix (zip)")
+        print("  Extracting...")
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            for member in zf.namelist():
+                basename = os.path.basename(member)
+                if basename == "mkvmerge.exe":
+                    with zf.open(member) as src, open(exe, "wb") as dst:
+                        dst.write(src.read())
+                    print(f"  Extracted mkvmerge.exe")
+    except Exception as e:
+        print(f"  ZIP download failed ({e}), trying portable installer...")
+        print(f"  Please download MKVToolNix manually from https://mkvtoolnix.download/downloads.html")
+        print(f"  Then copy mkvmerge.exe to: {TOOLS_DIR}")
+        return False
+
+    if os.path.exists(exe):
+        print("[mkvmerge] Installed successfully")
+        return True
+    else:
+        print("[mkvmerge] ERROR: mkvmerge.exe not found")
+        print(f"  Download manually from https://mkvtoolnix.download/downloads.html")
+        print(f"  Copy mkvmerge.exe to: {TOOLS_DIR}")
+        return False
+
+
+def verify_tools():
+    """Verify all tools work."""
+    print("\n=== Verifying tools ===")
+    ok = True
+    for tool in ["ffmpeg", "ffprobe", "dovi_tool", "mkvmerge"]:
+        exe = os.path.join(TOOLS_DIR, f"{tool}.exe")
+        if os.path.exists(exe):
+            try:
+                r = subprocess.run([exe, "--version" if tool != "dovi_tool" else "--version"],
+                                   capture_output=True, text=True, timeout=10)
+                ver = r.stdout.split("\n")[0][:80] if r.stdout else r.stderr.split("\n")[0][:80]
+                print(f"  ✓ {tool}: {ver}")
+            except Exception as e:
+                print(f"  ✓ {tool}: found (version check: {e})")
+        else:
+            print(f"  ✗ {tool}: NOT FOUND")
+            ok = False
+    return ok
+
+
+def create_run_bat():
+    """Create run_node.bat launcher."""
+    bat_path = os.path.join(os.path.dirname(TOOLS_DIR), "run_node.bat")
+    content = f'''@echo off
+echo ========================================
+echo  Byte Transcode Node — Native Windows
+echo ========================================
+echo.
+
+set TOOLS_DIR=%~dp0tools
+set PATH=%TOOLS_DIR%;%PATH%
+
+python "%~dp0byte_node_v2.py" ^
+    --server http://192.168.3.13:5800 ^
+    --name DoVi-5080 ^
+    --gpu "RTX 5080" ^
+    --nas-drive Z: ^
+    --nas-prefix /media ^
+    --temp-dir "F:\\Byte_Engine_temp"
+
+echo.
+echo Node stopped. Press any key to exit.
+pause
+'''
+    with open(bat_path, "w") as f:
+        f.write(content)
+    print(f"\nCreated: {bat_path}")
+    print("  Edit this file to change server URL, node name, GPU, or drive letter.")
+
 
 def main():
-    print("╔══════════════════════════════════════════╗")
-    print("║   Byte Transcode — Tool Setup            ║")
-    print("╚══════════════════════════════════════════╝")
-
-    if platform.system() != "Windows":
-        print("\nWARNING: This script is designed for Windows.")
-        print("On Linux/Docker, tools are installed via the Dockerfile.")
+    print("=" * 50)
+    print(" Byte Transcode Node — Tool Setup")
+    print("=" * 50)
+    print(f"Tools directory: {TOOLS_DIR}\n")
 
     os.makedirs(TOOLS_DIR, exist_ok=True)
-    print(f"\nTools directory: {TOOLS_DIR}")
 
-    results = {}
-    results["ffmpeg"] = setup_ffmpeg()
-    results["dovi_tool"] = setup_dovi_tool()
-    results["mkvmerge"] = setup_mkvmerge()
+    # Install pip packages
+    print("[pip] Installing requests...")
+    subprocess.run([sys.executable, "-m", "pip", "install", "requests", "-q"], check=False)
+
+    ok = True
+    ok = setup_ffmpeg() and ok
+    ok = setup_dovi_tool() and ok
+    ok = setup_mkvmerge() and ok
+
+    verify_tools()
+    create_run_bat()
 
     print("\n" + "=" * 50)
-    print("RESULTS:")
-    for tool, ok in results.items():
-        status = "OK" if ok else "MANUAL DOWNLOAD NEEDED"
-        print(f"  {tool:15s} — {status}")
-
-    # Verify all tools
-    print("\nVerifying tools...")
-    all_ok = True
-    for exe in ["ffmpeg.exe", "ffprobe.exe", "dovi_tool.exe", "mkvmerge.exe"]:
-        path = os.path.join(TOOLS_DIR, exe)
-        if os.path.exists(path):
-            size_mb = os.path.getsize(path) / (1024 * 1024)
-            print(f"  [OK] {exe} ({size_mb:.1f} MB)")
-        else:
-            print(f"  [MISSING] {exe}")
-            all_ok = False
-
-    if all_ok:
-        print("\nAll tools ready! Run 'py byte_node_gui.py' or double-click run_node.bat")
+    if ok:
+        print(" Setup complete! Run: run_node.bat")
     else:
-        print("\nSome tools are missing — see instructions above.")
+        print(" Some tools need manual installation (see above)")
+    print("=" * 50)
 
-    return 0 if all_ok else 1
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
