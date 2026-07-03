@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Byte Transcode Node v2.7
+Byte Transcode Node v2.8
 ========================
 v2.5 — Server→Node path translation
 v2.6 — Critical fixes:
@@ -38,6 +38,16 @@ v2.7 — Multi-node / multi-worker correctness:
           rejects ("Invalid input file type" — convert operates on HEVC
           streams). Now converts the extracted HEVC directly, same as the
           transcode pipeline's P7→P8 step. 3 steps instead of 5.
+v2.8 — Universal DV converter + Compatibility pipeline:
+        - DV → P8 handles ALL source profiles, not just 7: P5 (IPTPQc2,
+          the "purple and green" one) via dovi_tool mode 3, P7 via mode 2
+          --discard, others best-effort. Same generalization applied to
+          the transcode pipeline's Step 5.
+        - New compat_fix handler (job_type 'compatfix'): fixes files the
+          server's Compatibility scan flags as playback risks — rewrap to
+          MKV (strategy remux) or NVENC re-encode to compat_target with
+          optional deinterlace and subtitle-track filtering (strategy
+          reencode). HDR/DV sources are guarded from SDR re-encoding.
 """
 
 import sys, os, time, json, hashlib, shutil, subprocess, threading, signal, re, socket, platform, argparse, random
@@ -125,7 +135,7 @@ class ByteNode:
                 self.log(f"  WARN: {tool_name} not found in PATH (fallback: {tool_path!r}). "
                          f"Install it or add its directory to PATH.", "WARN")
 
-        self.log(f"Byte Node v2.7 initialized")
+        self.log(f"Byte Node v2.8 initialized")
         self.log(f"  Worker ID: {self.worker_id}")
         self.log(f"  Server: {self.server}")
         self.log(f"  GPU: {self.gpu}")
@@ -674,18 +684,22 @@ class ByteNode:
             os.remove(transcoded_hevc)
             os.remove(rpu_bin)
 
-            # Step 5: P7→P8 conversion
+            # Step 5: DV profile → P8 conversion (v2.8: any profile, not just 7)
             source_hevc = injected_hevc
-            if dovi_profile == 7 or str(dovi_profile) == "7":
-                step = f"[Step 5/{total_steps}] Converting DoVi P7 → P8"
+            try:
+                src_profile = int(dovi_profile) if str(dovi_profile).strip() else 8
+            except (TypeError, ValueError):
+                src_profile = 8
+            if src_profile != 8 and settings.get("dovi_convert_p8", "true") == "true":
+                convert_args = self.DV_CONVERT_ARGS.get(src_profile, ["-m", "2", "convert", "--discard"])
+                step = f"[Step 5/{total_steps}] Converting DoVi P{src_profile} → P8"
                 self.update_progress(job_id, 80, step)
                 self.send_log(job_id, step)
-                ok, err = self.run_cmd([
-                    self.dovi_tool, "-m", "2", "convert", "--discard",
-                    "-i", injected_hevc, "-o", profile8_hevc
-                ], "P7→P8 Convert", job_id)
+                ok, err = self.run_cmd(
+                    [self.dovi_tool] + convert_args + ["-i", injected_hevc, "-o", profile8_hevc],
+                    f"P{src_profile}→P8 Convert", job_id)
                 if not ok:
-                    return False, f"P7→P8 failed: {err[:200]}", None, work_dir
+                    return False, f"P{src_profile}→P8 failed: {err[:200]}", None, work_dir
                 source_hevc = profile8_hevc
                 os.remove(injected_hevc)
             else:
@@ -1349,24 +1363,41 @@ class ByteNode:
             return False, str(e), None, work_dir
 
     # ─── DV7→8 Only (job_type='dv78only') ────────────────────────────────────
+    # v2.8 — dovi_tool conversion arguments per source DV profile.
+    # Mode 2: convert to profile 8.1 (dual-layer P7 also discards the EL).
+    # Mode 3: convert profile 5 (IPTPQc2, the "purple and green" one on
+    #         unsupported devices) to profile 8.1.
+    DV_CONVERT_ARGS = {
+        7: ["-m", "2", "convert", "--discard"],
+        5: ["-m", "3", "convert"],
+        4: ["-m", "2", "convert", "--discard"],  # best effort for dual-layer P4
+    }
+
     def dv78only_convert(self, job, settings):
         """
-        Convert DoVi Profile 7 → 8 without re-encoding the video.
-        Pipeline (v2.7 — fixed):
+        Convert any Dolby Vision profile → Profile 8 without re-encoding.
+        Pipeline (v2.7 fixed, v2.8 generalized beyond P7):
           1. Extract HEVC bitstream (copy, no re-encode)
-          2. dovi_tool -m 2 convert --discard on the HEVC stream — converts
-             the RPU to profile 8.1 and discards the enhancement layer in
-             one pass. (The previous version ran `convert` on an extracted
-             RPU .bin, which dovi_tool rejects with "Invalid input file
-             type" — `convert` only operates on HEVC streams. Same command
-             the proven transcode pipeline uses in its Step 5.)
+          2. dovi_tool convert on the HEVC stream, mode chosen by source
+             profile (see DV_CONVERT_ARGS). P7 → mode 2 --discard;
+             P5 → mode 3. (`convert` only operates on HEVC streams — the
+             pre-v2.7 version fed it an RPU .bin and always failed.)
           3. mkvmerge remux: converted HEVC + original audio/subs/chapters
-        Result: same quality, slightly smaller (EL discarded), P8 instead of P7.
+        Result: same quality, P8.1 instead of the source profile.
+        Note: for P5 sources the HDR10 fallback colors on non-DV displays
+        may be imperfect (P5 has no true HDR10 base layer) — DV-capable
+        devices play it correctly, which is the point of the conversion.
         """
         job_id = job["id"]
         filepath = job["file_path"]
         filename = job["file_name"]
         file_size_gb = job["file_size_gb"]
+
+        try:
+            src_profile = int(job.get("dovi_profile") or 7)
+        except (TypeError, ValueError):
+            src_profile = 7
+        convert_args = self.DV_CONVERT_ARGS.get(src_profile, ["-m", "2", "convert", "--discard"])
 
         basename = os.path.splitext(filename)[0]
         work_dir = self._work_dir(job_id, settings)
@@ -1393,18 +1424,17 @@ class ByteNode:
             raw_size_gb = os.path.getsize(raw_hevc) / (1024**3)
             self.send_log(job_id, f"  Extracted HEVC: {raw_size_gb:.2f} GB")
 
-            # Step 2: Convert P7 → P8.1 on the HEVC stream (discard EL)
-            step = f"[Step 2/{total_steps}] Converting DoVi P7 → P8 (discard EL)"
+            # Step 2: Convert source profile → P8.1 on the HEVC stream
+            step = f"[Step 2/{total_steps}] Converting DoVi P{src_profile} → P8 (dovi_tool {' '.join(convert_args[:2])})"
             self.update_progress(job_id, 35, step)
             self.send_log(job_id, step)
-            ok, err = self.run_cmd([
-                self.dovi_tool, "-m", "2", "convert", "--discard",
-                "-i", raw_hevc, "-o", p8_hevc
-            ], "P7→P8 Convert", job_id)
+            ok, err = self.run_cmd(
+                [self.dovi_tool] + convert_args + ["-i", raw_hevc, "-o", p8_hevc],
+                f"P{src_profile}→P8 Convert", job_id)
             if not ok:
-                return False, f"P7→P8 convert failed: {err[:200]}", None, work_dir
+                return False, f"P{src_profile}→P8 convert failed: {err[:200]}", None, work_dir
             if not os.path.exists(p8_hevc) or os.path.getsize(p8_hevc) < 1024:
-                return False, "P7→P8 conversion produced empty file", None, work_dir
+                return False, f"P{src_profile}→P8 conversion produced empty file", None, work_dir
 
             # Free disk: original extracted stream no longer needed
             try:
@@ -1437,7 +1467,7 @@ class ByteNode:
             self.update_progress(job_id, 100, "Complete")
             self.send_log(job_id,
                 f"  COMPLETE: {file_size_gb:.2f} GB → {output_gb:.2f} GB "
-                f"(DV Profile 7 → 8, no re-encode)")
+                f"(DV Profile {src_profile} → 8, no re-encode)")
 
             return True, None, {
                 "output_path": output_mkv,
@@ -1449,6 +1479,124 @@ class ByteNode:
         except Exception as e:
             self.log(f"DV78Only exception: {e}", "ERROR")
             self.send_log(job_id, f"[ERROR] DV78Only exception: {e}")
+            return False, str(e), None, work_dir
+
+    # ─── Compatibility Fix (job_type='compatfix') ─────────────────────────────
+    def compat_fix(self, job, settings):
+        """
+        v2.8 — fix playback-compatibility issues flagged by the server's
+        Compatibility scan. Strategy comes from probe_data["_compat"]:
+          remux    — rewrap into MKV with mkvmerge (no re-encode). When the
+                     source had an absurd number of subtitle tracks, only
+                     eng/jpn/und subs are kept.
+          reencode — NVENC re-encode video to compat_target (h264 = plays
+                     on everything / hevc = smaller), 8-bit SDR pixel
+                     format, optional deinterlace. Audio and subs copied.
+        HDR/DV sources are never re-encoded here (that would destroy HDR
+        metadata) — they fall back to remux, and the Transcode pipeline is
+        the right tool for them.
+        """
+        job_id = job["id"]
+        filepath = job["file_path"]
+        filename = job["file_name"]
+        file_size_gb = job["file_size_gb"]
+
+        try:
+            pd = json.loads(job.get("probe_data") or "{}")
+        except Exception:
+            pd = {}
+        compat = pd.get("_compat") or {}
+        strategy = compat.get("strategy") or "reencode"
+        deinterlace = bool(compat.get("deinterlace"))
+        filter_subs = bool(compat.get("filter_subs"))
+        reasons = compat.get("reasons") or []
+
+        # Never re-encode HDR/DV content through the SDR compat path
+        hdr_type = (job.get("hdr_type") or "SDR").upper()
+        if strategy == "reencode" and hdr_type not in ("SDR", ""):
+            self.send_log(job_id, f"  [GUARD] {hdr_type} source — downgrading strategy to remux "
+                                  f"(use the Transcode pipeline for HDR/DV re-encodes)")
+            strategy = "remux"
+
+        basename = os.path.splitext(filename)[0]
+        work_dir = self._work_dir(job_id, settings)
+        output_mkv = os.path.join(work_dir, f"{basename}_compat.mkv")
+
+        if reasons:
+            self.send_log(job_id, "  Flagged: " + "; ".join(reasons))
+        self.send_log(job_id, f"  Strategy: {strategy}")
+
+        try:
+            if strategy == "remux":
+                step = "[Step 1/1] mkvmerge rewrap to MKV" + (" (eng/jpn subs only)" if filter_subs else "")
+                self.update_progress(job_id, 20, step)
+                self.send_log(job_id, step)
+                cmd = [self.mkvmerge, "-o", output_mkv]
+                if filter_subs:
+                    cmd += ["--subtitle-tracks", "eng,jpn,und"]
+                cmd += [filepath]
+                ok, err = self.run_cmd_with_watchdog(cmd, "mkvmerge Rewrap", job_id, stale_timeout=300)
+                if not ok:
+                    return False, f"mkvmerge rewrap failed: {err[:200]}", None, work_dir
+            else:
+                target = (settings.get("compat_target") or "h264").lower()
+                encoder = "hevc_nvenc" if target == "hevc" else "h264_nvenc"
+                cq = settings.get("cq", "18")
+                try:
+                    duration_sec = float(job.get("duration_min") or 0) * 60
+                except (TypeError, ValueError):
+                    duration_sec = 0
+
+                base_cmd = [self.ffmpeg, "-y", "-i", filepath, "-map", "0:v:0", "-map", "0:a?"]
+                sub_maps = (["-map", "0:s:m:language:eng?", "-map", "0:s:m:language:jpn?"]
+                            if filter_subs else ["-map", "0:s?"])
+                vf = ["-vf", "yadif"] if deinterlace else []
+                enc_args = ["-c:v", encoder, "-preset", settings.get("preset", "p5"),
+                            "-cq", str(cq), "-pix_fmt", "yuv420p",
+                            "-c:a", "copy"]
+
+                step = f"[Step 1/1] NVENC re-encode to {target.upper()} 8-bit" + (" + deinterlace" if deinterlace else "")
+                self.update_progress(job_id, 5, step)
+                self.send_log(job_id, step)
+
+                # Subtitle handling fallback chain: copy → convert to srt → drop
+                attempts = [
+                    (sub_maps + ["-c:s", "copy"], "subs copied"),
+                    (sub_maps + ["-c:s", "srt"], "subs converted to SRT"),
+                    (["-sn"], "subs dropped (incompatible formats)"),
+                ]
+                ok, err = False, ""
+                for sub_args, sub_note in attempts:
+                    cmd = base_cmd + sub_args + vf + enc_args + ["-f", "matroska", output_mkv]
+                    ok, err = self.run_cmd(cmd, f"Compat Re-encode ({sub_note})", job_id,
+                                           parse_progress=True, input_size_gb=file_size_gb,
+                                           total_duration_sec=duration_sec)
+                    if ok:
+                        self.send_log(job_id, f"  Subtitles: {sub_note}")
+                        break
+                    if self.cancelled:
+                        return False, "Cancelled by user", None, work_dir
+                if not ok:
+                    return False, f"Compat re-encode failed: {err[:200]}", None, work_dir
+
+            if not os.path.exists(output_mkv) or os.path.getsize(output_mkv) < 1024:
+                return False, "Compat conversion produced empty output", None, work_dir
+
+            output_gb = os.path.getsize(output_mkv) / (1024**3)
+            reduction = (1 - output_gb / file_size_gb) * 100 if file_size_gb > 0 else 0
+
+            self.update_progress(job_id, 100, "Complete")
+            self.send_log(job_id, f"  COMPLETE: {file_size_gb:.2f} GB → {output_gb:.2f} GB ({strategy})")
+            return True, None, {
+                "output_path": output_mkv,
+                "output_size_gb": output_gb,
+                "reduction_pct": reduction,
+                "saved_gb": file_size_gb - output_gb,
+            }, work_dir
+
+        except Exception as e:
+            self.log(f"CompatFix exception: {e}", "ERROR")
+            self.send_log(job_id, f"[ERROR] CompatFix exception: {e}")
             return False, str(e), None, work_dir
 
     # ─── Subtitle Generation (job_type='subgen') ─────────────────────────────
@@ -2092,8 +2240,11 @@ class ByteNode:
             self.send_log(job_id, f"  Pipeline: RemuxClean (track filter + name cleanup)")
             success, error, result, work_dir = self.remux_clean(job, settings)
         elif job_type == "dv78only":
-            self.send_log(job_id, f"  Pipeline: DV Profile 7→8 (no re-encode)")
+            self.send_log(job_id, f"  Pipeline: DV Profile → 8 (no re-encode)")
             success, error, result, work_dir = self.dv78only_convert(job, settings)
+        elif job_type == "compatfix":
+            self.send_log(job_id, f"  Pipeline: Compatibility fix (device-safe convert)")
+            success, error, result, work_dir = self.compat_fix(job, settings)
         elif job_type == "subgen":
             self.send_log(job_id, f"  Pipeline: SubGen (Whisper + Claude → Japanese SRT)")
             success, error, result, work_dir = self.subgen(job, settings)

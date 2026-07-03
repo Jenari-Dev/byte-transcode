@@ -23,6 +23,10 @@
 ## Features
 
 - **Full Dolby Vision P7→P8 pipeline** — Extract HEVC → Extract RPU → NVENC transcode → Inject RPU → Convert P7→P8 → mkvmerge remux
+- **Universal DV → P8 converter** — Converts ANY Dolby Vision profile to Profile 8 without re-encoding: P7 (dual-layer) and P5 (the one that plays purple/green on unsupported devices) both become P8.1 with maximum device compatibility
+- **Compatibility scan & fix** — Flags files likely to have playback issues (bad codecs, 10-bit H.264/Hi10P, 10-bit HEVC SDR, interlaced video, non-MKV containers, subtitle-track overload), notifies you, and converts them to a device-safe format. Clean files are recorded too, so any file can be force-converted with one click
+- **Per-node configuration** — Multiple worker nodes with different temp drives, path mappings and worker counts, editable from the web UI
+- **MCP server** — Control everything from Claude or any MCP client (see [MCP](#mcp-ai-assistant-control))
 - **HDR10, HDR10+, HLG, SDR support** — All HDR formats handled automatically
 - **Preserves everything** — All audio tracks (TrueHD Atmos, DTS-HD MA, etc.), subtitles, chapters
 - **NVENC GPU hardware encoding** with CUDA hardware decoding (near-zero CPU usage)
@@ -38,6 +42,22 @@
 - **Local SSD temp processing** for maximum transcode speed
 - **Crash recovery** — Resumes after node/server restart, cleans up temp files
 - **Auto-accept** — Optionally replace originals automatically
+
+---
+
+## MCP (AI assistant control)
+
+`mcp/byte_mcp.py` is a Model Context Protocol server that exposes the whole
+system as tools: queue management, library scans, pipeline start/pause,
+settings, per-node config, and logs.
+
+```bash
+# Register with Claude Code (generate an API key in Settings → API first):
+claude mcp add byte-transcode -- py path/to/mcp/byte_mcp.py --server http://YOUR_NAS_IP:5800 --api-key YOUR_KEY
+```
+
+Requires Python 3.10+ with the `mcp` and `requests` packages (auto-installed
+on first run). Works with any MCP client, not just Claude.
 
 ---
 

@@ -87,7 +87,7 @@ function Login({onAuth,setup}){
     return <div style={{minHeight:'100vh',background:T.bg,display:'flex',alignItems:'center',justifyContent:'center'}}>
         <div style={{background:T.sb,borderRadius:14,padding:'44px 40px',border:`1px solid ${T.bd}`,width:380,textAlign:'center'}}>
             <div style={{fontSize:36,fontWeight:800,color:T.ac,letterSpacing:'-1px',lineHeight:1,marginBottom:4}}>BYTE</div>
-            <div style={{fontSize:11,color:T.t2,letterSpacing:'3px',fontWeight:600,marginBottom:36}}>TRANSCODE v3.7</div>
+            <div style={{fontSize:11,color:T.t2,letterSpacing:'3px',fontWeight:600,marginBottom:36}}>TRANSCODE v3.8</div>
             {setup&&<div style={{fontSize:13,color:T.ac,marginBottom:16,padding:'10px 14px',background:`${T.ac}15`,borderRadius:8}}>First time — create your admin account</div>}
             {e&&<div style={{fontSize:13,color:T.er,marginBottom:14}}>{e}</div>}
             <input value={u} onChange={ev=>setU(ev.target.value)} placeholder="Username" style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'12px 16px',color:T.tx,fontSize:14,marginBottom:12}}/>
@@ -274,7 +274,7 @@ function App(){
         <nav style={{width:218,background:T.sb,borderRight:`1px solid ${T.bd}`,display:'flex',flexDirection:'column',position:'sticky',top:0,height:'100vh',flexShrink:0}}>
             <div style={{padding:'22px 18px',borderBottom:`1px solid ${T.bd}`}}>
                 <div style={{fontSize:24,fontWeight:800,color:T.ac,letterSpacing:'-0.5px',lineHeight:1}}>BYTE</div>
-                <div style={{fontSize:10,color:T.t2,letterSpacing:'2.5px',fontWeight:600,marginTop:4}}>TRANSCODE v3.7</div>
+                <div style={{fontSize:10,color:T.t2,letterSpacing:'2.5px',fontWeight:600,marginTop:4}}>TRANSCODE v3.8</div>
             </div>
             <div style={{padding:10,flex:1,overflowY:'auto'}}>
                 {/* Main */}
@@ -291,7 +291,8 @@ function App(){
                 {[
                     ['tool-subgen','AI Subtitles','log',T.ok,'subgen'],
                     ['tool-cleanup','Audio Cleanup','check',T.in,'remuxclean'],
-                    ['tool-dv78','DV7→8 Only','play',T.a2,'dv78only'],
+                    ['tool-dv78','DV → P8','play',T.a2,'dv78only'],
+                    ['tool-compat','Compatibility','alert',T.wn,'compatfix'],
                 ].map(([id,label,icon,c,jt])=>{
                     const procCount=(s.processing||[]).filter(p=>(p.job_type||'transcode')===jt).length;
                     const queueCount=gcType(jt,'queued')+gcType(jt,'pending');
@@ -357,7 +358,7 @@ function App(){
                     </div>
                     <div style={{background:T.bg,borderRadius:8,padding:'10px 14px',border:`1px solid ${T.bd}`}}>
                         <div style={{fontSize:10,color:T.t2,fontWeight:600}}>VERSION</div>
-                        <div className="mono" style={{fontSize:15,fontWeight:700,color:T.t1,marginTop:2}}>3.0.0</div>
+                        <div className="mono" style={{fontSize:15,fontWeight:700,color:T.t1,marginTop:2}}>3.8</div>
                     </div>
                     <div style={{background:T.bg,borderRadius:8,padding:'10px 14px',border:`1px solid ${T.bd}`}}>
                         <div style={{fontSize:10,color:T.t2,fontWeight:600}}>STATUS</div>
@@ -486,7 +487,7 @@ function App(){
                 {(()=>{
                     const myProc=(s.processing||[]).filter(p=>(p.job_type||'transcode')===qTypeT);
                     return <>
-                <h2 style={{fontSize:13,fontWeight:600,color:T.t3,textTransform:'uppercase',letterSpacing:'0.5px',margin:'18px 0 10px'}}>Active Workers <span style={{color:T.t2,fontWeight:400}}>({{transcode:'Transcode',subgen:'AI Subtitles',remuxclean:'Audio Cleanup',dv78only:'DV7→8 Only'}[qTypeT]||qTypeT})</span></h2>
+                <h2 style={{fontSize:13,fontWeight:600,color:T.t3,textTransform:'uppercase',letterSpacing:'0.5px',margin:'18px 0 10px'}}>Active Workers <span style={{color:T.t2,fontWeight:400}}>({{transcode:'Transcode',subgen:'AI Subtitles',remuxclean:'Audio Cleanup',dv78only:'DV → P8',compatfix:'Compatibility'}[qTypeT]||qTypeT})</span></h2>
                 <div style={{background:T.card,borderRadius:10,border:`1px solid ${T.bd}`,overflow:'hidden',marginBottom:8}}>
                     <div style={{display:'grid',gridTemplateColumns:'44px 90px 1fr 130px 80px 100px 50px 90px 56px',gap:4,padding:'8px 14px',fontSize:10,fontWeight:600,color:T.t2,textTransform:'uppercase',letterSpacing:'0.3px',borderBottom:`1px solid ${T.bd}`}}>
                         <span>On/Off</span><span>Type</span><span>Title</span><span>Status</span><span>ETA</span><span>Progress</span><span>FPS</span><span>Compression</span><span></span>
@@ -494,8 +495,8 @@ function App(){
                     {myProc.length===0&&<div style={{padding:24,textAlign:'center',color:T.t2,fontSize:12}}>No active jobs in this pipeline</div>}
                     {myProc.map(p=>{const h=HDR_C[p.hdr_type]||HDR_C.SDR;
                         const jt=p.job_type||'transcode';
-                        const jtLabel={transcode:'Transcode',subgen:'AI Subtitle',remuxclean:'Cleanup',dv78only:'DV7→8'}[jt]||jt;
-                        const jtColor={transcode:T.ac,subgen:T.ok,remuxclean:T.in,dv78only:T.a2}[jt]||T.ac;
+                        const jtLabel={transcode:'Transcode',subgen:'AI Subtitle',remuxclean:'Cleanup',dv78only:'DV→P8',compatfix:'Compat'}[jt]||jt;
+                        const jtColor={transcode:T.ac,subgen:T.ok,remuxclean:T.in,dv78only:T.a2,compatfix:T.wn}[jt]||T.ac;
                         return <div key={p.id} style={{display:'grid',gridTemplateColumns:'44px 90px 1fr 130px 80px 100px 50px 90px 56px',gap:4,padding:'10px 14px',alignItems:'center',borderBottom:`1px solid ${T.bd}`,fontSize:12}}>
                         <div style={{width:34,height:18,borderRadius:9,background:T.ok,display:'flex',alignItems:'center',justifyContent:'flex-end',padding:'0 2px'}}><div style={{width:14,height:14,borderRadius:7,background:'#fff'}}/></div>
                         <span style={{color:jtColor,fontWeight:600,fontSize:11}}>{jtLabel} GPU</span>
@@ -547,8 +548,8 @@ function App(){
                         <div style={{maxHeight:250,overflowY:'auto'}}>
                             {myProc.map(p=>{
                                 const jt2=p.job_type||'transcode';
-                                const jtLbl={transcode:'Transcode',subgen:'AI Subtitle',remuxclean:'Cleanup',dv78only:'DV7→8'}[jt2]||jt2;
-                                const jtClr={transcode:T.ac,subgen:T.ok,remuxclean:T.in,dv78only:T.a2}[jt2]||T.ac;
+                                const jtLbl={transcode:'Transcode',subgen:'AI Subtitle',remuxclean:'Cleanup',dv78only:'DV→P8',compatfix:'Compat'}[jt2]||jt2;
+                                const jtClr={transcode:T.ac,subgen:T.ok,remuxclean:T.in,dv78only:T.a2,compatfix:T.wn}[jt2]||T.ac;
                                 return <div key={p.id+'stg'} style={{display:'grid',gridTemplateColumns:'70px 1fr 60px 70px 50px',gap:4,padding:'8px 12px',alignItems:'center',borderBottom:`1px solid ${T.bd}`,fontSize:11}}>
                                 <span style={{color:jtClr,fontWeight:600,fontSize:10}}>{jtLbl}</span>
                                 <span style={{color:T.t1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{p.file_name}</span>
@@ -619,8 +620,8 @@ function App(){
 
             {/* CURRENTLY PROCESSING — only shows jobs of the CURRENT view's type */}
             {(()=>{
-                const labels={transcode:'Transcode',subgen:'AI Subtitles',remuxclean:'Audio/Track Cleanup',dv78only:'DV7→8 Only'};
-                const colors={transcode:T.ac,subgen:T.ok,remuxclean:T.in,dv78only:T.a2};
+                const labels={transcode:'Transcode',subgen:'AI Subtitles',remuxclean:'Audio/Track Cleanup',dv78only:'DV → P8',compatfix:'Compatibility'};
+                const colors={transcode:T.ac,subgen:T.ok,remuxclean:T.in,dv78only:T.a2,compatfix:T.wn};
                 const c=colors[qTypeT]||T.ac;
                 const lbl=labels[qTypeT]||qTypeT;
                 const myJobs=(s.processing||[]).filter(p=>(p.job_type||'transcode')===qTypeT);
@@ -645,9 +646,9 @@ function App(){
 
             {/* Header showing what view we're on (driven by sidebar Tools nav) */}
             {(()=>{
-                const labels={transcode:'Transcode',subgen:'AI Subtitles',remuxclean:'Audio/Track Cleanup',dv78only:'DV7→8 Only'};
-                const colors={transcode:T.ac,subgen:T.ok,remuxclean:T.in,dv78only:T.a2};
-                const icons={transcode:'zap',subgen:'log',remuxclean:'check',dv78only:'play'};
+                const labels={transcode:'Transcode',subgen:'AI Subtitles',remuxclean:'Audio/Track Cleanup',dv78only:'DV → P8',compatfix:'Compatibility'};
+                const colors={transcode:T.ac,subgen:T.ok,remuxclean:T.in,dv78only:T.a2,compatfix:T.wn};
+                const icons={transcode:'zap',subgen:'log',remuxclean:'check',dv78only:'play',compatfix:'alert'};
                 const c=colors[qTypeT]||T.ac;
                 const lbl=labels[qTypeT]||qTypeT;
                 return <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:8,padding:'12px 16px',background:T.card,borderRadius:10,border:`1px solid ${c}33`}}>
@@ -659,8 +660,8 @@ function App(){
 
             {/* PER-TYPE PIPELINE CONTROL — Start/Pause for the currently-selected job type */}
             {(()=>{
-                const labels={transcode:'Transcode',subgen:'AI Subtitles',remuxclean:'Audio/Track Cleanup',dv78only:'DV7→8 Only'};
-                const colors={transcode:T.ac,subgen:T.ok,remuxclean:T.in,dv78only:T.a2};
+                const labels={transcode:'Transcode',subgen:'AI Subtitles',remuxclean:'Audio/Track Cleanup',dv78only:'DV → P8',compatfix:'Compatibility'};
+                const colors={transcode:T.ac,subgen:T.ok,remuxclean:T.in,dv78only:T.a2,compatfix:T.wn};
                 const typeEnabled=(s.processing_enabled_by_type||{})[qTypeT]!==false;
                 const masterOn=s.processing_enabled;
                 const c=colors[qTypeT]||T.ac;
@@ -945,11 +946,13 @@ function App(){
                 const sprc=s.scan_progress?.['remuxclean_'+lib.id];const scanningRC=sprc?.status==='scanning';const pctRC=sprc?Math.round(sprc.scanned/Math.max(sprc.total,1)*100):0;
                 const spdv=s.scan_progress?.['dv78only_'+lib.id];const scanningDV=spdv?.status==='scanning';const pctDV=spdv?Math.round(spdv.scanned/Math.max(spdv.total,1)*100):0;
                 const spsg=s.scan_progress?.['subgen_'+lib.id];const scanningSG=spsg?.status==='scanning';const pctSG=spsg?Math.round(spsg.scanned/Math.max(spsg.total,1)*100):0;
+                const spcf=s.scan_progress?.['compatfix_'+lib.id];const scanningCF=spcf?.status==='scanning';const pctCF=spcf?Math.round(spcf.scanned/Math.max(spcf.total,1)*100):0;
                 return <div key={lib.id} style={{borderRadius:10,marginBottom:10,border:`1px solid ${T.bd}`,overflow:'hidden',position:'relative'}}>
                     {scanning&&<div style={{position:'absolute',bottom:0,left:0,height:4,width:`${pct}%`,background:T.ac,transition:'width 0.5s'}}/>}
                     {scanningRC&&<div style={{position:'absolute',bottom:0,left:0,height:4,width:`${pctRC}%`,background:T.in,transition:'width 0.5s'}}/>}
                     {scanningDV&&<div style={{position:'absolute',bottom:0,left:0,height:4,width:`${pctDV}%`,background:T.a2,transition:'width 0.5s'}}/>}
                     {scanningSG&&<div style={{position:'absolute',bottom:0,left:0,height:4,width:`${pctSG}%`,background:T.ok,transition:'width 0.5s'}}/>}
+                    {scanningCF&&<div style={{position:'absolute',bottom:0,left:0,height:4,width:`${pctCF}%`,background:T.wn,transition:'width 0.5s'}}/>}
                     <div style={{background:T.card,padding:'16px 20px'}}>
                         <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start'}}>
                             <div style={{flex:1}}>
@@ -959,6 +962,7 @@ function App(){
                                 {scanningRC&&<div style={{fontSize:12,color:T.in,marginTop:5}}>Cleanup scan: {sprc.current_file} ({pctRC}%) · ETA: {sprc.eta}</div>}
                                 {scanningDV&&<div style={{fontSize:12,color:T.a2,marginTop:5}}>DV7→8 scan: {spdv.current_file} ({pctDV}%) · ETA: {spdv.eta}</div>}
                                 {scanningSG&&<div style={{fontSize:12,color:T.ok,marginTop:5}}>SubGen scan: {spsg.current_file} ({pctSG}%) · ETA: {spsg.eta}</div>}
+                                {scanningCF&&<div style={{fontSize:12,color:T.wn,marginTop:5}}>Compatibility scan: {spcf.current_file} ({pctCF}%) · ETA: {spcf.eta}</div>}
                                 <div style={{display:'flex',gap:6,marginTop:10,flexWrap:'wrap'}}>
                                     <span style={{fontSize:12,color:T.t3}}>Status: <span style={{color:lib.status==='scanned'?T.ok:T.t3,fontWeight:600}}>{lib.status||'idle'}</span></span>
                                     {lib.last_scanned&&<span style={{fontSize:11,color:T.t2}}>Last scan: {lib.last_scanned}</span>}
@@ -968,7 +972,8 @@ function App(){
                                     <button onClick={()=>doAct('/libraries/'+lib.id+'/scan')} disabled={scanning} style={{background:`${T.ok}12`,border:`1px solid ${T.ok}33`,borderRadius:6,padding:'6px 12px',cursor:scanning?'default':'pointer',color:T.ok,fontSize:11,fontWeight:600,opacity:scanning?0.5:1,display:'flex',alignItems:'center',gap:4}}><I n="refresh" s={12}/> Scan (Find New)</button>
                                     <button onClick={async()=>{await del('/queue?library_id='+lib.id);await doAct('/libraries/'+lib.id+'/scan');toast('Fresh scan started','info')}} disabled={scanning} style={{background:`${T.ac}12`,border:`1px solid ${T.ac}33`,borderRadius:6,padding:'6px 12px',cursor:'pointer',color:T.ac,fontSize:11,fontWeight:600,display:'flex',alignItems:'center',gap:4}}><I n="refresh" s={12}/> Scan (Fresh)</button>
                                     <button onClick={async()=>{await post('/libraries/'+lib.id+'/scan-remuxclean');toast('Cleanup scan started','info');rL();rD();}} disabled={scanningRC} style={{background:`${T.in}12`,border:`1px solid ${T.in}33`,borderRadius:6,padding:'6px 12px',cursor:scanningRC?'default':'pointer',color:T.in,fontSize:11,fontWeight:600,opacity:scanningRC?0.5:1,display:'flex',alignItems:'center',gap:4}}><I n="search" s={12}/> Scan for Cleanup</button>
-                                    <button onClick={async()=>{await post('/libraries/'+lib.id+'/scan-dv78only');toast('DV7→8 scan started','info');rL();rD();}} disabled={scanningDV} style={{background:`${T.a2}12`,border:`1px solid ${T.a2}33`,borderRadius:6,padding:'6px 12px',cursor:scanningDV?'default':'pointer',color:T.a2,fontSize:11,fontWeight:600,opacity:scanningDV?0.5:1,display:'flex',alignItems:'center',gap:4}}><I n="search" s={12}/> Scan for DV7→8</button>
+                                    <button onClick={async()=>{await post('/libraries/'+lib.id+'/scan-dv78only');toast('DV → P8 scan started','info');rL();rD();}} disabled={scanningDV} style={{background:`${T.a2}12`,border:`1px solid ${T.a2}33`,borderRadius:6,padding:'6px 12px',cursor:scanningDV?'default':'pointer',color:T.a2,fontSize:11,fontWeight:600,opacity:scanningDV?0.5:1,display:'flex',alignItems:'center',gap:4}}><I n="search" s={12}/> Scan for DV → P8</button>
+                                    <button onClick={async()=>{await post('/libraries/'+lib.id+'/scan-compat');toast('Compatibility scan started','info');rL();rD();}} disabled={scanningCF} style={{background:`${T.wn}12`,border:`1px solid ${T.wn}33`,borderRadius:6,padding:'6px 12px',cursor:scanningCF?'default':'pointer',color:T.wn,fontSize:11,fontWeight:600,opacity:scanningCF?0.5:1,display:'flex',alignItems:'center',gap:4}}><I n="alert" s={12}/> Scan for Playback Issues</button>
                                     <button onClick={async()=>{await post('/libraries/'+lib.id+'/scan-subgen');toast('SubGen scan started','info');rL();rD();}} disabled={scanningSG} style={{background:`${T.ok}12`,border:`1px solid ${T.ok}33`,borderRadius:6,padding:'6px 12px',cursor:scanningSG?'default':'pointer',color:T.ok,fontSize:11,fontWeight:600,opacity:scanningSG?0.5:1,display:'flex',alignItems:'center',gap:4}}><I n="search" s={12}/> Scan for Japanese Subs</button>
                                     <button onClick={()=>doAct('/libraries/'+lib.id+'/refresh')} style={{background:`${T.in}12`,border:`1px solid ${T.in}33`,borderRadius:6,padding:'6px 12px',cursor:'pointer',color:T.in,fontSize:11,fontWeight:600,display:'flex',alignItems:'center',gap:4}}><I n="refresh" s={12}/> Refresh</button>
                                     <button onClick={async()=>{const r=await post('/queue/requeue-library',{library_id:lib.id});toast('Requeued all items','info');rQ();rD();}} style={{background:`${T.wn}12`,border:`1px solid ${T.wn}33`,borderRadius:6,padding:'6px 12px',cursor:'pointer',color:T.wn,fontSize:11,fontWeight:600}}>Requeue All</button>
@@ -1055,8 +1060,14 @@ function App(){
                         <SB T={T} title="Container">
                             <select value={lSettings.container} onChange={e=>setLS(s=>({...s,container:e.target.value}))} style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'10px 14px',color:T.tx,fontSize:14}}><option value="mkv">MKV (recommended)</option><option value="mp4">MP4</option></select>
                         </SB>
-                        <SB T={T} title="DoVi P7 → P8" desc="Convert Dolby Vision Profile 7 → 8 during transcode.">
+                        <SB T={T} title="DoVi → P8" desc="Convert any Dolby Vision profile (5, 7, ...) to Profile 8 during transcode.">
                             <label style={{display:'flex',alignItems:'center',gap:12,cursor:'pointer'}}><Tog on={lSettings.dovi_convert_p8==='true'} onTog={()=>setLS(s=>({...s,dovi_convert_p8:s.dovi_convert_p8==='true'?'false':'true'}))} T={T}/><span style={{fontSize:14,color:T.tx}}>{lSettings.dovi_convert_p8==='true'?'Enabled':'Disabled'}</span></label>
+                        </SB>
+                        <SB T={T} title="Compatibility Target Codec" desc="Codec used when the Compatibility pipeline re-encodes a flagged file. H.264 plays on everything; HEVC is smaller but needs a modern device.">
+                            <select value={lSettings.compat_target||'h264'} onChange={e=>setLS(s=>({...s,compat_target:e.target.value}))} style={{background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'10px 14px',color:T.tx,fontSize:13,cursor:'pointer'}}>
+                                <option value="h264">H.264 (most compatible)</option>
+                                <option value="hevc">HEVC (smaller files)</option>
+                            </select>
                         </SB>
                         <SB T={T} title="Replace Original" desc="Overwrite source file once processing completes.">
                             <label style={{display:'flex',alignItems:'center',gap:12,cursor:'pointer'}}><Tog on={lSettings.replace_original==='true'} onTog={()=>setLS(s=>({...s,replace_original:s.replace_original==='true'?'false':'true'}))} T={T}/><span style={{fontSize:14,color:T.tx}}>{lSettings.replace_original==='true'?'Replace originals':'Keep both'}</span></label>

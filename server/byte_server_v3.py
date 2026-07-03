@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Byte Transcode Server v3.7
+Byte Transcode Server v3.8
 ==========================
 v3.5 — path mapping (server→node) settings + SubGen 'show all'
 v3.6 — adds node_temp_path setting (Windows nodes need F:\\Byte_Engine_temp,
@@ -13,6 +13,13 @@ v3.7 — dual-node support: per-node overrides (worker_config_<id>) are now
        All text-mode subprocess captures use encoding="utf-8" so scans no
        longer silently skip files with non-Latin track titles when the
        server runs on a non-UTF-8 locale (e.g. Windows).
+v3.8 — Universal DV → P8 scan (flags every DV profile != 8, incl. P5) and
+       the new Compatibility pipeline: scan-compat flags files with likely
+       playback issues (bad codecs, Hi10P, 10-bit HEVC SDR, interlaced,
+       non-MKV containers, subtitle overload), records clean files as
+       skipped so any file can be force-converted via Requeue, notifies
+       via ntfy, and queues 'compatfix' jobs (remux or NVENC re-encode to
+       compat_target).
 
 Run: python3 byte_server.py --port 5800
 """
@@ -22,7 +29,7 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 from flask import Flask, request, jsonify, send_from_directory, Response, session, redirect
 
-SERVER_VERSION = "3.7"
+SERVER_VERSION = "3.8"
 DEFAULT_PORT = 5800
 DB_PATH = os.environ.get("BYTE_DB_PATH", "/config/byte_transcode.db")
 LOG_DIR = os.environ.get("BYTE_LOG_DIR", "/config/logs")
@@ -30,7 +37,32 @@ STATIC_DIR = os.environ.get("BYTE_STATIC_DIR", "/app/static")
 VIDEO_EXTENSIONS = {'.mkv', '.mp4', '.m4v', '.avi', '.mov', '.wmv', '.flv', '.webm', '.ts', '.m2ts', '.mpg', '.mpeg'}
 
 app = Flask(__name__, static_folder=STATIC_DIR)
-app.config["SECRET_KEY"] = os.environ.get("BYTE_SECRET", secrets.token_hex(32))
+
+def _session_secret():
+    """
+    v3.8 — persist the Flask session secret next to the DB. It used to be
+    random on every boot (unless BYTE_SECRET was set), which invalidated
+    all sessions and logged everyone out of the UI on each server restart.
+    """
+    env = os.environ.get("BYTE_SECRET")
+    if env:
+        return env
+    secret_path = os.path.join(os.path.dirname(DB_PATH) or ".", ".byte_secret")
+    try:
+        if os.path.exists(secret_path):
+            with open(secret_path, "r") as f:
+                val = f.read().strip()
+                if val:
+                    return val
+        val = secrets.token_hex(32)
+        os.makedirs(os.path.dirname(secret_path) or ".", exist_ok=True)
+        with open(secret_path, "w") as f:
+            f.write(val)
+        return val
+    except Exception:
+        return secrets.token_hex(32)
+
+app.config["SECRET_KEY"] = _session_secret()
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=30)
 
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -165,6 +197,11 @@ def init_db():
             "processing_enabled_subgen": "true",
             "processing_enabled_remuxclean": "true",
             "processing_enabled_dv78only": "true",
+            # v3.8 — Compatibility pipeline (flag + fix playback-risk files)
+            "processing_enabled_compatfix": "true",
+            # Target codec for compat re-encodes: h264 = plays on everything,
+            # hevc = smaller files, plays on most modern devices
+            "compat_target": "h264",
             # v3.5 — Server→Node path translation. The server stores library
             # paths from its own viewpoint (e.g. /media/data/media/movies because
             # /mnt/media is bind-mounted to /media inside Docker). The node runs
@@ -320,8 +357,18 @@ def get_setting(key):
         return r["value"] if r else None
 
 def set_setting(key, value):
-    with get_db() as db:
-        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
+    # v3.8: retry on transient "database is locked" — short write bursts
+    # (pipeline toggles, worker config saves) could 500 under scan load,
+    # notably on Windows where AV can briefly hold the WAL file.
+    for attempt in range(3):
+        try:
+            with get_db() as db:
+                db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
+            return
+        except sqlite3.OperationalError:
+            if attempt == 2:
+                raise
+            time.sleep(0.5 * (attempt + 1))
 
 
 # ─── Auth ────────────────────────────────────────────────────────────────────
@@ -804,10 +851,16 @@ def analyze_for_dv78(probe_json):
             dovi_profile = sd.get("dv_profile")
             break
 
+    # v3.8 — any DV profile other than 8 needs conversion (P7 dual-layer,
+    # P5 IPTPQc2 "purple and green" on unsupported devices, P4, ...).
+    try:
+        prof_num = int(dovi_profile) if dovi_profile is not None else None
+    except (TypeError, ValueError):
+        prof_num = None
     return {
         "has_dovi": has_dovi,
         "dovi_profile": dovi_profile,
-        "needs_conversion": has_dovi and (dovi_profile == 7 or str(dovi_profile) == "7"),
+        "needs_conversion": has_dovi and prof_num is not None and prof_num != 8,
     }
 
 def scan_dv78only_task(library_id):
@@ -897,6 +950,7 @@ def scan_dv78only_task(library_id):
             vcodec = v.get("codec_name", "")
             res = f"{v.get('width', 0)}x{v.get('height', 0)}"
 
+            src_profile = dv["dovi_profile"]
             with get_db() as db:
                 max_pri = db.execute("SELECT COALESCE(MAX(priority), 0) FROM queue").fetchone()[0]
                 try:
@@ -905,19 +959,212 @@ def scan_dv78only_task(library_id):
                         video_codec, resolution, hdr_type, has_dovi, dovi_profile,
                         library_id, library_name, status, health_status, priority, probe_data,
                         job_type, current_step
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'DoVi', 1, 7, ?, ?, 'pending', 'pending', ?, ?, 'dv78only', ?)""",
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'DoVi', 1, ?, ?, ?, 'pending', 'pending', ?, ?, 'dv78only', ?)""",
                     (filepath, filename, size_gb, dur_min, dur_str,
-                     vcodec, res, library_id, lib["name"], max_pri + 1, json.dumps(probe_json),
-                     "Pending: DV Profile 7 → 8 conversion"))
+                     vcodec, res, src_profile, library_id, lib["name"], max_pri + 1, json.dumps(probe_json),
+                     f"Pending: DV Profile {src_profile} → 8 conversion"))
                     added += 1
                 except sqlite3.IntegrityError:
                     skipped_dup += 1
 
     scan_progress[pkey] = {"total": total_files, "scanned": total_files,
                            "current_file": "", "eta": "done", "status": "complete"}
-    add_log(f"[DV7→8 Scan] {lib['name']} — {added} queued, "
-            f"{skipped_no_p7} not P7, {skipped_dup} already in queue, "
+    add_log(f"[DV→P8 Scan] {lib['name']} — {added} queued, "
+            f"{skipped_no_p7} already P8 / no DV, {skipped_dup} already in queue, "
             f"{skipped_probe} probe-failed, {file_count} total MKVs")
+
+
+# ─── Compatibility Scan (v3.8) ───────────────────────────────────────────────
+# Flags files likely to have playback problems on TVs / streaming clients
+# and queues 'compatfix' jobs. Every scanned file is recorded (like SubGen):
+# flagged files go in as pending, clean files as skipped — so any file can
+# be force-converted later via Requeue even if the heuristics passed it.
+
+COMPAT_OK_CONTAINERS = {'.mkv', '.mp4', '.m4v'}
+COMPAT_BAD_VCODECS = {'vc1', 'mpeg2video', 'mpeg4', 'msmpeg4v3', 'msmpeg4v2',
+                      'wmv1', 'wmv2', 'wmv3', 'vp8', 'vp9', 'av1', 'h263', 'mjpeg'}
+COMPAT_MAX_SUB_TRACKS = 12
+
+def analyze_for_compat(probe_json, ext):
+    """
+    Decide whether a file risks playback issues and how to fix it.
+    Returns {"flag": bool, "reasons": [str], "strategy": 'remux'|'reencode',
+             "deinterlace": bool, "filter_subs": bool}.
+    """
+    reasons = []
+    strategy = None
+    deinterlace = False
+    filter_subs = False
+
+    streams = probe_json.get("streams", []) if probe_json else []
+    video = next((s for s in streams if s.get("codec_type") == "video"
+                  and not (s.get("disposition") or {}).get("attached_pic")), None)
+    subs = [s for s in streams if s.get("codec_type") == "subtitle"]
+
+    if ext not in COMPAT_OK_CONTAINERS:
+        reasons.append(f"container {ext} may not direct-play")
+        strategy = strategy or "remux"
+
+    if video:
+        vcodec = (video.get("codec_name") or "").lower()
+        pix = (video.get("pix_fmt") or "").lower()
+        transfer = (video.get("color_transfer") or "").lower()
+        field = (video.get("field_order") or "").lower()
+        is_10bit = "10le" in pix or "10be" in pix or "p010" in pix
+        # Dolby Vision (esp. P5/IPTPQc2) may not report a PQ transfer —
+        # treat any DOVI side data as HDR so DV files aren't misflagged
+        # as "10-bit HEVC SDR" (the DV → P8 pipeline owns those).
+        has_dovi_sd = any("DOVI" in (sd.get("side_data_type") or "")
+                          for sd in video.get("side_data_list", []))
+        is_hdr = transfer in ("smpte2084", "arib-std-b67") or has_dovi_sd
+
+        if vcodec in COMPAT_BAD_VCODECS:
+            reasons.append(f"video codec {vcodec} not widely supported")
+            strategy = "reencode"
+        if vcodec == "h264" and is_10bit:
+            reasons.append("10-bit H.264 (Hi10P) — unplayable on most devices")
+            strategy = "reencode"
+        if vcodec == "hevc" and is_10bit and not is_hdr:
+            reasons.append("10-bit HEVC SDR — known playback issues on some TV clients")
+            strategy = "reencode"
+        if field in ("tt", "bb", "tb", "bt"):
+            reasons.append("interlaced video")
+            strategy = "reencode"
+            deinterlace = True
+
+    if len(subs) > COMPAT_MAX_SUB_TRACKS:
+        reasons.append(f"{len(subs)} subtitle tracks — can stall some players")
+        strategy = strategy or "remux"
+        filter_subs = True
+
+    return {
+        "flag": bool(reasons),
+        "reasons": reasons,
+        # Requeued clean files get a full re-encode — the safest "make it
+        # play anywhere" treatment when heuristics found nothing specific.
+        "strategy": strategy or "reencode",
+        "deinterlace": deinterlace,
+        "filter_subs": filter_subs,
+    }
+
+def scan_compat_task(library_id):
+    """Scan a library for playback-compatibility risks. Queues 'compatfix' jobs."""
+    global scan_progress
+    pkey = f"compatfix_{library_id}"
+    with get_db() as db:
+        lib = db.execute("SELECT * FROM libraries WHERE id = ?", (library_id,)).fetchone()
+        if not lib:
+            return
+    path = lib["path"]
+    add_log(f"[Compat Scan] {lib['name']} ({path})")
+
+    total_files = count_video_files(path)
+    scan_progress[pkey] = {"total": total_files, "scanned": 0, "current_file": "",
+                           "eta": "calculating...", "status": "scanning"}
+    start_time = time.time()
+    file_count, flagged, recorded_ok, skipped_dup, skipped_probe = 0, 0, 0, 0, 0
+
+    for root, dirs, files in os.walk(path):
+        for filename in sorted(files):
+            ext = os.path.splitext(filename)[1].lower()
+            if ext not in VIDEO_EXTENSIONS:
+                continue
+            filepath = os.path.join(root, filename)
+            try:
+                size_gb = os.path.getsize(filepath) / (1024**3)
+            except OSError:
+                continue
+
+            file_count += 1
+            elapsed = time.time() - start_time
+            rate = file_count / elapsed if elapsed > 0 else 1
+            remaining = (total_files - file_count) / rate if rate > 0 else 0
+            eta_str = (f"{int(remaining/60)}m {int(remaining%60)}s" if remaining >= 60 else f"{int(remaining)}s")
+            scan_progress[pkey] = {"total": total_files, "scanned": file_count,
+                                   "current_file": filename, "eta": eta_str, "status": "scanning"}
+
+            with get_db() as db:
+                exists = db.execute(
+                    "SELECT id FROM queue WHERE file_path = ? AND job_type = 'compatfix'",
+                    (filepath,)).fetchone()
+                if exists:
+                    skipped_dup += 1
+                    continue
+
+            probe_json = None
+            try:
+                cmd = [FFPROBE, "-v", "quiet", "-print_format", "json",
+                       "-show_format", "-show_streams", filepath]
+                r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+                if r.returncode == 0:
+                    probe_json = json.loads(r.stdout)
+            except Exception as e:
+                log.warning(f"[Compat Scan] FFprobe failed on {filename}: {e}")
+            if not probe_json:
+                skipped_probe += 1
+                continue
+
+            compat = analyze_for_compat(probe_json, ext)
+            # Stash the decision inside probe_data so the node knows the
+            # strategy without any schema change.
+            probe_json["_compat"] = compat
+
+            fmt = probe_json.get("format", {})
+            try:
+                dur_min = float(fmt.get("duration", 0)) / 60
+            except Exception:
+                dur_min = 0
+            dur_str = f"{int(dur_min//60)}h {int(dur_min%60)}m" if dur_min >= 60 else f"{int(dur_min)}m"
+            v = next((s for s in probe_json.get("streams", []) if s.get("codec_type") == "video"), {})
+            vcodec = v.get("codec_name", "")
+            res = f"{v.get('width', 0)}x{v.get('height', 0)}"
+
+            # v3.8: record the REAL HDR type — the node's compat handler
+            # refuses to SDR-re-encode anything that isn't SDR, and that
+            # guard reads this column. Hardcoding 'SDR' here previously let
+            # a forced compat job flatten a DV file to SDR H.264.
+            v_transfer = (v.get("color_transfer") or "").lower()
+            v_dovi = any("DOVI" in (sd.get("side_data_type") or "") for sd in v.get("side_data_list", []))
+            hdr_type = ("DoVi" if v_dovi else
+                        "HDR10" if v_transfer == "smpte2084" else
+                        "HLG" if v_transfer == "arib-std-b67" else "SDR")
+
+            if compat["flag"]:
+                status, current_step, skipped_reason = "pending", "Pending [" + compat["strategy"] + "]: " + "; ".join(compat["reasons"]), None
+            else:
+                status, current_step, skipped_reason = "skipped", "No compatibility issues detected", "No issues — requeue to force-convert"
+
+            with get_db() as db:
+                max_pri = db.execute("SELECT COALESCE(MAX(priority), 0) FROM queue").fetchone()[0]
+                try:
+                    db.execute("""INSERT INTO queue (
+                        file_path, file_name, file_size_gb, duration_min, duration_str,
+                        video_codec, resolution, hdr_type, library_id, library_name,
+                        status, health_status, priority, probe_data, job_type,
+                        current_step, skipped_reason
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'compatfix', ?, ?)""",
+                    (filepath, filename, size_gb, dur_min, dur_str, vcodec, res, hdr_type,
+                     library_id, lib["name"], status,
+                     "pending" if status == "pending" else "healthy",
+                     max_pri + 1, json.dumps(probe_json), current_step, skipped_reason))
+                    if status == "pending":
+                        flagged += 1
+                    else:
+                        recorded_ok += 1
+                except sqlite3.IntegrityError:
+                    skipped_dup += 1
+
+    scan_progress[pkey] = {"total": total_files, "scanned": total_files,
+                           "current_file": "", "eta": "done", "status": "complete"}
+    add_log(f"[Compat Scan] {lib['name']} — {flagged} flagged with possible playback issues, "
+            f"{recorded_ok} clean (requeue to force), {skipped_dup} already recorded, "
+            f"{skipped_probe} probe-failed, {file_count} files")
+    if flagged > 0:
+        send_notification("Playback issues found",
+            f"{lib['name']}: {flagged} file(s) flagged with possible playback issues. "
+            f"Review the Compatibility tab and start the pipeline to convert them.")
+    elif get_setting("ntfy_on_scan") == "true":
+        send_notification("Compatibility Scan Complete", f"{lib['name']}: no issues found")
 
 
 # ─── Subtitle Generation Scan ────────────────────────────────────────────────
@@ -1248,6 +1495,11 @@ def start_health_check_loop():
     def recovery_loop():
         while True:
             # ── Auto-recovery: fix stuck states ──
+            # v3.8: add_log() must NOT be called inside the `with get_db()`
+            # block — it opens a second connection while this one holds the
+            # write lock, stalling every other writer for the busy-timeout.
+            # Messages are buffered and logged after the transaction.
+            deferred_logs = []
             try:
                 with get_db() as db:
                     # v3.7: reset health checks stuck in 'checking' — either
@@ -1259,14 +1511,14 @@ def start_health_check_loop():
                             db.execute("""UPDATE queue SET health_status='pending',
                                 current_step='Health check retry (previous attempt stalled)' WHERE id=?""", (row["id"],))
                             hc_checking_since.pop(row["id"], None)
-                            add_log(f"Auto-reset stalled health check for job #{row['id']}", level="WARN", job_id=row["id"])
+                            deferred_logs.append((f"Auto-reset stalled health check for job #{row['id']}", "WARN", row["id"]))
                     # Reset libraries stuck in 'scanning' for > 30 minutes
                     stuck_libs = db.execute("""UPDATE libraries SET status='idle'
                         WHERE status='scanning' AND last_scanned IS NOT NULL
                         AND last_scanned < datetime('now','localtime', '-30 minutes')""")
                     if stuck_libs.rowcount > 0:
                         log.warning(f"Auto-reset {stuck_libs.rowcount} stuck library scans")
-                        add_log(f"Auto-reset {stuck_libs.rowcount} stuck library scans (>30min)", level="WARN")
+                        deferred_logs.append((f"Auto-reset {stuck_libs.rowcount} stuck library scans (>30min)", "WARN", None))
 
                     # Also reset libraries stuck with no last_scanned timestamp
                     stuck_libs2 = db.execute("""UPDATE libraries SET status='idle'
@@ -1283,7 +1535,7 @@ def start_health_check_loop():
                         db.execute("UPDATE queue SET status='error', error_message='Stuck — no progress for 2+ hours', completed_at=datetime('now','localtime') WHERE id=?", (sj["id"],))
                         if sj["worker_id"]:
                             db.execute("UPDATE workers SET status='idle', current_job_id=NULL WHERE id=?", (sj["worker_id"],))
-                        add_log(f"Auto-cancelled stuck job #{sj['id']}: {sj['file_name']}", level="WARN", job_id=sj["id"])
+                        deferred_logs.append((f"Auto-cancelled stuck job #{sj['id']}: {sj['file_name']}", "WARN", sj["id"]))
 
                     # Clean up workers with stale heartbeats (> 5 minutes) that show as active
                     db.execute("""UPDATE workers SET status='idle', current_job_id=NULL
@@ -1297,6 +1549,9 @@ def start_health_check_loop():
 
             except Exception as e:
                 log.error(f"Auto-recovery error: {e}")
+
+            for msg, lvl, jid in deferred_logs:
+                add_log(msg, level=lvl, job_id=jid)
 
             time.sleep(5)
 
@@ -1389,6 +1644,23 @@ def api_scan_dv78only_all():
     for lib in libs:
         threading.Thread(target=scan_dv78only_task, args=(lib["id"],), daemon=True).start()
     return jsonify({"ok": True, "message": f"DV7→8 scan started for {len(libs)} libraries"})
+
+@app.route("/api/libraries/<int:lid>/scan-compat", methods=["POST"])
+@login_required
+def api_scan_compat(lid):
+    """Scan a library for playback-compatibility risks. Queues compatfix jobs."""
+    threading.Thread(target=scan_compat_task, args=(lid,), daemon=True).start()
+    return jsonify({"ok": True, "message": "Compatibility scan started"})
+
+@app.route("/api/libraries/scan-compat-all", methods=["POST"])
+@login_required
+def api_scan_compat_all():
+    """Run compatibility scan across all libraries."""
+    with get_db() as db:
+        libs = db.execute("SELECT id FROM libraries").fetchall()
+    for lib in libs:
+        threading.Thread(target=scan_compat_task, args=(lib["id"],), daemon=True).start()
+    return jsonify({"ok": True, "message": f"Compatibility scan started for {len(libs)} libraries"})
 
 @app.route("/api/libraries/<int:lid>/scan-subgen", methods=["POST"])
 @login_required
@@ -1537,12 +1809,13 @@ def api_pause():
     return jsonify({"ok": True})
 
 # v3.4 — per-job-type pipeline controls
-VALID_JOB_TYPES = ("transcode", "subgen", "remuxclean", "dv78only")
+VALID_JOB_TYPES = ("transcode", "subgen", "remuxclean", "dv78only", "compatfix")
 JOB_TYPE_LABELS = {
     "transcode": "Transcode",
     "subgen": "AI Subtitles",
     "remuxclean": "Audio/Track Cleanup",
-    "dv78only": "DV7→8 Only",
+    "dv78only": "DV → P8",
+    "compatfix": "Compatibility",
 }
 
 @app.route("/api/queue/start/<string:jobtype>", methods=["POST"])
@@ -1836,7 +2109,7 @@ def api_next_job():
         if active >= staged_limit: return jsonify({"job": None, "reason": "Staged limit reached"})
 
         # v3.4: only claim jobs whose type's pipeline is enabled
-        all_types = ('transcode', 'subgen', 'remuxclean', 'dv78only')
+        all_types = ('transcode', 'subgen', 'remuxclean', 'dv78only', 'compatfix')
         allowed_types = []
         for jt in all_types:
             if get_setting(f"processing_enabled_{jt}") != "false":
