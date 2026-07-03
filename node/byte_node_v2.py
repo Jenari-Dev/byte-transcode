@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Byte Transcode Node v2.6
+Byte Transcode Node v2.7
 ========================
 v2.5 — Server→Node path translation
 v2.6 — Critical fixes:
@@ -13,6 +13,31 @@ v2.6 — Critical fixes:
           /temp/byte_work (a Linux path that doesn't exist on Windows).
         - Loud WARN log if a tool isn't found, so future config issues
           are visible at startup.
+v2.7 — Multi-node / multi-worker correctness:
+        - Per-job state registry: cancelled flag and subprocess handle are
+          now tracked per job instead of on the shared instance. With
+          transcode_gpu_count > 1, concurrent jobs previously clobbered
+          each other's cancel flags and process handles.
+        - Per-node setting overrides: local overrides (GUI fields / CLI
+          flags) and server-side worker config (worker_config_<id>, edited
+          from the web UI) are merged over global settings, so two nodes
+          with different temp drives and mounts can share one server.
+        - start_workers() (non-blocking) split out of start_all_workers()
+          (blocking); the GUI previously deadlocked calling the blocking
+          variant mid-setup, which was the "stuck on Connecting" bug.
+        - Heartbeat sends real CPU/RAM (psutil) and GPU/VRAM (nvidia-smi)
+          metrics instead of hardcoded zeros.
+        - CLI accepts --nas-prefix/--nas-drive/--temp-dir/--workers, which
+          run_node.bat was already passing (it crashed argparse before).
+        - All text-mode subprocess captures use encoding="utf-8": Windows
+          Python otherwise decodes ffprobe/mkvmerge JSON as cp1252, which
+          raises on non-Latin track titles (e.g. Russian) and made those
+          files silently unprocessable.
+        - DV7→8 Only pipeline actually works now: it previously ran
+          `dovi_tool convert` on an extracted RPU .bin, which dovi_tool
+          rejects ("Invalid input file type" — convert operates on HEVC
+          streams). Now converts the extracted HEVC directly, same as the
+          transcode pipeline's P7→P8 step. 3 steps instead of 5.
 """
 
 import sys, os, time, json, hashlib, shutil, subprocess, threading, signal, re, socket, platform, argparse, random
@@ -25,9 +50,19 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "requests", "-q", "--break-system-packages"])
     import requests
 
+# psutil is optional (heartbeat CPU/RAM metrics) — try to install once, but
+# never block startup on it; heartbeat degrades to zeros without it.
+try:
+    import psutil  # noqa: F401
+except ImportError:
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "psutil", "-q", "--break-system-packages"])
+    except Exception:
+        pass
+
 
 class ByteNode:
-    def __init__(self, server_url, name, gpu, poll_interval=10):
+    def __init__(self, server_url, name, gpu, poll_interval=10, local_overrides=None):
         self.server = server_url.rstrip('/')
         self.name = name
         self.gpu = gpu
@@ -35,9 +70,23 @@ class ByteNode:
         self.worker_id = hashlib.md5(f"{name}-{socket.gethostname()}".encode()).hexdigest()[:12]
         self.host = socket.gethostname()
         self.running = True
-        self.current_process = None  # Track active ffmpeg/mkvmerge subprocess
-        self.current_job_id = None
-        self.cancelled = False
+
+        # v2.7 — per-job state registry (thread-safe multi-worker).
+        # Each concurrently-processing job gets its own cancelled flag and
+        # subprocess handle. Worker threads point at their job via
+        # thread-local storage, so the legacy self.cancelled /
+        # self.current_process accessors keep working unchanged inside
+        # handlers, while helper threads (cancel pollers, watchdogs) look
+        # state up by job_id.
+        self._tls = threading.local()
+        self._jobs_lock = threading.Lock()
+        self._jobs = {}  # job_id -> {"cancelled": bool, "process": Popen|None, "file": str}
+
+        # v2.7 — per-node setting overrides. Local (GUI/CLI) values beat
+        # server-side worker config, which beats global settings.
+        self.local_overrides = dict(local_overrides or {})
+        self._worker_cfg = {}
+        self._worker_cfg_at = 0.0
 
         # v2.2 — lazy-loaded Whisper model state
         self._whisper_model = None
@@ -76,7 +125,7 @@ class ByteNode:
                 self.log(f"  WARN: {tool_name} not found in PATH (fallback: {tool_path!r}). "
                          f"Install it or add its directory to PATH.", "WARN")
 
-        self.log(f"Byte Node v2.6 initialized")
+        self.log(f"Byte Node v2.7 initialized")
         self.log(f"  Worker ID: {self.worker_id}")
         self.log(f"  Server: {self.server}")
         self.log(f"  GPU: {self.gpu}")
@@ -124,9 +173,99 @@ class ByteNode:
         os.makedirs(work_dir, exist_ok=True)
         return work_dir
 
+    # ── v2.7 per-job state plumbing ──────────────────────────────────────────
+    def _job_entry(self, job_id=None):
+        """Registry entry for a job (defaults to this thread's current job)."""
+        if job_id is None:
+            job_id = getattr(self._tls, "job_id", None)
+        if job_id is None:
+            return None
+        with self._jobs_lock:
+            return self._jobs.get(job_id)
+
+    @property
+    def current_job_id(self):
+        return getattr(self._tls, "job_id", None)
+
+    @current_job_id.setter
+    def current_job_id(self, job_id):
+        if job_id is None:
+            old = getattr(self._tls, "job_id", None)
+            if old is not None:
+                with self._jobs_lock:
+                    self._jobs.pop(old, None)
+            self._tls.job_id = None
+        else:
+            self._tls.job_id = job_id
+            with self._jobs_lock:
+                self._jobs.setdefault(job_id, {"cancelled": False, "process": None, "file": ""})
+
+    @property
+    def cancelled(self):
+        st = self._job_entry()
+        return bool(st and st["cancelled"])
+
+    @cancelled.setter
+    def cancelled(self, value):
+        st = self._job_entry()
+        if st is not None:
+            st["cancelled"] = bool(value)
+
+    @property
+    def current_process(self):
+        st = self._job_entry()
+        return st["process"] if st else None
+
+    @current_process.setter
+    def current_process(self, proc):
+        st = self._job_entry()
+        if st is not None:
+            st["process"] = proc
+
+    @property
+    def active_jobs(self):
+        """Snapshot of currently-processing jobs: {job_id: file_name}."""
+        with self._jobs_lock:
+            return {jid: st.get("file", "") for jid, st in self._jobs.items()}
+
+    def _node_overrides(self, force=False):
+        """
+        v2.7 — effective per-node setting overrides, lowest priority first:
+        server-side worker config (worker_config_<id>, editable from the web
+        UI), then local overrides (GUI fields / CLI flags). Worker config is
+        re-fetched at most once every 60s so UI edits apply to the next job
+        without a node restart. Blank values fall through to global settings.
+        """
+        now = time.time()
+        if force or now - self._worker_cfg_at > 60:
+            cfg = self.api("GET", f"/api/workers/{self.worker_id}/config")
+            if isinstance(cfg, dict):
+                self._worker_cfg = cfg
+            self._worker_cfg_at = now
+        merged = {}
+        merged.update(self._worker_cfg)
+        merged.update(self.local_overrides)
+        merged = {k: v for k, v in merged.items() if str(v).strip() != ""}
+        # Normalize the path-prefix pair so translation joins cleanly
+        # ("/media" → "/media/", "Z:" → "Z:\")
+        rp = merged.get("node_path_remote_prefix")
+        if rp and not rp.endswith("/"):
+            merged["node_path_remote_prefix"] = rp + "/"
+        lp = merged.get("node_path_local_prefix")
+        if lp and not (lp.endswith("\\") or lp.endswith("/")):
+            merged["node_path_local_prefix"] = lp + ("\\" if os.sep == "\\" else "/")
+        return merged
+
     def log(self, msg, level="INFO"):
         ts = datetime.now().strftime("%H:%M:%S")
-        print(f"[{ts}] [{level}] {msg}", flush=True)
+        line = f"[{ts}] [{level}] {msg}"
+        try:
+            print(line, flush=True)
+        except UnicodeEncodeError:
+            # Console/pipe encoding can't render a character (e.g. cp1252
+            # stdout with non-Latin file names) — degrade, never crash.
+            enc = getattr(sys.stdout, "encoding", None) or "ascii"
+            print(line.encode(enc, errors="replace").decode(enc), flush=True)
 
     def api(self, method, path, data=None, timeout=30):
         """Make API call to server with error handling."""
@@ -172,13 +311,35 @@ class ByteNode:
         return False
 
     def heartbeat(self):
-        """Send heartbeat to server."""
+        """Send heartbeat to server with live system metrics (v2.7)."""
+        cpu = ram = gpu = vram = 0
+        try:
+            import psutil
+            cpu = round(psutil.cpu_percent(interval=None))
+            ram = round(psutil.virtual_memory().percent)
+        except Exception:
+            pass
+        try:
+            smi = shutil.which("nvidia-smi")
+            if smi:
+                out = subprocess.run(
+                    [smi, "--query-gpu=utilization.gpu,memory.used,memory.total",
+                     "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5).stdout.strip().splitlines()
+                if out:
+                    parts = [p.strip() for p in out[0].split(",")]
+                    if len(parts) >= 3:
+                        gpu = round(float(parts[0]))
+                        total = float(parts[2]) or 1.0
+                        vram = round(float(parts[1]) / total * 100)
+        except Exception:
+            pass
         self.api("POST", "/api/workers/heartbeat", {
             "id": self.worker_id,
-            "cpu": 0,  # TODO: get actual CPU usage
-            "ram": 0,
-            "gpu_usage": 0,
-            "vram": 0,
+            "cpu": cpu,
+            "ram": ram,
+            "gpu_usage": gpu,
+            "vram": vram,
         })
 
     def check_cancel(self, job_id):
@@ -186,11 +347,15 @@ class ByteNode:
         r = self.api("GET", f"/api/jobs/{job_id}/check-cancel")
         if r and r.get("cancel"):
             self.log(f"Job #{job_id} cancelled by user — killing process", "WARN")
-            self.cancelled = True
-            if self.current_process and self.current_process.poll() is None:
+            st = self._job_entry(job_id)
+            proc = None
+            if st is not None:
+                st["cancelled"] = True
+                proc = st.get("process")
+            if proc and proc.poll() is None:
                 try:
-                    self.current_process.kill()
-                    self.log(f"Killed active subprocess (PID {self.current_process.pid})")
+                    proc.kill()
+                    self.log(f"Killed active subprocess (PID {proc.pid})")
                 except:
                     pass
             return True
@@ -215,23 +380,29 @@ class ByteNode:
         self.send_log(job_id, f"[CMD] {description}")
         self.send_log(job_id, f"  $ {' '.join(cmd)}")
 
-        self.cancelled = False
+        # v2.7: don't reset the cancel flag here — a cancel that arrives
+        # between pipeline steps must survive into the next run_cmd call.
+        if self.cancelled:
+            return False, "Cancelled by user"
         start_time = time.time()
 
         try:
-            self.current_process = subprocess.Popen(
+            proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 bufsize=0
             )
+            self.current_process = proc
 
             stderr_lines = []
             last_progress_time = time.time()
 
-            # Cancel polling thread
+            # Cancel polling thread (v2.7: closure-captured proc + explicit
+            # job_id — thread-local state isn't visible from helper threads)
             def cancel_poller():
-                while self.current_process and self.current_process.poll() is None and not self.cancelled:
+                while proc.poll() is None:
                     time.sleep(5)
-                    self.check_cancel(job_id)
+                    if self.check_cancel(job_id):
+                        return
 
             cancel_thread = threading.Thread(target=cancel_poller, daemon=True)
             cancel_thread.start()
@@ -239,7 +410,7 @@ class ByteNode:
             # Read stderr byte-by-byte to handle \r progress lines
             line_buf = b''
             while True:
-                chunk = self.current_process.stderr.read(1)
+                chunk = proc.stderr.read(1)
                 if not chunk:
                     break
                 if chunk in (b'\n', b'\r'):
@@ -295,13 +466,13 @@ class ByteNode:
                         if time.time() - last_progress_time > timeout_minutes * 60:
                             self.log(f"WATCHDOG: No progress for {timeout_minutes} minutes — killing", "ERROR")
                             self.send_log(job_id, "[ERROR] Watchdog timeout: no progress for " + str(timeout_minutes) + " minutes")
-                            self.current_process.kill()
+                            proc.kill()
                             return False, "Watchdog timeout"
                 else:
                     line_buf += chunk
 
-            self.current_process.wait()
-            rc = self.current_process.returncode
+            proc.wait()
+            rc = proc.returncode
             self.current_process = None
 
             if self.cancelled:
@@ -332,12 +503,15 @@ class ByteNode:
         self.log(f"[CMD+WATCHDOG] {description}")
         self.send_log(job_id, f"[CMD+WATCHDOG] {description} (stale timeout: {stale_timeout}s)")
 
-        self.cancelled = False
+        # v2.7: don't reset the cancel flag — see run_cmd
+        if self.cancelled:
+            return False, "Cancelled by user"
 
         try:
-            self.current_process = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace"
             )
+            self.current_process = proc
 
             # Monitor in background
             last_size = -1
@@ -345,10 +519,9 @@ class ByteNode:
 
             def watchdog():
                 nonlocal last_size, last_change_time
-                while self.current_process and self.current_process.poll() is None:
-                    # Check cancel
-                    self.check_cancel(job_id)
-                    if self.cancelled:
+                while proc.poll() is None:
+                    # Check cancel (v2.7: closure proc + explicit job_id)
+                    if self.check_cancel(job_id):
                         return
 
                     # Check output file growth (look for output file in cmd)
@@ -362,7 +535,7 @@ class ByteNode:
                             self.log(f"WATCHDOG: Output stale for {stale_timeout}s — killing mkvmerge", "ERROR")
                             self.send_log(job_id, f"[ERROR] I/O stale for {stale_timeout}s — killing process")
                             try:
-                                self.current_process.kill()
+                                proc.kill()
                             except:
                                 pass
                             return
@@ -371,8 +544,8 @@ class ByteNode:
             wt = threading.Thread(target=watchdog, daemon=True)
             wt.start()
 
-            stdout, stderr = self.current_process.communicate()
-            rc = self.current_process.returncode
+            stdout, stderr = proc.communicate()
+            rc = proc.returncode
             self.current_process = None
 
             if self.cancelled:
@@ -671,7 +844,7 @@ class ByteNode:
         try:
             cmd = [self.ffprobe, "-v", "quiet", "-print_format", "json",
                    "-show_format", "-show_streams", filepath]
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
             if r.returncode != 0:
                 if job_id:
                     self.send_log(job_id, f"[WARN] FFprobe failed on {os.path.basename(filepath)}")
@@ -833,7 +1006,7 @@ class ByteNode:
         # mkvmerge -J for track IDs and language
         try:
             r = subprocess.run([self.mkvmerge, "-J", filepath],
-                               capture_output=True, text=True, timeout=120)
+                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
             if r.returncode != 0 and r.returncode != 1:
                 # mkvmerge returns 1 for warnings but still produces JSON
                 self.send_log(job_id, f"  [WARN] mkvmerge -J returned {r.returncode}")
@@ -966,7 +1139,7 @@ class ByteNode:
         """
         try:
             r = subprocess.run([self.mkvmerge, "-J", output_path],
-                               capture_output=True, text=True, timeout=120)
+                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
             if r.returncode not in (0, 1):
                 self.send_log(job_id, f"  [WARN] mkvmerge -J on output returned {r.returncode}")
                 return {}
@@ -1179,13 +1352,16 @@ class ByteNode:
     def dv78only_convert(self, job, settings):
         """
         Convert DoVi Profile 7 → 8 without re-encoding the video.
-        Pipeline:
+        Pipeline (v2.7 — fixed):
           1. Extract HEVC bitstream (copy, no re-encode)
-          2. Extract RPU
-          3. Convert RPU profile 7→8 (dovi_tool -m 2 convert)
-          4. Inject converted RPU back into the ORIGINAL HEVC stream
-          5. mkvmerge remux: new HEVC + original audio/subs/chapters
-        Result: same quality and roughly the same size, just P8 instead of P7.
+          2. dovi_tool -m 2 convert --discard on the HEVC stream — converts
+             the RPU to profile 8.1 and discards the enhancement layer in
+             one pass. (The previous version ran `convert` on an extracted
+             RPU .bin, which dovi_tool rejects with "Invalid input file
+             type" — `convert` only operates on HEVC streams. Same command
+             the proven transcode pipeline uses in its Step 5.)
+          3. mkvmerge remux: converted HEVC + original audio/subs/chapters
+        Result: same quality, slightly smaller (EL discarded), P8 instead of P7.
         """
         job_id = job["id"]
         filepath = job["file_path"]
@@ -1196,11 +1372,9 @@ class ByteNode:
         work_dir = self._work_dir(job_id, settings)
 
         raw_hevc = os.path.join(work_dir, f"{basename}.hevc")
-        rpu_bin = os.path.join(work_dir, f"{basename}.rpu.bin")
-        rpu_p8 = os.path.join(work_dir, f"{basename}.rpu_p8.bin")
-        injected_hevc = os.path.join(work_dir, f"{basename}_p8.hevc")
+        p8_hevc = os.path.join(work_dir, f"{basename}_p8.hevc")
         output_mkv = os.path.join(work_dir, f"{basename}_p8.mkv")
-        total_steps = 5
+        total_steps = 3
 
         try:
             # Step 1: Extract HEVC bitstream (copy)
@@ -1219,64 +1393,38 @@ class ByteNode:
             raw_size_gb = os.path.getsize(raw_hevc) / (1024**3)
             self.send_log(job_id, f"  Extracted HEVC: {raw_size_gb:.2f} GB")
 
-            # Step 2: Extract RPU
-            step = f"[Step 2/{total_steps}] Extracting DoVi RPU"
-            self.update_progress(job_id, 25, step)
-            self.send_log(job_id, step)
-            ok, err = self.run_cmd([
-                self.dovi_tool, "extract-rpu", "-i", raw_hevc, "-o", rpu_bin
-            ], "Extract RPU", job_id)
-            if not ok:
-                return False, f"RPU extraction failed: {err[:200]}", None, work_dir
-            if not os.path.exists(rpu_bin) or os.path.getsize(rpu_bin) == 0:
-                return False, "RPU extraction produced empty file", None, work_dir
-            self.send_log(job_id, f"  RPU size: {os.path.getsize(rpu_bin)/1024:.1f} KB")
-
-            # Step 3: Convert RPU profile 7→8 (mode 2 = convert to 8.1)
-            step = f"[Step 3/{total_steps}] Converting RPU profile 7→8"
-            self.update_progress(job_id, 45, step)
+            # Step 2: Convert P7 → P8.1 on the HEVC stream (discard EL)
+            step = f"[Step 2/{total_steps}] Converting DoVi P7 → P8 (discard EL)"
+            self.update_progress(job_id, 35, step)
             self.send_log(job_id, step)
             ok, err = self.run_cmd([
                 self.dovi_tool, "-m", "2", "convert", "--discard",
-                "-i", rpu_bin, "-o", rpu_p8
-            ], "Convert RPU 7→8", job_id)
+                "-i", raw_hevc, "-o", p8_hevc
+            ], "P7→P8 Convert", job_id)
             if not ok:
-                return False, f"RPU 7→8 convert failed: {err[:200]}", None, work_dir
-            if not os.path.exists(rpu_p8) or os.path.getsize(rpu_p8) == 0:
-                return False, "RPU conversion produced empty file", None, work_dir
+                return False, f"P7→P8 convert failed: {err[:200]}", None, work_dir
+            if not os.path.exists(p8_hevc) or os.path.getsize(p8_hevc) < 1024:
+                return False, "P7→P8 conversion produced empty file", None, work_dir
 
-            # Step 4: Inject converted RPU back into the ORIGINAL HEVC
-            step = f"[Step 4/{total_steps}] Injecting P8 RPU into original HEVC"
-            self.update_progress(job_id, 60, step)
-            self.send_log(job_id, step)
-            ok, err = self.run_cmd([
-                self.dovi_tool, "inject-rpu",
-                "-i", raw_hevc, "--rpu-in", rpu_p8, "-o", injected_hevc
-            ], "Inject P8 RPU", job_id)
-            if not ok:
-                return False, f"RPU injection failed: {err[:200]}", None, work_dir
-
-            # Free disk: delete intermediates we don't need anymore
+            # Free disk: original extracted stream no longer needed
             try:
                 os.remove(raw_hevc)
-                os.remove(rpu_bin)
-                os.remove(rpu_p8)
             except Exception:
                 pass
 
-            # Step 5: mkvmerge remux — new HEVC + original audio/subs/chapters
-            step = f"[Step 5/{total_steps}] mkvmerge Remux (HEVC + audio/subs/chapters)"
-            self.update_progress(job_id, 80, step)
+            # Step 3: mkvmerge remux — new HEVC + original audio/subs/chapters
+            step = f"[Step 3/{total_steps}] mkvmerge Remux (HEVC + audio/subs/chapters)"
+            self.update_progress(job_id, 70, step)
             self.send_log(job_id, step)
             ok, err = self.run_cmd_with_watchdog([
                 self.mkvmerge, "-o", output_mkv,
-                injected_hevc, "--no-video", filepath
+                p8_hevc, "--no-video", filepath
             ], "mkvmerge Remux", job_id, stale_timeout=300)
             if not ok:
                 return False, f"mkvmerge failed: {err[:200]}", None, work_dir
-            if os.path.exists(injected_hevc):
+            if os.path.exists(p8_hevc):
                 try:
-                    os.remove(injected_hevc)
+                    os.remove(p8_hevc)
                 except Exception:
                     pass
 
@@ -1885,9 +2033,16 @@ class ByteNode:
     def process_job(self, job_data):
         """Process a single job. Dispatches based on job_type."""
         job = job_data["job"]
-        settings = job.get("settings", {})
+        settings = dict(job.get("settings", {}))
         job_id = job["id"]
         filename = job["file_name"]
+
+        # v2.7 — apply per-node overrides (GUI/CLI + server worker config)
+        # over the global settings snapshot the server sent with the job.
+        overrides = self._node_overrides()
+        if overrides:
+            settings.update(overrides)
+            job["settings"] = settings
 
         # v2.5 — translate server path → node-local before any handler runs
         server_path = job["file_path"]
@@ -1903,6 +2058,9 @@ class ByteNode:
         video_codec = job.get("video_codec", "")
         self.current_job_id = job_id
         self.cancelled = False
+        st = self._job_entry(job_id)
+        if st is not None:
+            st["file"] = filename
 
         self.log(f"Processing job #{job_id} [{job_type}]: {filename}")
         self.send_log(job_id, f"Job #{job_id} started: {filename}")
@@ -2055,26 +2213,28 @@ class ByteNode:
 
             time.sleep(self.poll_interval)
 
-    # ─── Multi-worker launcher (called by byte_node_gui.py) ──────────────────
-    def start_all_workers(self):
+    # ─── Multi-worker launcher ────────────────────────────────────────────────
+    def start_workers(self):
         """
-        Start all worker threads based on counts in server settings.
-        Reads `transcode_gpu_count` and `healthcheck_gpu_count` and spawns
-        that many transcode + health-check worker threads (plus a heartbeat
-        thread). Used by byte_node_gui.py.
+        v2.7 — register and spawn all worker threads, then RETURN (non-
+        blocking). Used by byte_node_gui.py, which runs its own supervision
+        loop; the old blocking start_all_workers() deadlocked the GUI's
+        engine thread mid-setup (the "stuck on Connecting" bug).
+        Returns True on success, False if registration failed.
         """
         if not self.register():
             self.log("Cannot start without server connection", "ERROR")
             self.connected = False
             self.is_connected = False
             self.registered = False
-            return
+            return False
 
         # v2.4 — flip status flags so GUI updates "Connecting" → "Connected"
         self.connected = True
         self.is_connected = True
         self.registered = True
         self.is_running = True
+        self.running = True
 
         # Heartbeat thread
         def hb_loop():
@@ -2087,8 +2247,9 @@ class ByteNode:
         threading.Thread(target=hb_loop, daemon=True, name="heartbeat").start()
         self.log(f"Heartbeat thread started (every 15s)")
 
-        # Read worker counts from server settings (with safe fallbacks)
+        # Read worker counts: global server settings + per-node overrides
         settings = self.api("GET", "/api/settings") or {}
+        settings.update(self._node_overrides(force=True))
         try:
             n_tw = int(settings.get("transcode_gpu_count", "1") or "1")
         except (TypeError, ValueError):
@@ -2101,6 +2262,9 @@ class ByteNode:
             n_hc = 0
 
         self.log(f"Worker counts: {n_tw} transcode GPU, {n_hc} health check GPU")
+        self.log(f"Temp path: {settings.get('node_temp_path') or settings.get('temp_path') or '(auto)'}")
+        self.log(f"Path mapping: {settings.get('node_path_remote_prefix', '/media/')} -> "
+                 f"{settings.get('node_path_local_prefix', '(none)')}")
 
         # Health check workers — server runs the actual HC loop, so these
         # just idle-poll. They're here for log-format compatibility with the
@@ -2118,8 +2282,16 @@ class ByteNode:
             threading.Thread(target=self._tw_worker_loop, args=(i,),
                              daemon=True, name=f"tw-{i}").start()
             self.log(f"Transcode worker #{i} started")
+        return True
 
-        # Block on the running flag so daemon threads stay alive
+    def start_all_workers(self):
+        """
+        Blocking wrapper around start_workers() for CLI use — keeps the
+        process alive while daemon worker threads run. (Kept under the old
+        name for backwards compatibility with older GUI versions.)
+        """
+        if not self.start_workers():
+            return
         try:
             while self.running:
                 time.sleep(1)
@@ -2157,15 +2329,15 @@ class ByteNode:
         """
         Health check worker idle loop. The server has its own HC loop
         (start_health_check_loop) so node-side HC is a no-op for now.
-        Logs once every 30s for log-format compatibility.
+        Logs once every 5 minutes (v2.7: was every 30s — pure log spam).
         """
         while self.running:
             try:
-                self.log(f"HC#{worker_idx}: no job — No pending health checks")
+                self.log(f"HC#{worker_idx}: idle — server handles health checks")
             except Exception:
                 pass
             # Sleep in 1-second slices so shutdown is responsive
-            for _ in range(30):
+            for _ in range(300):
                 if not self.running:
                     return
                 time.sleep(1)
@@ -2177,9 +2349,25 @@ def main():
     parser.add_argument("--name", default="ByteNode", help="Node name")
     parser.add_argument("--gpu", default="GPU", help="GPU name")
     parser.add_argument("--poll", type=int, default=10, help="Poll interval in seconds")
+    # v2.7 — per-node overrides (run_node.bat was already passing these;
+    # argparse previously rejected them with "unrecognized arguments")
+    parser.add_argument("--nas-prefix", default="", help="Server path prefix to translate (e.g. /media)")
+    parser.add_argument("--nas-drive", default="", help="Local path the prefix maps to (e.g. Z:)")
+    parser.add_argument("--temp-dir", default="", help="Local temp/work directory for jobs")
+    parser.add_argument("--workers", type=int, default=0, help="Transcode worker threads (overrides server setting)")
     args = parser.parse_args()
 
-    node = ByteNode(args.server, args.name, args.gpu, args.poll)
+    overrides = {}
+    if args.nas_prefix:
+        overrides["node_path_remote_prefix"] = args.nas_prefix
+    if args.nas_drive:
+        overrides["node_path_local_prefix"] = args.nas_drive
+    if args.temp_dir:
+        overrides["node_temp_path"] = args.temp_dir
+    if args.workers > 0:
+        overrides["transcode_gpu_count"] = str(args.workers)
+
+    node = ByteNode(args.server, args.name, args.gpu, args.poll, local_overrides=overrides)
 
     def shutdown(sig, frame):
         print("\nShutting down...")
@@ -2187,7 +2375,7 @@ def main():
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 
-    node.run()
+    node.start_all_workers()
 
 
 if __name__ == "__main__":

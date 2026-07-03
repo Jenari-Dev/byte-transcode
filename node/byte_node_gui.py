@@ -99,6 +99,7 @@ class NodeEngine(threading.Thread):
         self.connected = False
         self.status = "Stopped"
         self.current_job = None
+        self.node = None
         self._stop_event = threading.Event()
 
     def log(self, msg, level="INFO"):
@@ -107,12 +108,20 @@ class NodeEngine(threading.Thread):
 
     def stop(self):
         self._stop_event.set()
+        # Flip the node's flag right away so worker threads stop claiming
+        # jobs even before the supervision loop notices the stop event.
+        if self.node is not None:
+            self.node.running = False
         self.running = False
 
     def run(self):
         self.running = True
         self.status = "Starting..."
         self.log("Node engine starting...")
+
+        # Make bundled tools (tools\) visible to the node and its subprocesses
+        if os.path.isdir(TOOLS_DIR) and TOOLS_DIR not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = TOOLS_DIR + os.pathsep + os.environ.get("PATH", "")
 
         # Import and configure the node
         try:
@@ -130,32 +139,42 @@ class NodeEngine(threading.Thread):
             return
 
         cfg = self.config
+
+        # v2.7 — GUI fields become real per-node overrides. The node merges
+        # these over server settings for every job, so this machine's temp
+        # drive and path mapping win even when another node uses different
+        # ones.
+        overrides = {}
+        if cfg.get("path_from"):
+            overrides["node_path_remote_prefix"] = cfg["path_from"]
+        if cfg.get("path_to"):
+            overrides["node_path_local_prefix"] = cfg["path_to"]
+        if cfg.get("temp_dir"):
+            overrides["node_temp_path"] = cfg["temp_dir"]
+            try:
+                os.makedirs(cfg["temp_dir"], exist_ok=True)
+            except Exception as e:
+                self.log(f"Cannot create temp dir {cfg['temp_dir']}: {e}", "ERROR")
+
         try:
             node = ByteNode(
                 server_url=cfg["server_url"],
                 name=cfg["node_name"],
                 gpu=cfg["gpu"],
-                poll_interval=cfg["poll_interval"]
+                poll_interval=cfg["poll_interval"],
+                local_overrides=overrides,
             )
         except Exception as e:
             self.log(f"Failed to create node: {e}", "ERROR")
             self.status = "Error"
             self.running = False
             return
+        self.node = node
 
-        # Configure native Windows mode
-        if cfg.get("path_to"):
-            node.native_mode = True
-            node.nas_drive = cfg["path_to"].rstrip("\\").rstrip("/")
-            node.nas_prefix = cfg.get("path_from", "/media")
-            self.log(f"Path translator: {node.nas_prefix} → {node.nas_drive}\\")
-
-        if cfg.get("temp_dir"):
-            node.temp_base = cfg["temp_dir"]
-            os.makedirs(node.temp_base, exist_ok=True)
-            self.log(f"Temp dir: {node.temp_base}")
-
-        node.start_all_workers()   # ← Move here, one indent level back
+        if overrides.get("node_path_local_prefix"):
+            self.log(f"Path translator: {overrides.get('node_path_remote_prefix', '/media')} → {overrides['node_path_local_prefix']}")
+        if overrides.get("node_temp_path"):
+            self.log(f"Temp dir: {overrides['node_temp_path']}")
 
         # Override tool paths if configured
         if cfg.get("ffmpeg_path"):
@@ -180,53 +199,60 @@ class NodeEngine(threading.Thread):
         self.log(f"dovi_tool: {node.dovi_tool}")
         self.log(f"mkvmerge:  {node.mkvmerge}")
 
-        # Redirect node's log output to our queue
+        # Redirect node's log output to our queue (before registration so
+        # connection logs are visible in the GUI)
         original_log = node.log
         def gui_log(msg, level="INFO"):
             original_log(msg, level)
             self.log_queue.put(f"[{time.strftime('%H:%M:%S')}] [{level}] {msg}")
         node.log = gui_log
 
-        # Register
-        if not node.register():
-            self.log("Failed to connect to server!", "ERROR")
+        # Register + spawn workers (non-blocking), retrying until Stop
+        while not self._stop_event.is_set():
+            if node.start_workers():
+                break
             self.status = "Disconnected"
             self.connected = False
-            # Retry loop
-            while not self._stop_event.is_set():
-                time.sleep(10)
-                self.log("Retrying connection...")
-                if node.register():
+            self.log("Failed to connect to server — retrying in 10s...", "WARN")
+            for _ in range(20):
+                if self._stop_event.is_set():
                     break
-            if self._stop_event.is_set():
-                self.running = False
-                return
+                time.sleep(0.5)
+        if self._stop_event.is_set():
+            node.running = False
+            self.status = "Stopped"
+            self.running = False
+            return
 
         self.connected = True
         self.status = "Idle"
         self.log(f"Connected to {cfg['server_url']}")
 
-        # Heartbeat thread
-        def hb():
-            while not self._stop_event.is_set():
-                node.heartbeat()
-                time.sleep(15)
-        threading.Thread(target=hb, daemon=True).start()
-
-        # Main loop — TW threads handle job polling, GUI just stays alive
+        # Supervision loop — worker threads poll for jobs; here we just
+        # mirror node state into the GUI until Stop is pressed.
         while not self._stop_event.is_set():
+            try:
+                jobs = node.active_jobs
+                if jobs:
+                    names = [n for n in jobs.values() if n]
+                    self.current_job = f"{len(jobs)} job(s): " + ", ".join(names[:2]) if names else f"{len(jobs)} job(s)"
+                    self.status = "Processing"
+                else:
+                    self.current_job = None
+                    self.status = "Idle"
+            except Exception:
+                pass
             time.sleep(1)
 
-            # Wait with check for stop
-            for _ in range(cfg["poll_interval"] * 2):
-                if self._stop_event.is_set():
-                    break
-                time.sleep(0.5)
-
+        # Stop: flip the node's running flag so all worker/heartbeat threads
+        # exit their loops. A job already mid-transcode finishes its current
+        # subprocess; no new jobs are claimed.
+        node.running = False
+        self.current_job = None
         self.status = "Stopped"
         self.connected = False
         self.running = False
-        self.log("Node engine stopped.")
+        self.log("Node engine stopped. (Active jobs finish their current step; no new jobs will be claimed.)")
 
 
 # ─── GUI Application ────────────────────────────────────────────────────────
@@ -267,7 +293,7 @@ class ByteNodeGUI:
         title_frame.pack(side="left")
         tk.Label(title_frame, text="Byte Transcode Node", font=("Segoe UI", 18, "bold"),
                  fg=C["accent"], bg=C["bg"]).pack(side="left")
-        tk.Label(title_frame, text="  v2.0", font=("Segoe UI", 10),
+        tk.Label(title_frame, text="  v2.7", font=("Segoe UI", 10),
                  fg=C["text2"], bg=C["bg"]).pack(side="left", pady=(6, 0))
 
         # Exit button
@@ -494,9 +520,10 @@ class ByteNodeGUI:
             "path_to": self.f_path_to.get().strip(),
             "temp_dir": self.f_temp.get().strip(),
             "ffmpeg_path": self.f_ffmpeg.get().strip(),
+            "ffprobe_path": self.config.get("ffprobe_path", ""),
             "dovi_tool_path": self.f_dovi.get().strip(),
             "mkvmerge_path": self.f_mkvmerge.get().strip(),
-            "start_paused": False,
+            "start_paused": self.config.get("start_paused", False),
         }
 
     def _save_config(self):

@@ -87,7 +87,7 @@ function Login({onAuth,setup}){
     return <div style={{minHeight:'100vh',background:T.bg,display:'flex',alignItems:'center',justifyContent:'center'}}>
         <div style={{background:T.sb,borderRadius:14,padding:'44px 40px',border:`1px solid ${T.bd}`,width:380,textAlign:'center'}}>
             <div style={{fontSize:36,fontWeight:800,color:T.ac,letterSpacing:'-1px',lineHeight:1,marginBottom:4}}>BYTE</div>
-            <div style={{fontSize:11,color:T.t2,letterSpacing:'3px',fontWeight:600,marginBottom:36}}>TRANSCODE v3.4</div>
+            <div style={{fontSize:11,color:T.t2,letterSpacing:'3px',fontWeight:600,marginBottom:36}}>TRANSCODE v3.7</div>
             {setup&&<div style={{fontSize:13,color:T.ac,marginBottom:16,padding:'10px 14px',background:`${T.ac}15`,borderRadius:8}}>First time — create your admin account</div>}
             {e&&<div style={{fontSize:13,color:T.er,marginBottom:14}}>{e}</div>}
             <input value={u} onChange={ev=>setU(ev.target.value)} placeholder="Username" style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'12px 16px',color:T.tx,fontSize:14,marginBottom:12}}/>
@@ -206,6 +206,8 @@ function App(){
     const[hdrF,setHdrF]=useState('all');const[libF,setLibF]=useState('all');const[qTypeT,setQTypeT]=useState('transcode');
     const[settingsTab,setSettingsTab]=useState('transcode');
     const[newLib,setNewLib]=useState({name:'',path:''});const[xWorker,setXWorker]=useState(null);
+    const[nodeCfg,setNodeCfg]=useState(null);
+    useEffect(()=>{setNodeCfg(null);if(xWorker){fetch('/api/workers/'+xWorker+'/config',{credentials:'include'}).then(r=>r.ok?r.json():{}).then(c=>setNodeCfg(c||{})).catch(()=>setNodeCfg({}));}},[xWorker]);
     const[lSettings,setLS]=useState(null);const[selFile,setSelFile]=useState(null);const[skipGb,setSkipGb]=useState('');
     const[page,setPage]=useState(1);const[perPage,setPerPage]=useState(100);
     const[showPaths,setShowPaths]=useState(false);const[colFilter,setColFilter]=useState({lib:'',file:'',codec:'',res:'',size:''});
@@ -272,7 +274,7 @@ function App(){
         <nav style={{width:218,background:T.sb,borderRight:`1px solid ${T.bd}`,display:'flex',flexDirection:'column',position:'sticky',top:0,height:'100vh',flexShrink:0}}>
             <div style={{padding:'22px 18px',borderBottom:`1px solid ${T.bd}`}}>
                 <div style={{fontSize:24,fontWeight:800,color:T.ac,letterSpacing:'-0.5px',lineHeight:1}}>BYTE</div>
-                <div style={{fontSize:10,color:T.t2,letterSpacing:'2.5px',fontWeight:600,marginTop:4}}>TRANSCODE v3.6</div>
+                <div style={{fontSize:10,color:T.t2,letterSpacing:'2.5px',fontWeight:600,marginTop:4}}>TRANSCODE v3.7</div>
             </div>
             <div style={{padding:10,flex:1,overflowY:'auto'}}>
                 {/* Main */}
@@ -452,44 +454,28 @@ function App(){
                                 </div>)}
                         </div>
                         {stale&&<div style={{marginTop:10,padding:'8px 12px',background:`${T.wn}10`,borderRadius:6,border:`1px solid ${T.wn}30`,fontSize:12,color:T.wn,display:'flex',alignItems:'center',gap:5}}><I n="alert" s={13} c={T.wn}/> Heartbeat stale — node may be disconnected</div>}
-                        {/* Node Config Panel */}
+                        {/* Per-Node Overrides (v3.7) — stored as worker_config_<id>, read by the node */}
                         <div style={{marginTop:12,background:T.bg,borderRadius:8,padding:'12px 14px',border:`1px solid ${T.bd}`}}>
-                            <div style={{fontSize:11,fontWeight:600,color:T.t3,marginBottom:8}}>Node Configuration</div>
-                            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'8px 16px',fontSize:12}}>
-                                <div style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
-                                    <span style={{color:T.t3}}>Allow GPU workers to do CPU tasks</span>
-                                    <Tog on={true} onTog={()=>{}} T={T}/>
-                                </div>
-                                <div style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
-                                    <span style={{color:T.t3}}>Move failed to Error tab</span>
-                                    <Tog on={true} onTog={()=>{}} T={T}/>
-                                </div>
-                                <div style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
-                                    <span style={{color:T.t3}}>FFmpeg process priority</span>
-                                    <select style={{background:T.card,border:`1px solid ${T.bd}`,borderRadius:4,padding:'3px 8px',color:T.t3,fontSize:11,cursor:'pointer'}}>
-                                        <option value="normal">normal</option><option value="low">low</option><option value="high">high</option>
-                                    </select>
-                                </div>
-                                <div style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
-                                    <span style={{color:T.t3}}>GPU worker limit</span>
-                                    <input className="mono" type="number" defaultValue={100} style={{width:55,background:T.card,border:`1px solid ${T.bd}`,borderRadius:4,padding:'3px 8px',color:T.tx,fontSize:11,outline:'none'}}/>
-                                </div>
-                            </div>
-                            {/* Libraries this node processes */}
-                            <div style={{marginTop:10}}>
-                                <div style={{fontSize:10,color:T.t2,fontWeight:600,marginBottom:4}}>LIBRARIES TO PROCESS</div>
-                                <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
-                                    {(libs||[]).map(lib=><label key={lib.id} style={{display:'flex',alignItems:'center',gap:4,fontSize:12,color:T.t3,cursor:'pointer'}}>
-                                        <input type="checkbox" defaultChecked={true} style={{accentColor:T.ac}}/> {lib.name}
-                                    </label>)}
-                                </div>
-                            </div>
+                            <div style={{fontSize:11,fontWeight:600,color:T.t3,marginBottom:4}}>Per-Node Overrides</div>
+                            <div style={{fontSize:11,color:T.t2,marginBottom:10}}>Blank fields use global Settings. The node picks up changes within ~60s — no restart needed. Values set locally on the node (GUI fields / CLI flags) take priority over these.</div>
+                            {nodeCfg===null?<div style={{fontSize:12,color:T.t2}}>Loading…</div>:
+                            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'8px 16px'}}>
+                                {[['Temp directory','node_temp_path','e.g. C:\\Byte_temp'],
+                                  ['Remote path prefix','node_path_remote_prefix','e.g. /media/'],
+                                  ['Local path prefix','node_path_local_prefix','e.g. Z:\\'],
+                                  ['Transcode workers','transcode_gpu_count','e.g. 1'],
+                                  ['Health check workers','healthcheck_gpu_count','e.g. 0']].map(([label,key,ph])=>
+                                    <div key={key}>
+                                        <div style={{fontSize:10,color:T.t2,fontWeight:600,marginBottom:3,textTransform:'uppercase'}}>{label}</div>
+                                        <input className="mono" value={nodeCfg[key]||''} placeholder={ph} onClick={e=>e.stopPropagation()} onChange={e=>setNodeCfg(c=>({...c,[key]:e.target.value}))} style={{width:'100%',background:T.card,border:`1px solid ${T.bd}`,borderRadius:5,padding:'6px 10px',color:T.tx,fontSize:12,outline:'none'}}/>
+                                    </div>)}
+                            </div>}
                         </div>
-                        {/* Copy / Export / Restart buttons */}
+                        {/* Save / Copy / Export buttons */}
                         <div style={{display:'flex',gap:6,marginTop:10}}>
-                            <button onClick={e=>{e.stopPropagation();copyText(JSON.stringify({id:w.id,name:w.name,gpu:w.gpu,host:w.host,status:w.status},null,2));toast('Node config copied','success')}} style={{background:T.card,border:`1px solid ${T.bd}`,borderRadius:6,padding:'6px 12px',cursor:'pointer',color:T.t3,fontSize:11,fontWeight:600,display:'flex',alignItems:'center',gap:4}}><I n="copy" s={12}/> Copy Config</button>
-                            <button onClick={e=>{e.stopPropagation();const blob=new Blob([JSON.stringify({id:w.id,name:w.name,gpu:w.gpu,host:w.host,config:lSettings},null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='node-'+w.name+'.json';a.click();toast('Exported','success')}} style={{background:T.card,border:`1px solid ${T.bd}`,borderRadius:6,padding:'6px 12px',cursor:'pointer',color:T.t3,fontSize:11,fontWeight:600,display:'flex',alignItems:'center',gap:4}}><I n="download" s={12}/> Export</button>
-                            <button style={{background:`${T.wn}12`,border:`1px solid ${T.wn}33`,borderRadius:6,padding:'6px 12px',cursor:'pointer',color:T.wn,fontSize:11,fontWeight:600,display:'flex',alignItems:'center',gap:4}}><I n="refresh" s={12}/> Restart</button>
+                            <button onClick={async e=>{e.stopPropagation();const clean=Object.fromEntries(Object.entries(nodeCfg||{}).filter(([k,v])=>String(v).trim()!==''));await post('/workers/'+w.id+'/config',clean);setNodeCfg(clean);toast('Node config saved — applies within ~60s','success');}} style={{background:`${T.ac}15`,border:`1px solid ${T.ac}44`,borderRadius:6,padding:'6px 12px',cursor:'pointer',color:T.ac,fontSize:11,fontWeight:600,display:'flex',alignItems:'center',gap:4}}><I n="check" s={12}/> Save Node Config</button>
+                            <button onClick={e=>{e.stopPropagation();copyText(JSON.stringify({id:w.id,name:w.name,gpu:w.gpu,host:w.host,status:w.status,overrides:nodeCfg||{}},null,2));toast('Node config copied','success')}} style={{background:T.card,border:`1px solid ${T.bd}`,borderRadius:6,padding:'6px 12px',cursor:'pointer',color:T.t3,fontSize:11,fontWeight:600,display:'flex',alignItems:'center',gap:4}}><I n="copy" s={12}/> Copy Config</button>
+                            <button onClick={e=>{e.stopPropagation();const blob=new Blob([JSON.stringify({id:w.id,name:w.name,gpu:w.gpu,host:w.host,overrides:nodeCfg||{},config:lSettings},null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='node-'+w.name+'.json';a.click();toast('Exported','success')}} style={{background:T.card,border:`1px solid ${T.bd}`,borderRadius:6,padding:'6px 12px',cursor:'pointer',color:T.t3,fontSize:11,fontWeight:600,display:'flex',alignItems:'center',gap:4}}><I n="download" s={12}/> Export</button>
                         </div>
                     </div>}
                 </div>;})}

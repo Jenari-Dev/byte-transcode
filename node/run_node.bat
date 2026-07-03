@@ -1,13 +1,13 @@
 @echo off
 echo ========================================
-echo  Byte Transcode Node — Native Windows
+echo  Byte Transcode Node - Native Windows
 echo ========================================
 echo.
 
 set TOOLS_DIR=%~dp0tools
 set PATH=%TOOLS_DIR%;%PATH%
 
-python "%~dp0byte_node_v2.py" ^
+py "%~dp0byte_node_v2.py" ^
     --server http://192.168.3.13:5800 ^
     --name DoVi-5080 ^
     --gpu "RTX 5080" ^

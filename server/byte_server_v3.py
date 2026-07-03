@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
 """
-Byte Transcode Server v3.6
+Byte Transcode Server v3.7
 ==========================
 v3.5 — path mapping (server→node) settings + SubGen 'show all'
 v3.6 — adds node_temp_path setting (Windows nodes need F:\\Byte_Engine_temp,
        not the Linux /temp/byte_work). Defaults remain empty so node auto-detects.
+v3.7 — dual-node support: per-node overrides (worker_config_<id>) are now
+       editable from the web UI worker cards and honored by node v2.7+
+       (temp path, path mapping, worker counts per node). /api/server/overview
+       reports the real server version instead of a hardcoded "3.0.0".
+       The API key from Settings → API is now honored (X-API-Key header).
+       All text-mode subprocess captures use encoding="utf-8" so scans no
+       longer silently skip files with non-Latin track titles when the
+       server runs on a non-UTF-8 locale (e.g. Windows).
 
 Run: python3 byte_server.py --port 5800
 """
@@ -14,6 +22,7 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 from flask import Flask, request, jsonify, send_from_directory, Response, session, redirect
 
+SERVER_VERSION = "3.7"
 DEFAULT_PORT = 5800
 DB_PATH = os.environ.get("BYTE_DB_PATH", "/config/byte_transcode.db")
 LOG_DIR = os.environ.get("BYTE_LOG_DIR", "/config/logs")
@@ -39,7 +48,11 @@ scan_progress = {}  # library_id -> {total, scanned, current_file, eta, status}
 def get_db():
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
+    # busy_timeout is set both via connect(timeout=) and the pragma —
+    # some sqlite3 builds only honor one of them for lock waits (v3.7)
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
     try:
         yield conn
@@ -319,6 +332,11 @@ def login_required(f):
         if not auth_hash:  # No password set = no auth required
             return f(*args, **kwargs)
         if not session.get("authenticated"):
+            # v3.7: the API key generated in Settings → API is now actually
+            # honored (it was generated but never checked before)
+            api_key = get_setting("api_key")
+            if api_key and request.headers.get("X-API-Key") == api_key:
+                return f(*args, **kwargs)
             if request.path.startswith("/api/workers") or request.path.startswith("/api/jobs"):
                 # Node API calls use worker auth, not session
                 return f(*args, **kwargs)
@@ -390,7 +408,7 @@ FFPROBE = find_ffprobe()
 def probe_file(path):
     cmd = [FFPROBE, "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", path]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
         if r.returncode != 0: return None
         data = json.loads(r.stdout)
     except subprocess.TimeoutExpired:
@@ -698,7 +716,7 @@ def scan_remuxclean_task(library_id):
             try:
                 cmd = [FFPROBE, "-v", "quiet", "-print_format", "json",
                        "-show_format", "-show_streams", filepath]
-                r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
                 if r.returncode == 0:
                     probe_json = json.loads(r.stdout)
             except Exception as e:
@@ -852,7 +870,7 @@ def scan_dv78only_task(library_id):
             try:
                 cmd = [FFPROBE, "-v", "quiet", "-print_format", "json",
                        "-show_format", "-show_streams", filepath]
-                r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
                 if r.returncode == 0:
                     probe_json = json.loads(r.stdout)
             except Exception as e:
@@ -1013,7 +1031,7 @@ def scan_subgen_task(library_id):
             try:
                 cmd = [FFPROBE, "-v", "quiet", "-print_format", "json",
                        "-show_format", "-show_streams", filepath]
-                r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
                 if r.returncode == 0:
                     probe_json = json.loads(r.stdout)
             except Exception as e:
@@ -1134,6 +1152,7 @@ def health_check_task():
         error = None
 
         # Mark as checking
+        hc_checking_since[job_id] = time.time()
         with get_db() as db:
             db.execute("UPDATE queue SET health_status='checking', current_step='Health check starting...' WHERE id=?", (job_id,))
 
@@ -1171,7 +1190,7 @@ def health_check_task():
                     with get_db() as db:
                         db.execute("UPDATE queue SET current_step='Health check: FFprobe validation...' WHERE id=?", (job_id,))
                     cmd = [FFPROBE, "-v", "error", "-show_entries", "format=duration,size,nb_streams", "-of", "json", path]
-                    r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
                     if r.returncode != 0:
                         status = "corrupt"
                         error = f"FFprobe failed: {r.stderr[:200] if r.stderr else 'Unknown error'}"
@@ -1206,6 +1225,13 @@ def health_check_task():
                 db.execute("UPDATE queue SET health_status=?, status='error', error_message=?, current_step='Health check failed' WHERE id=?",
                            (status, error, job_id))
                 add_log(f"[Health Check] FAILED: {filename} — {error}", level="ERROR", source="healthcheck", job_id=job_id)
+        hc_checking_since.pop(job_id, None)
+
+# v3.7 — when the HC thread marked each job 'checking' (monotonic time).
+# Auto-recovery uses this to re-queue checks orphaned by a server restart
+# or a hung probe: unknown or >10-minute-old 'checking' states go back to
+# 'pending'.
+hc_checking_since = {}
 
 def start_health_check_loop():
     def loop():
@@ -1214,10 +1240,26 @@ def start_health_check_loop():
                 health_check_task()
             except Exception as e:
                 log.error(f"Health check error: {e}")
+            time.sleep(5)
 
+    # v3.7 — auto-recovery runs in its OWN thread. It used to share the HC
+    # loop, so a single hung health check (e.g. a stuck probe subprocess)
+    # silently disabled all stuck-state recovery as collateral damage.
+    def recovery_loop():
+        while True:
             # ── Auto-recovery: fix stuck states ──
             try:
                 with get_db() as db:
+                    # v3.7: reset health checks stuck in 'checking' — either
+                    # older than 10 minutes or orphaned by a restart
+                    now = time.time()
+                    for row in db.execute("SELECT id FROM queue WHERE health_status='checking'").fetchall():
+                        t0 = hc_checking_since.get(row["id"])
+                        if t0 is None or now - t0 > 600:
+                            db.execute("""UPDATE queue SET health_status='pending',
+                                current_step='Health check retry (previous attempt stalled)' WHERE id=?""", (row["id"],))
+                            hc_checking_since.pop(row["id"], None)
+                            add_log(f"Auto-reset stalled health check for job #{row['id']}", level="WARN", job_id=row["id"])
                     # Reset libraries stuck in 'scanning' for > 30 minutes
                     stuck_libs = db.execute("""UPDATE libraries SET status='idle'
                         WHERE status='scanning' AND last_scanned IS NOT NULL
@@ -1257,8 +1299,9 @@ def start_health_check_loop():
                 log.error(f"Auto-recovery error: {e}")
 
             time.sleep(5)
-    t = threading.Thread(target=loop, daemon=True)
-    t.start()
+
+    threading.Thread(target=loop, daemon=True, name="health-check").start()
+    threading.Thread(target=recovery_loop, daemon=True, name="auto-recovery").start()
 
 
 # ─── API Routes ──────────────────────────────────────────────────────────────
@@ -1268,7 +1311,7 @@ def api_status():
     with get_db() as db:
         qs = db.execute("SELECT status, COUNT(*) as c, COALESCE(SUM(file_size_gb),0) as gb FROM queue GROUP BY status").fetchall()
         wc = db.execute("SELECT COUNT(*) as c FROM workers WHERE last_heartbeat > datetime('now','localtime','-60 seconds')").fetchone()["c"]
-    return jsonify({"status": "running", "queue": {s["status"]: {"count": s["c"], "total_gb": s["gb"]} for s in qs}, "active_workers": wc, "version": "3.0.0"})
+    return jsonify({"status": "running", "queue": {s["status"]: {"count": s["c"], "total_gb": s["gb"]} for s in qs}, "active_workers": wc, "version": SERVER_VERSION})
 
 # Libraries
 @app.route("/api/libraries", methods=["GET"])
@@ -1447,7 +1490,10 @@ def api_cancel(jid):
             return jsonify({"error": "Job not found"}), 404
         db.execute("UPDATE queue SET status='cancelled', error_message='Cancelled by user', progress=0, current_step='Cancelled' WHERE id=? AND status IN ('queued','processing','pending')", (jid,))
         # Free up the worker if it was processing this job
-        if job["status"] == "processing" and job.get("worker_id"):
+        # (v3.7: job is a sqlite3.Row — .get() doesn't exist on Row, so this
+        # crashed with AttributeError and the rollback made cancelling a
+        # processing job a silent no-op: the cancel flag never got set)
+        if job["status"] == "processing" and job["worker_id"]:
             db.execute("UPDATE workers SET status='idle', current_job_id=NULL WHERE id=?", (job["worker_id"],))
         # Set cancel flag for the node to pick up
         db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, 'true')", (f"cancel_{jid}",))
@@ -1695,7 +1741,7 @@ def api_set_schedule(wid):
 # Feature 22: Server overview with OS stats
 @app.route("/api/server/overview")
 def api_server_overview():
-    info = {"version": "3.0.0", "uptime_seconds": 0}
+    info = {"version": SERVER_VERSION, "uptime_seconds": 0}
     try:
         import psutil
         mem = psutil.virtual_memory()
@@ -1872,16 +1918,30 @@ def api_complete(jid):
 def api_error(jid):
     d = request.json
     wid = d.get("worker_id", "")
+    err = d.get("error", "Unknown")
     with get_db() as db:
-        db.execute("UPDATE queue SET status='error', progress=0, current_step='Failed', error_message=?, completed_at=datetime('now','localtime') WHERE id=?",
-                   (d.get("error","Unknown"), jid))
+        cur = db.execute("SELECT status FROM queue WHERE id=?", (jid,)).fetchone()
+        # v3.7: a node reporting "Cancelled by user" is the tail end of a
+        # user cancel, not a failure — keep the 'cancelled' status the
+        # cancel endpoint already set instead of flipping it to 'error'
+        # (which also fired a false "Transcode Failed" notification).
+        is_cancel = (cur and cur["status"] == "cancelled") or "cancelled by user" in err.lower()
+        if is_cancel:
+            db.execute("UPDATE queue SET status='cancelled', progress=0, current_step='Cancelled', error_message=?, completed_at=datetime('now','localtime') WHERE id=?",
+                       (err, jid))
+        else:
+            db.execute("UPDATE queue SET status='error', progress=0, current_step='Failed', error_message=?, completed_at=datetime('now','localtime') WHERE id=?",
+                       (err, jid))
         db.execute("UPDATE workers SET status='idle', current_job_id=NULL WHERE id=?", (wid,))
-    add_log(f"Job #{jid} failed: {d.get('error','')}", level="ERROR", job_id=jid)
+    if is_cancel:
+        add_log(f"Job #{jid} cancelled (node confirmed)", job_id=jid)
+        return jsonify({"ok": True})
+    add_log(f"Job #{jid} failed: {err}", level="ERROR", job_id=jid)
     if get_setting("ntfy_on_error") == "true":
         with get_db() as db:
             fn = db.execute("SELECT file_name FROM queue WHERE id=?", (jid,)).fetchone()
         send_notification("Transcode Failed",
-            f"{fn['file_name'] if fn else 'Job #'+str(jid)} — {d.get('error','')[:100]}", priority="high")
+            f"{fn['file_name'] if fn else 'Job #'+str(jid)} — {err[:100]}", priority="high")
     return jsonify({"ok": True})
 
 # Settings

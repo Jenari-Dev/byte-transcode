@@ -105,11 +105,13 @@ def setup_dovi_tool():
         return False
 
 
+MKVTOOLNIX_EXES = ("mkvmerge.exe", "mkvpropedit.exe", "mkvextract.exe")
+
 def setup_mkvmerge():
-    """Download MKVToolNix portable."""
+    """Download MKVToolNix portable (mkvmerge + mkvpropedit + mkvextract)."""
     exe = os.path.join(TOOLS_DIR, "mkvmerge.exe")
-    if os.path.exists(exe):
-        print("[mkvmerge] Already installed")
+    if all(os.path.exists(os.path.join(TOOLS_DIR, e)) for e in MKVTOOLNIX_EXES):
+        print("[mkvtoolnix] Already installed")
         return True
 
     print("[mkvmerge] Finding latest portable release...")
@@ -139,14 +141,14 @@ def setup_mkvmerge():
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
             for member in zf.namelist():
                 basename = os.path.basename(member)
-                if basename == "mkvmerge.exe":
-                    with zf.open(member) as src, open(exe, "wb") as dst:
+                if basename in MKVTOOLNIX_EXES:
+                    with zf.open(member) as src, open(os.path.join(TOOLS_DIR, basename), "wb") as dst:
                         dst.write(src.read())
-                    print(f"  Extracted mkvmerge.exe")
+                    print(f"  Extracted {basename}")
     except Exception as e:
         print(f"  ZIP download failed ({e}), trying portable installer...")
         print(f"  Please download MKVToolNix manually from https://mkvtoolnix.download/downloads.html")
-        print(f"  Then copy mkvmerge.exe to: {TOOLS_DIR}")
+        print(f"  Then copy mkvmerge.exe, mkvpropedit.exe and mkvextract.exe to: {TOOLS_DIR}")
         return False
 
     if os.path.exists(exe):
@@ -163,7 +165,7 @@ def verify_tools():
     """Verify all tools work."""
     print("\n=== Verifying tools ===")
     ok = True
-    for tool in ["ffmpeg", "ffprobe", "dovi_tool", "mkvmerge"]:
+    for tool in ["ffmpeg", "ffprobe", "dovi_tool", "mkvmerge", "mkvpropedit", "mkvextract"]:
         exe = os.path.join(TOOLS_DIR, f"{tool}.exe")
         if os.path.exists(exe):
             try:
