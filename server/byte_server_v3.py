@@ -865,9 +865,9 @@ def analyze_for_dv78(probe_json):
 
 def scan_dv78only_task(library_id):
     """
-    Scan a library for DoVi Profile 7 files. Queues 'dv78only' jobs.
-    These are fast jobs — RPU extraction + profile conversion + remux,
-    no re-encoding.
+    Scan a library for Dolby Vision files needing P8 conversion. Queues
+    'dv78only' jobs. These are fast jobs — HEVC extraction + profile
+    conversion + remux, no re-encoding.
     """
     global scan_progress
     pkey = f"dv78only_{library_id}"
@@ -876,9 +876,11 @@ def scan_dv78only_task(library_id):
         if not lib:
             return
     path = lib["path"]
-    add_log(f"[DV7→8 Scan] {lib['name']} ({path})")
+    add_log(f"[DV→P8 Scan] {lib['name']} ({path})")
 
-    cleanup_exts = {'.mkv'}
+    # v3.8: DV P5 WEB-DLs commonly ship as .mp4 — scanning only .mkv missed
+    # them entirely. mkvmerge reads MP4 fine and the output is always MKV.
+    cleanup_exts = {'.mkv', '.mp4', '.m4v'}
     total_files = 0
     for root, dirs, files in os.walk(path):
         for f in files:
@@ -1527,10 +1529,27 @@ def start_health_check_loop():
                     if stuck_libs2.rowcount > 0:
                         log.warning(f"Auto-reset {stuck_libs2.rowcount} stuck new library scans")
 
-                    # Reset processing jobs with no progress update for > 2 hours
+                    # v3.8: 'processing' at 0% for 30+ min means the node never
+                    # actually started it (e.g. the claim response was lost to a
+                    # network timeout) — REQUEUE it, no work is lost. Previously
+                    # these sat for 2 hours and then errored, needing manual
+                    # requeue.
+                    ghost_jobs = db.execute("""SELECT id, worker_id, file_name FROM queue
+                        WHERE status='processing' AND started_at < datetime('now','localtime', '-1800 seconds')
+                        AND (progress = 0 OR progress IS NULL)""").fetchall()
+                    for sj in ghost_jobs:
+                        db.execute("""UPDATE queue SET status='queued', worker_id=NULL, started_at=NULL,
+                            current_step='Requeued (claim was lost — node never started it)' WHERE id=?""", (sj["id"],))
+                        if sj["worker_id"]:
+                            db.execute("UPDATE workers SET status='idle', current_job_id=NULL WHERE id=? AND current_job_id=?",
+                                       (sj["worker_id"], sj["id"]))
+                        deferred_logs.append((f"Auto-requeued ghost job #{sj['id']} (claimed but never started): {sj['file_name']}", "WARN", sj["id"]))
+
+                    # Jobs stuck mid-work (progress > 0) for 2+ hours still error
+                    # out for manual attention — something real went wrong there.
                     stuck_jobs = db.execute("""SELECT id, worker_id, file_name FROM queue
                         WHERE status='processing' AND started_at < datetime('now','localtime', '-7200 seconds')
-                        AND (progress = 0 OR progress IS NULL)""").fetchall()
+                        AND progress > 0""").fetchall()
                     for sj in stuck_jobs:
                         db.execute("UPDATE queue SET status='error', error_message='Stuck — no progress for 2+ hours', completed_at=datetime('now','localtime') WHERE id=?", (sj["id"],))
                         if sj["worker_id"]:
