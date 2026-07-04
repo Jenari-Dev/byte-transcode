@@ -11,6 +11,15 @@ from tkinter import ttk, scrolledtext, messagebox, filedialog
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "byte_node_config.json")
 TOOLS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools")
 
+# v2.11 — reuse the node's own update helpers so the GUI can notify + self-update
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from byte_node_v2 import NODE_VERSION, check_for_update, download_update
+except Exception:
+    NODE_VERSION = "?"
+    def check_for_update(*a, **k): return None
+    def download_update(*a, **k): return (False, ["byte_node_v2.py not importable"])
+
 # ─── Dark Theme Colors ───────────────────────────────────────────────────────
 C = {
     "bg": "#1a1d23",
@@ -293,7 +302,7 @@ class ByteNodeGUI:
         title_frame.pack(side="left")
         tk.Label(title_frame, text="Byte Transcode Node", font=("Segoe UI", 18, "bold"),
                  fg=C["accent"], bg=C["bg"]).pack(side="left")
-        tk.Label(title_frame, text="  v2.10", font=("Segoe UI", 10),
+        tk.Label(title_frame, text=f"  v{NODE_VERSION}", font=("Segoe UI", 10),
                  fg=C["text2"], bg=C["bg"]).pack(side="left", pady=(6, 0))
 
         # Exit button
@@ -301,6 +310,22 @@ class ByteNodeGUI:
                              bg=C["red"], fg="white", bd=0, padx=16, pady=4,
                              command=self._on_exit, cursor="hand2", activebackground="#d32f2f")
         exit_btn.pack(side="right")
+
+        # ─── Update banner (v2.11, hidden until a newer version is found) ───
+        self.update_bar = tk.Frame(root, bg="#3a2f12", padx=16, pady=8)
+        self._update_info = None
+        self.update_label = tk.Label(self.update_bar, text="", font=("Segoe UI", 10, "bold"),
+                                     fg=C["yellow"], bg="#3a2f12", anchor="w", justify="left")
+        self.update_label.pack(side="left", fill="x", expand=True)
+        tk.Button(self.update_bar, text="Later", font=("Segoe UI", 9),
+                  bg=C["bg3"], fg=C["text"], bd=0, padx=12, pady=3, cursor="hand2",
+                  command=self.update_bar.pack_forget).pack(side="right")
+        self.update_btn = tk.Button(self.update_bar, text="Update Now", font=("Segoe UI", 9, "bold"),
+                                    bg=C["green"], fg="white", bd=0, padx=14, pady=3, cursor="hand2",
+                                    activebackground="#4caf50", command=self._do_update)
+        self.update_btn.pack(side="right", padx=(0, 8))
+        # kick off a background check shortly after launch
+        self.root.after(2500, self._check_update_bg)
 
         # ─── Status indicators ───
         status_frame = tk.Frame(root, bg=C["bg"], padx=16, pady=8)
@@ -629,6 +654,61 @@ class ByteNodeGUI:
             self.start_btn.configure(text="Start", bg=C["green"])
 
         self.root.after(1000, self._update_status)
+
+    # ─── Self-update (v2.11) ───
+    def _check_update_bg(self):
+        """Check GitHub for a newer node version off the UI thread."""
+        def work():
+            u = check_for_update()
+            if u and u.get("available"):
+                self.root.after(0, lambda: self._show_update_banner(u))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_update_banner(self, u):
+        self._update_info = u
+        notes = (u.get("notes") or "").strip()
+        if len(notes) > 90:
+            notes = notes[:90] + "…"
+        self.update_label.configure(
+            text=f"Update available:  v{u['current']} → v{u['latest']}" + (f"   —   {notes}" if notes else ""))
+        # show the bar just under the header
+        self.update_bar.pack(fill="x", after=self.root.winfo_children()[0])
+
+    def _do_update(self):
+        running = bool(self.engine and getattr(self.engine, "running", False))
+        msg = "Download the latest node files from GitHub and restart the node?"
+        if running:
+            msg += ("\n\nThe node is currently RUNNING. It will stop and restart — "
+                    "any in-progress transcode will be requeued on the server. "
+                    "Best to update when idle.")
+        if not messagebox.askyesno("Update Byte Node", msg):
+            return
+        self.update_btn.configure(state="disabled", text="Updating…")
+        self.stop_engine()
+
+        def work():
+            ok, msgs = download_update(log_fn=lambda m: self.log_queue.put(
+                f"[{time.strftime('%H:%M:%S')}] [INFO] {m}"))
+            self.root.after(0, lambda: self._after_update(ok, msgs))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _after_update(self, ok, msgs):
+        if not ok:
+            self.update_btn.configure(state="normal", text="Update Now")
+            messagebox.showerror("Update failed",
+                                 "Some files could not be downloaded. Your old files were kept "
+                                 "(.bak backups exist).\n\n" + "\n".join(msgs[-6:]))
+            return
+        if messagebox.askyesno("Update complete",
+                               "The node was updated. Restart now to run the new version?\n\n"
+                               "(If new tools were added, run 'py setup_tools.py' afterward.)"):
+            try:
+                self.root.destroy()
+            except Exception:
+                pass
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        else:
+            self.update_bar.pack_forget()
 
     def _on_exit(self):
         self.stop_engine()

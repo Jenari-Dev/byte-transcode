@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 from flask import Flask, request, jsonify, send_from_directory, Response, session, redirect
 
-SERVER_VERSION = "3.17"
+SERVER_VERSION = "3.18"
 NODE_VERSION = "2.10"   # latest node version this server ships/expects
 # Where the update checker looks for the newest published versions.
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main/version.json"
@@ -2867,6 +2867,80 @@ def api_dashboard():
             for jt in ("transcode", "subgen", "remuxclean", "dv78only")
         },
         "scan_progress": dict(scan_progress),
+    })
+
+TOOL_LABELS = {
+    "transcode": "Video Transcode",
+    "dv78only": "Dolby Vision → P8",
+    "remuxclean": "Track Cleanup",
+    "compatfix": "Compatibility Fix",
+    "subgen": "Subtitle Generation",
+}
+
+@app.route("/api/stats")
+def api_stats():
+    """
+    v3.18 — richer per-tool statistics. For every pipeline it reports files
+    completed, GB in/out, space actually reclaimed (clamped >=0), average
+    reduction %, in-flight count/volume, projected savings (pending volume x
+    that tool's historical avg reduction), and errors. Track Cleanup's
+    space_saved is the space reclaimed by dropping unwanted audio/subtitle
+    tracks; Subtitle Generation's completed count is subtitles generated.
+    """
+    with get_db() as db:
+        comp = db.execute("""
+            SELECT COALESCE(NULLIF(job_type,''),'transcode') AS jt,
+                   COUNT(*) AS n,
+                   COALESCE(SUM(file_size_gb),0) AS in_gb,
+                   COALESCE(SUM(COALESCE(output_size_gb,file_size_gb)),0) AS out_gb,
+                   COALESCE(SUM(MAX(file_size_gb-COALESCE(output_size_gb,file_size_gb),0)),0) AS saved_gb,
+                   COALESCE(AVG(CASE WHEN reduction_pct IS NOT NULL AND reduction_pct>0 THEN reduction_pct END),0) AS avg_red
+            FROM queue WHERE status='complete' GROUP BY jt
+        """).fetchall()
+        st = db.execute("""
+            SELECT COALESCE(NULLIF(job_type,''),'transcode') AS jt, status,
+                   COUNT(*) AS n, COALESCE(SUM(file_size_gb),0) AS gb
+            FROM queue GROUP BY jt, status
+        """).fetchall()
+
+    comp_by = {r["jt"]: r for r in comp}
+    st_by = {}
+    for r in st:
+        st_by.setdefault(r["jt"], {})[r["status"]] = {"n": r["n"], "gb": r["gb"]}
+
+    tools, tot = [], {"completed": 0, "saved_gb": 0.0, "projected_gb": 0.0,
+                      "errors": 0, "pending": 0, "in_gb": 0.0, "out_gb": 0.0}
+    for jt in ("transcode", "dv78only", "remuxclean", "compatfix", "subgen"):
+        c = comp_by.get(jt)
+        sts = st_by.get(jt, {})
+        completed = c["n"] if c else 0
+        saved = c["saved_gb"] if c else 0.0
+        in_gb = c["in_gb"] if c else 0.0
+        out_gb = c["out_gb"] if c else 0.0
+        avg_red = c["avg_red"] if c else 0.0
+        pending_n = sts.get("pending", {}).get("n", 0) + sts.get("queued", {}).get("n", 0)
+        pending_gb = sts.get("pending", {}).get("gb", 0.0) + sts.get("queued", {}).get("gb", 0.0)
+        errors = sts.get("error", {}).get("n", 0)
+        projected = pending_gb * (avg_red / 100.0) if avg_red > 0 else 0.0
+        tools.append({
+            "job_type": jt, "label": TOOL_LABELS[jt],
+            "completed": completed, "space_saved_gb": round(saved, 2),
+            "input_gb": round(in_gb, 2), "output_gb": round(out_gb, 2),
+            "avg_reduction_pct": round(avg_red, 1),
+            "pending": pending_n, "pending_gb": round(pending_gb, 2),
+            "projected_saved_gb": round(projected, 2), "errors": errors,
+        })
+        tot["completed"] += completed; tot["saved_gb"] += saved
+        tot["projected_gb"] += projected; tot["errors"] += errors
+        tot["pending"] += pending_n; tot["in_gb"] += in_gb; tot["out_gb"] += out_gb
+
+    for k in ("saved_gb", "projected_gb", "in_gb", "out_gb"):
+        tot[k] = round(tot[k], 2)
+    subs = comp_by.get("subgen")
+    return jsonify({
+        "tools": tools,
+        "totals": tot,
+        "subtitles_generated": subs["n"] if subs else 0,
     })
 
 # Serve frontend

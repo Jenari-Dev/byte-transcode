@@ -6,6 +6,12 @@ node/byte_node_config.json
 # Downloaded tools (large binaries)
 node/tools/
 
+# Local pip installs into the node folder (created if python runs with CWD here)
+node/Lib/
+node/Scripts/
+node/Include/
+node/pyvenv.cfg
+
 # Python
 __pycache__/
 *.pyc

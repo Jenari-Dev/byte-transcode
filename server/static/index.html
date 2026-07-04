@@ -89,7 +89,7 @@ function Login({onAuth,setup}){
     return <div style={{minHeight:'100vh',background:T.bg,display:'flex',alignItems:'center',justifyContent:'center'}}>
         <div style={{background:T.sb,borderRadius:14,padding:'44px 40px',border:`1px solid ${T.bd}`,width:380,textAlign:'center'}}>
             <div style={{fontSize:36,fontWeight:800,color:T.ac,letterSpacing:'-1px',lineHeight:1,marginBottom:4}}>BYTE</div>
-            <div style={{fontSize:11,color:T.t2,letterSpacing:'3px',fontWeight:600,marginBottom:36}}>TRANSCODE v3.17</div>
+            <div style={{fontSize:11,color:T.t2,letterSpacing:'3px',fontWeight:600,marginBottom:36}}>TRANSCODE v3.18</div>
             {setup&&<div style={{fontSize:13,color:T.ac,marginBottom:16,padding:'10px 14px',background:`${T.ac}15`,borderRadius:8}}>First time — create your admin account</div>}
             {e&&<div style={{fontSize:13,color:T.er,marginBottom:14}}>{e}</div>}
             <input value={u} onChange={ev=>setU(ev.target.value)} placeholder="Username" style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'12px 16px',color:T.tx,fontSize:14,marginBottom:12}}/>
@@ -243,6 +243,7 @@ function App(){
     const{data:libs,refresh:rL}=useApi('/libraries',5000);
     const{data:settings,refresh:rS}=useApi('/settings',10000);
     const{data:logs,refresh:rLg}=useApi('/logs?limit=300',5000);
+    const{data:stats}=useApi('/stats',8000);
     useEffect(()=>{if(settings&&!lSettings)setLS({...settings})},[settings]);
     useEffect(()=>{if(settings?.theme&&TH[settings.theme])setTheme(settings.theme)},[settings]);
 
@@ -296,7 +297,7 @@ function App(){
         <nav style={{width:218,background:T.sb,borderRight:`1px solid ${T.bd}`,display:'flex',flexDirection:'column',position:'sticky',top:0,height:'100vh',flexShrink:0}}>
             <div style={{padding:'22px 18px',borderBottom:`1px solid ${T.bd}`}}>
                 <div style={{fontSize:24,fontWeight:800,color:T.ac,letterSpacing:'-0.5px',lineHeight:1}}>BYTE</div>
-                <div style={{fontSize:10,color:T.t2,letterSpacing:'2.5px',fontWeight:600,marginTop:4}}>TRANSCODE v3.17</div>
+                <div style={{fontSize:10,color:T.t2,letterSpacing:'2.5px',fontWeight:600,marginTop:4}}>TRANSCODE v3.18</div>
             </div>
             <div style={{padding:10,flex:1,overflowY:'auto'}}>
                 {/* Main */}
@@ -406,7 +407,7 @@ function App(){
                     </div>
                     <div style={{background:T.bg,borderRadius:8,padding:'10px 14px',border:`1px solid ${T.bd}`}}>
                         <div style={{fontSize:10,color:T.t2,fontWeight:600}}>VERSION</div>
-                        <div className="mono" style={{fontSize:15,fontWeight:700,color:T.t1,marginTop:2}}>3.17</div>
+                        <div className="mono" style={{fontSize:15,fontWeight:700,color:T.t1,marginTop:2}}>3.18</div>
                     </div>
                     <div style={{background:T.bg,borderRadius:8,padding:'10px 14px',border:`1px solid ${T.bd}`}}>
                         <div style={{fontSize:10,color:T.t2,fontWeight:600}}>STATUS</div>
@@ -1038,6 +1039,38 @@ function App(){
                     </div>
                 </div>
             </div>
+            {/* Per-tool breakdown (v3.18) */}
+            {(()=>{const TC={transcode:T.ac,dv78only:T.a2,remuxclean:T.in,compatfix:T.wn,subgen:T.ok};
+                const TI={transcode:'zap',dv78only:'play',remuxclean:'copy',compatfix:'settings',subgen:'log'};
+                const st=stats||{tools:[],totals:{},subtitles_generated:0};const tot=st.totals||{};
+                return <div style={{marginBottom:16}}>
+                    <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',marginBottom:12}}>
+                        <div style={{fontSize:15,fontWeight:700,color:T.t1}}>By Tool</div>
+                        <div style={{display:'flex',gap:20}}>
+                            <span style={{fontSize:12,color:T.t2}}>Projected to save <b className="mono" style={{color:T.wn,fontSize:14}}>{(tot.projected_gb||0).toFixed(0)} GB</b></span>
+                            <span style={{fontSize:12,color:T.t2}}>Subtitles generated <b className="mono" style={{color:T.ok,fontSize:14}}>{st.subtitles_generated||0}</b></span>
+                        </div>
+                    </div>
+                    <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(210px,1fr))',gap:12}}>
+                        {(st.tools||[]).map(tl=>{const c=TC[tl.job_type]||T.ac;const isSub=tl.job_type==='subgen';
+                            return <div key={tl.job_type} style={{background:T.card,borderRadius:10,padding:'16px 18px',border:`1px solid ${T.bd}`,borderTop:`3px solid ${c}`}}>
+                                <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:12}}>
+                                    <I n={TI[tl.job_type]||'zap'} s={15}/><span style={{fontSize:13,fontWeight:700,color:T.t1}}>{tl.label}</span>
+                                </div>
+                                <div style={{textAlign:'center',padding:'4px 0 10px'}}>
+                                    <div className="mono" style={{fontSize:30,fontWeight:800,color:c}}>{isSub?tl.completed:tl.space_saved_gb.toFixed(1)}</div>
+                                    <div style={{fontSize:11,color:T.t2,marginTop:1}}>{isSub?'subtitles generated':'GB reclaimed'}</div>
+                                </div>
+                                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6,fontSize:11}}>
+                                    <div style={{display:'flex',justifyContent:'space-between'}}><span style={{color:T.t2}}>Done</span><span className="mono" style={{color:T.t1,fontWeight:600}}>{tl.completed}</span></div>
+                                    <div style={{display:'flex',justifyContent:'space-between'}}><span style={{color:T.t2}}>Queued</span><span className="mono" style={{color:T.t1,fontWeight:600}}>{tl.pending}</span></div>
+                                    {!isSub&&<div style={{display:'flex',justifyContent:'space-between'}}><span style={{color:T.t2}}>Avg cut</span><span className="mono" style={{color:T.t1,fontWeight:600}}>{tl.avg_reduction_pct.toFixed(0)}%</span></div>}
+                                    {!isSub&&<div style={{display:'flex',justifyContent:'space-between'}}><span style={{color:T.t2}}>Est save</span><span className="mono" style={{color:T.wn,fontWeight:600}}>{tl.projected_saved_gb.toFixed(0)}G</span></div>}
+                                    {tl.errors>0&&<div style={{display:'flex',justifyContent:'space-between'}}><span style={{color:T.t2}}>Errors</span><span className="mono" style={{color:T.er,fontWeight:600}}>{tl.errors}</span></div>}
+                                </div>
+                            </div>;})}
+                    </div>
+                </div>;})()}
             {/* Libraries Breakdown */}
             <div style={{background:T.card,borderRadius:10,padding:'18px 20px',border:`1px solid ${T.bd}`,marginBottom:16}}>
                 <div style={{fontSize:13,fontWeight:600,color:T.t3,marginBottom:14}}>Libraries</div>

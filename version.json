@@ -1,7 +1,7 @@
 {
-  "server": "3.17",
-  "node": "2.10",
+  "server": "3.18",
+  "node": "2.11",
   "released": "2026-07-04",
-  "notes": "Async progress/log endpoints (fixes stuck jobs on large queues), parallel health checks, scans record every file, DV5 true HDR10 conversion, per-node on/off, keep-languages, compatibility pipeline.",
+  "notes": "Byte Media Manager REST integration, richer per-tool stats page (space saved / subtitles generated / tracks cleaned per pipeline), and node self-update — the desktop GUI and console now check for updates and can update themselves like the web UI.",
   "update_docs": "https://github.com/Jenari-Dev/byte-transcode#updating"
 }

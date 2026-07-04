@@ -78,6 +78,77 @@ except ImportError:
         pass
 
 
+# ─── Self-update (v2.11) ─────────────────────────────────────────────────────
+# The node checks the same published manifest the web UI uses and can pull its
+# own new files from GitHub, then relaunch — matching the website's update flow.
+NODE_VERSION = "2.11"
+GITHUB_RAW = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main"
+VERSION_MANIFEST_URL = GITHUB_RAW + "/version.json"
+NODE_FILES = ["byte_node_v2.py", "byte_node_gui.py", "setup_tools.py",
+              "run_node.bat", "update_node.bat"]
+
+
+def _vparts(v):
+    """'2.11' -> (2, 11) for numeric comparison; tolerant of junk."""
+    return tuple(int(x) for x in re.findall(r"\d+", str(v or "")))
+
+
+def check_for_update(current=NODE_VERSION, timeout=8):
+    """
+    Fetch the manifest and compare its 'node' version to ours.
+    Returns {available, latest, current, notes} or None if the check failed
+    (offline, GitHub down) — callers treat None as 'no info, carry on'.
+    """
+    try:
+        r = requests.get(VERSION_MANIFEST_URL, timeout=timeout)
+        if r.status_code != 200:
+            return None
+        m = r.json()
+        latest = str(m.get("node", "")).strip()
+        if not latest:
+            return None
+        return {"available": _vparts(latest) > _vparts(current),
+                "latest": latest, "current": str(current),
+                "notes": m.get("notes", "")}
+    except Exception:
+        return None
+
+
+def download_update(dest_dir=None, timeout=30, log_fn=print):
+    """
+    Download the latest node files from GitHub into dest_dir (default: this
+    script's folder), backing up each existing file to .bak first. Config
+    (byte_node_config.json) and tools/ are never touched. Returns
+    (ok, [messages]).
+    """
+    dest_dir = dest_dir or os.path.dirname(os.path.abspath(__file__))
+    msgs, ok = [], True
+    for fn in NODE_FILES:
+        try:
+            r = requests.get(f"{GITHUB_RAW}/node/{fn}", timeout=timeout)
+            if r.status_code != 200:
+                msgs.append(f"skip {fn} (HTTP {r.status_code})")
+                continue
+            path = os.path.join(dest_dir, fn)
+            if os.path.exists(path):
+                shutil.copy2(path, path + ".bak")
+            with open(path, "wb") as f:
+                f.write(r.content)
+            msgs.append(f"updated {fn}")
+        except Exception as e:
+            ok = False
+            msgs.append(f"FAIL {fn}: {e}")
+    for m in msgs:
+        try: log_fn(f"  [update] {m}")
+        except Exception: pass
+    return ok, msgs
+
+
+def restart_process():
+    """Relaunch the current process with the same args, picking up new code."""
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
 class ByteNode:
     def __init__(self, server_url, name, gpu, poll_interval=10, local_overrides=None):
         self.server = server_url.rstrip('/')
@@ -144,7 +215,7 @@ class ByteNode:
                 self.log(f"  WARN: {tool_name} not found in PATH (fallback: {tool_path!r}). "
                          f"Install it or add its directory to PATH.", "WARN")
 
-        self.log(f"Byte Node v2.10 initialized")
+        self.log(f"Byte Node v{NODE_VERSION} initialized")
         self.log(f"  Worker ID: {self.worker_id}")
         self.log(f"  Server: {self.server}")
         self.log(f"  GPU: {self.gpu}")
@@ -2982,7 +3053,34 @@ def main():
     parser.add_argument("--nas-drive", default="", help="Local path the prefix maps to (e.g. Z:)")
     parser.add_argument("--temp-dir", default="", help="Local temp/work directory for jobs")
     parser.add_argument("--workers", type=int, default=0, help="Transcode worker threads (overrides server setting)")
+    parser.add_argument("--update", action="store_true", help="Download the latest node code from GitHub and restart")
+    parser.add_argument("--check-update", action="store_true", help="Just report whether a newer node version is available, then exit")
     args = parser.parse_args()
+
+    # v2.11 — self-update paths (no server needed).
+    if args.check_update:
+        u = check_for_update()
+        if u is None:
+            print("Update check failed (offline or GitHub unreachable).")
+        elif u["available"]:
+            print(f"Update available: v{u['current']} -> v{u['latest']}")
+            print(f"  {u['notes']}")
+            print("Run with --update to install.")
+        else:
+            print(f"Up to date (v{u['current']}).")
+        return
+    if args.update:
+        print(f"Byte Node self-update (current v{NODE_VERSION})...")
+        ok, _ = download_update()
+        if not ok:
+            print("Update incomplete — some files failed. Old files kept as .bak.")
+            return
+        print("Update downloaded. New tools (if any): py setup_tools.py")
+        print("Restarting node with the new code...")
+        # Drop --update so the relaunched process runs normally.
+        sys.argv = [a for a in sys.argv if a not in ("--update",)]
+        restart_process()
+        return
 
     overrides = {}
     if args.nas_prefix:
@@ -3001,6 +3099,16 @@ def main():
         node.running = False
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
+
+    # v2.11 — one-shot update notice at startup (non-fatal, best-effort).
+    u = check_for_update()
+    if u and u.get("available"):
+        node.log("=" * 58, "WARN")
+        node.log(f"  UPDATE AVAILABLE: v{u['current']} -> v{u['latest']}", "WARN")
+        node.log(f"  {u['notes']}", "WARN")
+        node.log("  Stop the node and run:  py byte_node_v2.py --update", "WARN")
+        node.log("  (or double-click update_node.bat)", "WARN")
+        node.log("=" * 58, "WARN")
 
     node.start_all_workers()
 
