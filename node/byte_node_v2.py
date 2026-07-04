@@ -60,20 +60,81 @@ v2.9 — TRUE DV Profile 5 → 8 conversion (_dv5_true_convert): metadata-only
 import sys, os, time, json, hashlib, shutil, subprocess, threading, signal, re, socket, platform, argparse, random
 from datetime import datetime
 
-# Auto-install requests if missing
-try:
-    import requests
-except ImportError:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "requests", "-q", "--break-system-packages"])
-    import requests
+
+def _drop_local_site(reason=""):
+    """
+    v2.13 — a stray Lib/site-packages inside the node folder (left by an old
+    partial pip install) can shadow the real packages with a BROKEN copy, e.g.
+    a 'requests' missing its 'idna' dep. If importing failed, drop that folder
+    from sys.path so the interpreter's real site-packages is used instead.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    bad = os.path.normcase(os.path.join(here, "Lib", "site-packages"))
+    kept = [p for p in sys.path if os.path.normcase(os.path.abspath(p)) != bad]
+    if len(kept) != len(sys.path):
+        sys.path[:] = kept
+        return True
+    return False
+
+
+def _pip(*args):
+    return subprocess.call([sys.executable, "-m", "pip", *args],
+                           stdout=subprocess.DEVNULL if "-q" in args else None)
+
+
+def _ensure_requests():
+    """
+    Import requests, self-healing on a broken/missing install or a Python
+    without pip — both of which produced cryptic startup crashes on some nodes.
+    """
+    try:
+        import requests  # noqa
+        return requests
+    except Exception:
+        pass
+    # A broken partial copy in the node folder's Lib may be shadowing — drop it and retry.
+    if _drop_local_site():
+        try:
+            import requests  # noqa
+            return requests
+        except Exception:
+            pass
+    # Make pip available (ensurepip) then install the full requests stack.
+    if _pip("--version") != 0:
+        try:
+            subprocess.call([sys.executable, "-m", "ensurepip", "--default-pip"])
+        except Exception:
+            pass
+    if _pip("--version") == 0:
+        _pip("install", "-q", "--upgrade", "requests", "idna",
+             "charset-normalizer", "urllib3", "certifi")
+    try:
+        import requests  # noqa
+        return requests
+    except Exception as e:
+        sys.stderr.write(
+            "\n[Byte Node] Could not load the 'requests' library and couldn't auto-install it.\n"
+            f"  Python : {sys.executable}\n"
+            f"  Error  : {e}\n\n"
+            "One-time fix (run these in a terminal, then start the node again):\n"
+            f'  rmdir /s /q \"{os.path.join(os.path.dirname(os.path.abspath(__file__)), "Lib")}\"\n'
+            f'  \"{sys.executable}\" -m ensurepip --default-pip\n'
+            f'  \"{sys.executable}\" -m pip install requests psutil faster-whisper\n\n'
+            "If that Python has no pip, install/reinstall Python from python.org\n"
+            "(check 'Add to PATH' and 'pip'), or point run_node.bat at a Python that has pip.\n")
+        sys.exit(1)
+
+
+requests = _ensure_requests()
 
 # psutil is optional (heartbeat CPU/RAM metrics) — try to install once, but
 # never block startup on it; heartbeat degrades to zeros without it.
 try:
     import psutil  # noqa: F401
-except ImportError:
+except Exception:
     try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "psutil", "-q", "--break-system-packages"])
+        if _pip("--version") == 0:
+            _pip("install", "-q", "psutil")
     except Exception:
         pass
 
@@ -81,7 +142,7 @@ except ImportError:
 # ─── Self-update (v2.11) ─────────────────────────────────────────────────────
 # The node checks the same published manifest the web UI uses and can pull its
 # own new files from GitHub, then relaunch — matching the website's update flow.
-NODE_VERSION = "2.12"
+NODE_VERSION = "2.13"
 GITHUB_RAW = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main"
 VERSION_MANIFEST_URL = GITHUB_RAW + "/version.json"
 NODE_FILES = ["byte_node_v2.py", "byte_node_gui.py", "setup_tools.py",
