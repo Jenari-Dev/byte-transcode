@@ -1189,7 +1189,12 @@ def scan_compat_task(library_id):
                         "HLG" if v_transfer == "arib-std-b67" else "SDR")
 
             if compat["flag"]:
-                status, current_step, skipped_reason = "pending", "Pending [" + compat["strategy"] + "]: " + "; ".join(compat["reasons"]), None
+                # v3.10 — strategy label lives in skipped_reason so it survives
+                # the health check overwriting current_step; the UI renders it
+                # as a persistent badge (container rewrap vs re-encode).
+                strategy_label = ("CONTAINER-ONLY REWRAP — media untouched"
+                                  if compat["strategy"] == "remux" else "VIDEO RE-ENCODE")
+                status, current_step, skipped_reason = "pending", "Pending [" + compat["strategy"] + "]: " + "; ".join(compat["reasons"]), strategy_label
             else:
                 status, current_step, skipped_reason = "skipped", "No compatibility issues detected", "No issues — requeue to force-convert"
 
@@ -2169,6 +2174,16 @@ def api_heartbeat():
 def api_next_job():
     d = request.json
     wid = d.get("worker_id", "")
+    # v3.10 — per-node ON/OFF switch (set from the worker card in the UI).
+    # A disabled node keeps polling and heartbeating but is never assigned
+    # work, so it can be toggled back on without touching the machine.
+    wcfg_raw = get_setting(f"worker_config_{wid}") if wid else None
+    if wcfg_raw:
+        try:
+            if json.loads(wcfg_raw).get("node_enabled") == "false":
+                return jsonify({"job": None, "reason": "Node disabled from dashboard"})
+        except Exception:
+            pass
     with get_db() as db:
         if get_setting("processing_enabled") != "true":
             return jsonify({"job": None, "reason": "Processing paused"})

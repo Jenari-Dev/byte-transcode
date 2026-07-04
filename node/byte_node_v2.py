@@ -2945,7 +2945,7 @@ class ByteNode:
                     #  - "paused" — pipeline disabled, expected
                     #  - "race" — another worker won the claim, expected with multi-worker
                     if (reason and "no jobs" not in rl and "paused" not in rl
-                            and "race" not in rl):
+                            and "race" not in rl and "disabled" not in rl):
                         self.log(f"TW#{worker_idx}: waiting — {reason}")
             except Exception as e:
                 self.log(f"TW#{worker_idx} poll error: {e}", "ERROR")

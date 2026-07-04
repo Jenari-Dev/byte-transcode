@@ -208,6 +208,10 @@ function App(){
     const[newLib,setNewLib]=useState({name:'',path:''});const[xWorker,setXWorker]=useState(null);
     const[nodeCfg,setNodeCfg]=useState(null);
     useEffect(()=>{setNodeCfg(null);if(xWorker){fetch('/api/workers/'+xWorker+'/config',{credentials:'include'}).then(r=>r.ok?r.json():{}).then(c=>setNodeCfg(c||{})).catch(()=>setNodeCfg({}));}},[xWorker]);
+    // v3.10 — per-node enabled state for the ON/OFF switch on worker cards
+    const[nodeOn,setNodeOn]=useState({});
+    const workerIds=(allW||[]).map(w=>w.id).sort().join(',');
+    useEffect(()=>{(allW||[]).forEach(w=>{fetch('/api/workers/'+w.id+'/config',{credentials:'include'}).then(r=>r.ok?r.json():{}).then(c=>setNodeOn(m=>({...m,[w.id]:(c||{}).node_enabled!=='false'}))).catch(()=>{});});},[workerIds]);
     const[lSettings,setLS]=useState(null);const[selFile,setSelFile]=useState(null);const[skipGb,setSkipGb]=useState('');
     const[page,setPage]=useState(1);const[perPage,setPerPage]=useState(100);
     const[showPaths,setShowPaths]=useState(false);const[colFilter,setColFilter]=useState({lib:'',file:'',codec:'',res:'',size:''});
@@ -413,7 +417,10 @@ function App(){
                             <span style={{fontSize:15,fontWeight:600,color:T.t1}}>{w.name}</span>
                             <span style={{fontSize:12,color:T.t2}}>{w.gpu}</span>
                             <div style={{flex:1}}/>
+                            {nodeOn[w.id]===false&&<span className="mono" style={{fontSize:11,fontWeight:700,padding:'3px 10px',borderRadius:5,background:`${T.er}15`,color:T.er}}>DISABLED</span>}
                             <span className="mono" style={{fontSize:11,fontWeight:700,padding:'3px 10px',borderRadius:5,background:`${sc}15`,color:sc}}>{active?'ACTIVE':on?'IDLE':stale?'STALE':'OFFLINE'}</span>
+                            {/* v3.10 — per-node ON/OFF: disabled nodes are never assigned jobs */}
+                            <button onClick={async e=>{e.stopPropagation();const cur=nodeOn[w.id]!==false;const cfg=await fetch('/api/workers/'+w.id+'/config',{credentials:'include'}).then(r=>r.ok?r.json():{}).catch(()=>({}));cfg.node_enabled=cur?'false':'true';await post('/workers/'+w.id+'/config',cfg);setNodeOn(m=>({...m,[w.id]:!cur}));toast(cur?w.name+' disabled — no new jobs':w.name+' enabled','info');}} style={{background:nodeOn[w.id]===false?`${T.er}15`:`${T.ok}15`,border:`1px solid ${nodeOn[w.id]===false?T.er:T.ok}44`,borderRadius:6,padding:'4px 12px',cursor:'pointer',color:nodeOn[w.id]===false?T.er:T.ok,fontSize:11,fontWeight:700}}>{nodeOn[w.id]===false?'OFF':'ON'}</button>
                             <I n={xWorker===w.id?'up':'down'} s={14} c={T.t2}/>
                         </div>
                         {w.current_file&&<div style={{fontSize:13,color:T.tx,marginTop:6,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{w.current_file}</div>}
@@ -784,7 +791,13 @@ function App(){
                                 {item.health_status==='pending'&&<span style={{fontSize:9,fontWeight:600,padding:'1px 6px',borderRadius:3,color:T.t2,background:T.t2+'18',flexShrink:0}}>Pending</span>}
                                 {item.health_status&&!['healthy','checking','pending'].includes(item.health_status)&&<span style={{fontSize:9,fontWeight:600,padding:'1px 6px',borderRadius:3,color:T.er,background:T.er+'18',flexShrink:0}}>&#10007; {item.health_status}</span>}
                                 {item.status!=='queued'&&<span style={{fontSize:9,fontWeight:600,padding:'1px 5px',borderRadius:3,color:stC,background:stC+'18'}}>{item.status}</span>}
-                                {item.skipped_reason&&<span style={{fontSize:9,fontWeight:600,padding:'1px 6px',borderRadius:3,color:T.in,background:T.in+'18',flexShrink:0}}>{item.skipped_reason}</span>}
+                                {/* v3.10 — Compatibility jobs: make it unmistakable whether this is a
+                                    container-only rewrap (media untouched) or a video re-encode */}
+                                {item.skipped_reason&&(item.skipped_reason.includes('CONTAINER-ONLY')
+                                    ?<span style={{fontSize:9,fontWeight:700,padding:'1px 6px',borderRadius:3,color:T.ok,background:T.ok+'18',flexShrink:0}}>{item.skipped_reason}</span>
+                                    :item.skipped_reason.includes('VIDEO RE-ENCODE')
+                                    ?<span style={{fontSize:9,fontWeight:700,padding:'1px 6px',borderRadius:3,color:T.wn,background:T.wn+'18',flexShrink:0}}>{item.skipped_reason}</span>
+                                    :<span style={{fontSize:9,fontWeight:600,padding:'1px 6px',borderRadius:3,color:T.in,background:T.in+'18',flexShrink:0}}>{item.skipped_reason}</span>)}
                             </div>
                             {item.status==='processing'&&<div style={{marginTop:3,display:'flex',alignItems:'center',gap:5}}>
                                 <div style={{flex:1,height:4,borderRadius:2,background:T.t2+'20',overflow:'hidden'}}><div style={{width:(item.progress||0)+'%',height:'100%',background:T.ac,borderRadius:2}}/></div>
