@@ -2362,6 +2362,30 @@ def _jobtype_for_issues(issues):
             return jt
     return "compatfix"   # default: general "make it play" fix
 
+def _resolve_source(p):
+    """
+    v3.17 — a client may send a path in the HOST namespace (e.g. the SMB
+    share's real path /mnt/storage/...) but the server runs in Docker where
+    that tree is mounted at /media. Try the path as sent, then translate any
+    known host prefix to /media. Returns the first path that exists (the one
+    the server + node both understand), or None.
+    """
+    cands = [p]
+    for hp in ("/mnt/storage/", "/mnt/media/"):
+        if p.startswith(hp):
+            cands.append("/media/" + p[len(hp):])
+    # let ops override via a setting if their host prefix differs
+    extra = (get_setting("ext_source_prefix") or "").strip()
+    if extra and p.startswith(extra.rstrip("/") + "/"):
+        cands.append("/media/" + p[len(extra.rstrip("/") + "/"):])
+    for c in cands:
+        try:
+            if os.path.exists(c):
+                return c
+        except Exception:
+            pass
+    return None
+
 def _require_api_key():
     """External endpoints require the Settings→API key via X-API-Key.
     Returns an error response tuple if invalid, else None."""
@@ -2394,11 +2418,12 @@ def api_submit_job():
     if auth:
         return auth
     d = request.json or {}
-    path = (d.get("source_path") or "").strip()
-    if not path:
+    raw_path = (d.get("source_path") or "").strip()
+    if not raw_path:
         return jsonify({"error": "source_path required"}), 400
-    if not os.path.exists(path):
-        return jsonify({"error": f"file not found on server: {path}"}), 404
+    path = _resolve_source(raw_path)   # translate host path -> container /media
+    if not path:
+        return jsonify({"error": f"file not found on server: {raw_path}"}), 404
     try:
         size_bytes = os.path.getsize(path)
     except OSError:
