@@ -1,5 +1,5 @@
 {
-  "server": "3.14",
+  "server": "3.15",
   "node": "2.10",
   "released": "2026-07-04",
   "notes": "Async progress/log endpoints (fixes stuck jobs on large queues), parallel health checks, scans record every file, DV5 true HDR10 conversion, per-node on/off, keep-languages, compatibility pipeline.",

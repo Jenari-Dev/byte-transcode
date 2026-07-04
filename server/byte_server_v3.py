@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 from flask import Flask, request, jsonify, send_from_directory, Response, session, redirect
 
-SERVER_VERSION = "3.14"
+SERVER_VERSION = "3.15"
 NODE_VERSION = "2.10"   # latest node version this server ships/expects
 # Where the update checker looks for the newest published versions.
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main/version.json"
@@ -415,6 +415,30 @@ def set_setting(key, value):
             if attempt == 2:
                 raise
             time.sleep(0.5 * (attempt + 1))
+
+
+def active_lib_conditions():
+    """
+    v3.15 — per-tool library scoping. Setting active_lib_<jobtype> = a
+    library id restricts that tool to only health-check / assign / process
+    files from that one library; empty (default) = all libraries. Returns
+    (sql, params): an AND-condition usable in the health-check and
+    jobs/next queries. Types with no filter set are left unrestricted.
+    """
+    conds, params = [], []
+    for jt in ("transcode", "subgen", "remuxclean", "dv78only", "compatfix"):
+        lid = get_setting(f"active_lib_{jt}")
+        if lid and str(lid).strip():
+            try:
+                lid_i = int(lid)
+            except (TypeError, ValueError):
+                continue
+            # keep rows that are NOT (this type in a different library)
+            conds.append("NOT (COALESCE(NULLIF(job_type,''),'transcode')=? AND library_id<>?)")
+            params += [jt, lid_i]
+    if not conds:
+        return "", []
+    return " AND " + " AND ".join(conds), params
 
 
 def db_write_retry(fn, attempts=8, base_delay=0.4):
@@ -1667,12 +1691,15 @@ def health_check_task():
     tops up to `conc` in-flight checks. The 'checking' count gates spawning so
     we never exceed it."""
     conc = _health_check_concurrency()
+    lib_sql, lib_params = active_lib_conditions()   # v3.15 per-tool library scope
     with get_db() as db:
         active_hc = db.execute("SELECT COUNT(*) as c FROM queue WHERE health_status='checking'").fetchone()["c"]
         limit = max(0, conc - active_hc)
         if limit == 0:
             return
-        pending = db.execute("SELECT * FROM queue WHERE health_status = 'pending' ORDER BY priority LIMIT ?", (limit,)).fetchall()
+        pending = db.execute(
+            f"SELECT * FROM queue WHERE health_status = 'pending'{lib_sql} ORDER BY priority LIMIT ?",
+            (*lib_params, limit)).fetchall()
     if not pending:
         return
 
@@ -2425,10 +2452,11 @@ def api_next_job():
             return jsonify({"job": None, "reason": "All job types paused"})
         # Build IN clause
         placeholders = ",".join("?" * len(allowed_types))
+        lib_sql, lib_params = active_lib_conditions()   # v3.15 per-tool library scope
         query = (f"SELECT * FROM queue WHERE status='queued' AND health_status='healthy' "
-                 f"AND COALESCE(NULLIF(job_type,''),'transcode') IN ({placeholders}) "
+                 f"AND COALESCE(NULLIF(job_type,''),'transcode') IN ({placeholders}){lib_sql} "
                  f"ORDER BY priority ASC, id ASC LIMIT 1")
-        job = db.execute(query, allowed_types).fetchone()
+        job = db.execute(query, (*allowed_types, *lib_params)).fetchone()
         if not job:
             disabled = [jt for jt in all_types if jt not in allowed_types]
             reason = "No jobs ready"

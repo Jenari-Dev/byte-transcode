@@ -87,7 +87,7 @@ function Login({onAuth,setup}){
     return <div style={{minHeight:'100vh',background:T.bg,display:'flex',alignItems:'center',justifyContent:'center'}}>
         <div style={{background:T.sb,borderRadius:14,padding:'44px 40px',border:`1px solid ${T.bd}`,width:380,textAlign:'center'}}>
             <div style={{fontSize:36,fontWeight:800,color:T.ac,letterSpacing:'-1px',lineHeight:1,marginBottom:4}}>BYTE</div>
-            <div style={{fontSize:11,color:T.t2,letterSpacing:'3px',fontWeight:600,marginBottom:36}}>TRANSCODE v3.14</div>
+            <div style={{fontSize:11,color:T.t2,letterSpacing:'3px',fontWeight:600,marginBottom:36}}>TRANSCODE v3.15</div>
             {setup&&<div style={{fontSize:13,color:T.ac,marginBottom:16,padding:'10px 14px',background:`${T.ac}15`,borderRadius:8}}>First time — create your admin account</div>}
             {e&&<div style={{fontSize:13,color:T.er,marginBottom:14}}>{e}</div>}
             <input value={u} onChange={ev=>setU(ev.target.value)} placeholder="Username" style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'12px 16px',color:T.tx,fontSize:14,marginBottom:12}}/>
@@ -283,7 +283,7 @@ function App(){
         <nav style={{width:218,background:T.sb,borderRight:`1px solid ${T.bd}`,display:'flex',flexDirection:'column',position:'sticky',top:0,height:'100vh',flexShrink:0}}>
             <div style={{padding:'22px 18px',borderBottom:`1px solid ${T.bd}`}}>
                 <div style={{fontSize:24,fontWeight:800,color:T.ac,letterSpacing:'-0.5px',lineHeight:1}}>BYTE</div>
-                <div style={{fontSize:10,color:T.t2,letterSpacing:'2.5px',fontWeight:600,marginTop:4}}>TRANSCODE v3.14</div>
+                <div style={{fontSize:10,color:T.t2,letterSpacing:'2.5px',fontWeight:600,marginTop:4}}>TRANSCODE v3.15</div>
             </div>
             <div style={{padding:10,flex:1,overflowY:'auto'}}>
                 {/* Main */}
@@ -393,7 +393,7 @@ function App(){
                     </div>
                     <div style={{background:T.bg,borderRadius:8,padding:'10px 14px',border:`1px solid ${T.bd}`}}>
                         <div style={{fontSize:10,color:T.t2,fontWeight:600}}>VERSION</div>
-                        <div className="mono" style={{fontSize:15,fontWeight:700,color:T.t1,marginTop:2}}>3.14</div>
+                        <div className="mono" style={{fontSize:15,fontWeight:700,color:T.t1,marginTop:2}}>3.15</div>
                     </div>
                     <div style={{background:T.bg,borderRadius:8,padding:'10px 14px',border:`1px solid ${T.bd}`}}>
                         <div style={{fontSize:10,color:T.t2,fontWeight:600}}>STATUS</div>
@@ -757,7 +757,14 @@ function App(){
                         </span>
                         {!masterOn&&typeEnabled&&<span style={{fontSize:11,color:T.t2}}>(starting will also resume the master switch)</span>}
                     </div>
-                    <div style={{display:'flex',gap:6}}>
+                    <div style={{display:'flex',gap:6,alignItems:'center'}}>
+                        {/* v3.15 — scope this tool to one library (or all). Only the
+                            chosen library gets health-checked, queued, and processed. */}
+                        <span style={{fontSize:11,color:T.t2}}>Library:</span>
+                        <select value={lSettings?.['active_lib_'+qTypeT]||''} onChange={async e=>{const v=e.target.value;setLS(x=>({...x,['active_lib_'+qTypeT]:v}));await put('/settings',{['active_lib_'+qTypeT]:v});toast(v?('Scoped to '+((libs||[]).find(l=>String(l.id)===v)?.name||'library')):'Processing all libraries','info');rD();}} style={{background:T.bg,border:`1px solid ${T.bd}`,borderRadius:8,padding:'6px 10px',color:T.tx,fontSize:12,cursor:'pointer'}}>
+                            <option value="">All Libraries</option>
+                            {(libs||[]).map(l=><option key={l.id} value={l.id}>{l.name}</option>)}
+                        </select>
                         {(!typeEnabled||!masterOn)
                             ? <button onClick={async()=>{await post('/queue/start/'+qTypeT);toast(lbl+' pipeline started','success');rD();}} style={{background:`${T.ok}1a`,border:`1px solid ${T.ok}55`,borderRadius:8,padding:'7px 16px',cursor:'pointer',color:T.ok,fontSize:12,fontWeight:700,display:'flex',alignItems:'center',gap:5}}><I n="play" s={13}/> Start {lbl}</button>
                             : <button onClick={async()=>{await post('/queue/pause/'+qTypeT);toast(lbl+' pipeline paused','info');rD();}} style={{background:`${T.wn}1a`,border:`1px solid ${T.wn}55`,borderRadius:8,padding:'7px 16px',cursor:'pointer',color:T.wn,fontSize:12,fontWeight:700,display:'flex',alignItems:'center',gap:5}}>⏸ Pause {lbl}</button>
