@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 from flask import Flask, request, jsonify, send_from_directory, Response, session, redirect
 
-SERVER_VERSION = "3.16"
+SERVER_VERSION = "3.17"
 NODE_VERSION = "2.10"   # latest node version this server ships/expects
 # Where the update checker looks for the newest published versions.
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main/version.json"
@@ -273,7 +273,9 @@ def init_db():
                 'output_size_gb': 'REAL', 'reduction_pct': 'REAL', 'error_message': 'TEXT',
                 'started_at': 'TEXT', 'completed_at': 'TEXT', 'accepted': 'INTEGER DEFAULT 0',
                 'skipped_reason': 'TEXT', 'probe_data': 'TEXT', 'progress': 'REAL DEFAULT 0', 'duration_str': 'TEXT DEFAULT ""',
-                'job_type': "TEXT DEFAULT 'transcode'"}
+                'job_type': "TEXT DEFAULT 'transcode'",
+                # v3.17 — external submissions (Byte Media Manager etc.)
+                'requested_by': 'TEXT', 'ext_issues': 'TEXT', 'ext_note': 'TEXT', 'file_size_bytes': 'INTEGER'}
             for col, typedef in queue_needed.items():
                 if col not in queue_cols:
                     db.execute(f'ALTER TABLE queue ADD COLUMN {col} {typedef}')
@@ -329,6 +331,10 @@ def init_db():
                             skipped_reason TEXT,
                             probe_data TEXT,
                             job_type TEXT DEFAULT 'transcode',
+                            requested_by TEXT,
+                            ext_issues TEXT,
+                            ext_note TEXT,
+                            file_size_bytes INTEGER,
                             FOREIGN KEY (library_id) REFERENCES libraries(id),
                             UNIQUE (file_path, job_type)
                         );
@@ -340,7 +346,8 @@ def init_db():
                         'audio_summary','audio_track_count','subtitle_track_count','library_id','library_name',
                         'priority','status','health_status','progress','current_step','eta','worker_id',
                         'output_path','output_size_gb','reduction_pct','error_message','started_at',
-                        'completed_at','created_at','accepted','skipped_reason','probe_data','job_type'
+                        'completed_at','created_at','accepted','skipped_reason','probe_data','job_type',
+                        'requested_by','ext_issues','ext_note','file_size_bytes'
                     )]
                     cols_csv = ", ".join(common)
                     db.execute(f"INSERT INTO queue ({cols_csv}) SELECT {cols_csv} FROM _queue_pre_v31")
@@ -2335,6 +2342,200 @@ def api_updates_check():
     with _update_lock:
         _update_cache["at"] = now; _update_cache["data"] = data
     return jsonify(data)
+
+# ── v3.17 — External submission API (Byte Media Manager & other clients) ──────
+# A client (e.g. the WPF app) POSTs a file + detected issues; Byte maps the
+# issues to the right pipeline, dedupes on (path, job_type), and runs it
+# through the normal health-check → queue → process flow.
+
+# Issue vocabulary → Byte pipeline. First match wins (priority order).
+EXT_ISSUE_JOBTYPE = [
+    (("dv_profile_7", "dv_profile_5", "dv_profile_4", "dv_profile_8", "dv_profile"), "dv78only"),
+    (("non_eng_jpn_tracks", "missing_language_tags", "pgs_subtitles"), "remuxclean"),
+    (("container_unsupported", "corrupt_container", "legacy_codec"), "compatfix"),
+]
+
+def _jobtype_for_issues(issues):
+    s = set((i or "").lower() for i in (issues or []))
+    for keys, jt in EXT_ISSUE_JOBTYPE:
+        if s & set(keys):
+            return jt
+    return "compatfix"   # default: general "make it play" fix
+
+def _require_api_key():
+    """External endpoints require the Settings→API key via X-API-Key.
+    Returns an error response tuple if invalid, else None."""
+    key = get_setting("api_key")
+    if key and request.headers.get("X-API-Key") != key:
+        return jsonify({"error": "invalid or missing X-API-Key"}), 401
+    return None
+
+_EXT_STATUS_MAP = {"pending": "queued", "queued": "queued", "processing": "processing",
+                   "complete": "complete", "error": "error", "skipped": "skipped",
+                   "cancelled": "cancelled"}
+
+def _ext_job_view(row):
+    return {
+        "job_id": row["id"],
+        "status": _EXT_STATUS_MAP.get(row["status"], row["status"]),
+        "progress": round(row["progress"] or 0, 1),
+        "job_type": row["job_type"] or "transcode",
+        "message": row["current_step"] or row["error_message"] or "",
+        "output_path": row["output_path"] or "",
+        "source_path": row["file_path"],
+        "file_name": row["file_name"],
+        "requested_by": (row["requested_by"] if "requested_by" in row.keys() else "") or "",
+    }
+
+@app.route("/api/jobs", methods=["POST"])
+def api_submit_job():
+    """Submit one file to the fix queue. Dedupes on (source_path, job_type)."""
+    auth = _require_api_key()
+    if auth:
+        return auth
+    d = request.json or {}
+    path = (d.get("source_path") or "").strip()
+    if not path:
+        return jsonify({"error": "source_path required"}), 400
+    if not os.path.exists(path):
+        return jsonify({"error": f"file not found on server: {path}"}), 404
+    try:
+        size_bytes = os.path.getsize(path)
+    except OSError:
+        return jsonify({"error": "cannot read file on server"}), 400
+
+    issues = d.get("issues") or []
+    jobtype = _jobtype_for_issues(issues)
+    requested_by = (d.get("requested_by") or "external").strip()
+    note = d.get("note") or ""
+
+    # ── Dedupe on (path, job_type) ──
+    with get_db() as db:
+        existing = db.execute("SELECT * FROM queue WHERE file_path=? AND job_type=?", (path, jobtype)).fetchone()
+    if existing:
+        st = existing["status"]
+        if st in ("pending", "queued"):
+            return jsonify({"job_id": existing["id"], "status": "already_queued", "job_type": jobtype}), 200
+        if st == "processing":
+            return jsonify({"job_id": existing["id"], "status": "processing", "job_type": jobtype}), 200
+        if st == "complete":
+            prev = existing["file_size_bytes"] if "file_size_bytes" in existing.keys() else None
+            if prev and int(prev) == size_bytes:
+                return jsonify({"job_id": existing["id"], "status": "already_done", "job_type": jobtype}), 200
+            # file changed (re-downloaded) → drop the stale record and re-create
+            def _del():
+                with get_db() as db:
+                    db.execute("DELETE FROM queue WHERE id=?", (existing["id"],))
+            db_write_retry(_del)
+        else:  # error / skipped / cancelled → requeue this same row
+            def _rq():
+                with get_db() as db:
+                    db.execute("""UPDATE queue SET status='pending', health_status='pending', progress=0,
+                        error_message=NULL, skipped_reason=NULL, output_path=NULL, output_size_gb=NULL,
+                        reduction_pct=NULL, completed_at=NULL, current_step='Requeued',
+                        requested_by=?, ext_issues=?, ext_note=?, file_size_bytes=? WHERE id=?""",
+                        (requested_by, json.dumps(issues), note, size_bytes, existing["id"]))
+            db_write_retry(_rq)
+            return jsonify({"job_id": existing["id"], "status": "queued", "job_type": jobtype}), 202
+
+    # ── Probe for display + type-specific metadata ──
+    probe = None
+    try:
+        r = subprocess.run([FFPROBE, "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", path],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+        if r.returncode == 0:
+            probe = json.loads(r.stdout)
+    except Exception:
+        pass
+    size_gb = size_bytes / (1024**3)
+    v = {}
+    dur_min, hdr, vcodec, res, dovi_profile, has_dovi = 0, "SDR", "", "", None, 0
+    if probe:
+        v = next((s for s in probe.get("streams", []) if s.get("codec_type") == "video"), {})
+        vcodec = v.get("codec_name", "")
+        res = f"{v.get('width',0)}x{v.get('height',0)}"
+        try:
+            dur_min = float(probe.get("format", {}).get("duration", 0)) / 60
+        except Exception:
+            dur_min = 0
+        tr = (v.get("color_transfer") or "").lower()
+        dv_sd = next((sd for sd in v.get("side_data_list", []) if "DOVI" in (sd.get("side_data_type") or "")), None)
+        if dv_sd:
+            has_dovi = 1; dovi_profile = dv_sd.get("dv_profile")
+            hdr = "DoVi"
+        elif tr == "smpte2084":
+            hdr = "HDR10"
+        elif tr == "arib-std-b67":
+            hdr = "HLG"
+        if jobtype == "compatfix":
+            ext = os.path.splitext(path)[1].lower()
+            probe["_compat"] = analyze_for_compat(probe, ext)
+    dur_str = f"{int(dur_min//60)}h {int(dur_min%60)}m" if dur_min >= 60 else f"{int(dur_min)}m"
+
+    # match library by path prefix (for scoping / display)
+    library_id, library_name = None, ""
+    with get_db() as db:
+        for lib in db.execute("SELECT id, name, path FROM libraries").fetchall():
+            if path.startswith(lib["path"].rstrip("/") + "/") or path == lib["path"]:
+                library_id, library_name = lib["id"], lib["name"]; break
+
+    step = f"Queued by {requested_by}: " + (", ".join(issues) if issues else "auto-fix")
+    new_id = {}
+    def _ins():
+        with get_db() as db:
+            max_pri = db.execute("SELECT COALESCE(MAX(priority), 0) FROM queue").fetchone()[0]
+            cur = db.execute("""INSERT INTO queue (
+                file_path, file_name, file_size_gb, file_size_bytes, duration_min, duration_str,
+                video_codec, resolution, hdr_type, has_dovi, dovi_profile, library_id, library_name,
+                status, health_status, priority, probe_data, job_type, current_step,
+                requested_by, ext_issues, ext_note
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', ?, ?, ?, ?, ?, ?, ?)""",
+            (path, os.path.basename(path), size_gb, size_bytes, dur_min, dur_str,
+             vcodec, res, hdr, has_dovi, dovi_profile, library_id, library_name,
+             max_pri + 1, json.dumps(probe) if probe else None, jobtype, step,
+             requested_by, json.dumps(issues), note))
+            new_id["id"] = cur.lastrowid
+    try:
+        db_write_retry(_ins)
+    except sqlite3.IntegrityError:
+        with get_db() as db:
+            ex = db.execute("SELECT id FROM queue WHERE file_path=? AND job_type=?", (path, jobtype)).fetchone()
+        return jsonify({"job_id": ex["id"] if ex else None, "status": "already_queued", "job_type": jobtype}), 200
+    add_log(f"Job #{new_id['id']} submitted by {requested_by} [{jobtype}]: {os.path.basename(path)}", job_id=new_id["id"])
+    return jsonify({"job_id": new_id["id"], "status": "queued", "job_type": jobtype}), 202
+
+@app.route("/api/jobs", methods=["GET"])
+def api_list_jobs():
+    """List jobs, optionally filtered by requested_by and/or status."""
+    auth = _require_api_key()
+    if auth:
+        return auth
+    rb = request.args.get("requested_by")
+    st = request.args.get("status")
+    q = "SELECT * FROM queue WHERE 1=1"
+    params = []
+    if rb:
+        q += " AND requested_by=?"; params.append(rb)
+    if st:
+        # accept the app's vocab; map 'queued' to pending+queued
+        internal = {"queued": ("pending", "queued")}.get(st, (st,))
+        q += " AND status IN (" + ",".join("?" * len(internal)) + ")"; params += list(internal)
+    q += " ORDER BY id DESC LIMIT 500"
+    with get_db() as db:
+        rows = db.execute(q, params).fetchall()
+    return jsonify({"jobs": [_ext_job_view(r) for r in rows]})
+
+@app.route("/api/jobs/<int:jid>", methods=["GET"])
+def api_get_job(jid):
+    """Status of one job in the external client's shape."""
+    auth = _require_api_key()
+    if auth:
+        return auth
+    with get_db() as db:
+        row = db.execute("SELECT * FROM queue WHERE id=?", (jid,)).fetchone()
+    if not row:
+        return jsonify({"error": "job not found", "job_id": jid}), 404
+    return jsonify(_ext_job_view(row))
 
 @app.route("/api/server/overview")
 def api_server_overview():
