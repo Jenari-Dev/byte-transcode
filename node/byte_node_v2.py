@@ -144,7 +144,7 @@ except Exception:
 # ─── Self-update (v2.11) ─────────────────────────────────────────────────────
 # The node checks the same published manifest the web UI uses and can pull its
 # own new files from GitHub, then relaunch — matching the website's update flow.
-NODE_VERSION = "2.14"
+NODE_VERSION = "2.15"
 GITHUB_RAW = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main"
 VERSION_MANIFEST_URL = GITHUB_RAW + "/version.json"
 NODE_FILES = ["byte_node_v2.py", "byte_node_gui.py", "setup_tools.py",
@@ -2389,6 +2389,13 @@ class ByteNode:
                 beam_size=5,
                 vad_filter=True,  # voice-activity detection — better timestamps
                 vad_parameters=dict(min_silence_duration_ms=500),
+                # v2.15 — quality: stop the repeated-phrase hallucination drift
+                # you saw ("completely wrong / not what was said"), and let
+                # Whisper resample low-confidence segments instead of committing.
+                condition_on_previous_text=False,
+                temperature=[0.0, 0.2, 0.4, 0.6, 0.8],
+                no_speech_threshold=0.6,
+                compression_ratio_threshold=2.4,
             )
 
         try:
@@ -2422,7 +2429,7 @@ class ByteNode:
                 self.send_log(job_id, f"  [ERROR] Whisper transcribe failed: {e}")
                 return None
 
-        entries = []
+        raw = []
         last_log_time = time.time()
         total_duration = info.duration if info.duration else 1
         for seg in segments:
@@ -2432,11 +2439,10 @@ class ByteNode:
             text = (seg.text or "").strip()
             if not text:
                 continue
-            entries.append({
-                "idx": len(entries) + 1,
-                "start": seg.start,
-                "end": seg.end,
-                "text": text,
+            raw.append({
+                "start": seg.start, "end": seg.end, "text": text,
+                "nsp": getattr(seg, "no_speech_prob", 0.0) or 0.0,
+                "alp": getattr(seg, "avg_logprob", 0.0) or 0.0,
             })
             # Periodic progress updates within the Whisper phase
             if time.time() - last_log_time > 5:
@@ -2447,8 +2453,45 @@ class ByteNode:
                     f"Whisper transcribing ({seg.end:.0f}s / {total_duration:.0f}s)")
                 last_log_time = time.time()
 
-        self.send_log(job_id, f"  Transcribed {len(entries)} subtitle entries")
+        entries = self._clean_whisper_segments(raw)
+        self.send_log(job_id, f"  Transcribed {len(entries)} subtitle entries "
+                              f"({len(raw) - len(entries)} filtered as hallucination/dupes)")
         return entries
+
+    def _clean_whisper_segments(self, raw):
+        """
+        v2.15 — clean Whisper output for the issues seen on real shows:
+        - drop silence hallucinations (high no-speech prob + low confidence) and
+          repeated-phrase dupes ("completely wrong / not what was said"),
+        - stop subtitles lingering long after the dialogue by capping each line's
+          duration to a reading-time budget and never overlapping the next line.
+        """
+        cleaned, prev_norm = [], None
+        for s in raw:
+            # silence hallucination: model itself thinks it's non-speech + unsure
+            if s["nsp"] > 0.85 and s["alp"] < -0.8:
+                continue
+            norm = re.sub(r"\s+", " ", s["text"]).strip().lower()
+            # collapsed repeat of the previous short line (classic hallucination loop)
+            if prev_norm is not None and norm == prev_norm and (s["end"] - s["start"]) < 2.5:
+                continue
+            prev_norm = norm
+            cleaned.append(s)
+
+        out = []
+        for i, s in enumerate(cleaned):
+            start = max(0.0, s["start"])
+            end = s["end"]
+            nxt = cleaned[i + 1]["start"] if i + 1 < len(cleaned) else None
+            # reading-time cap: ~0.06s/char, min 1.2s, max 7s
+            max_dur = min(7.0, max(1.2, len(s["text"]) * 0.06 + 0.8))
+            end = min(end, start + max_dur)
+            if nxt is not None:
+                end = min(end, nxt - 0.05)   # never overlap / linger into next line
+            if end <= start:
+                end = start + 0.6
+            out.append({"idx": len(out) + 1, "start": start, "end": end, "text": s["text"]})
+        return out
 
     def _extract_audio_for_whisper(self, filepath, audio_stream_idx, output_wav, job_id):
         """Extract a specific audio stream as 16kHz mono WAV for Whisper."""
