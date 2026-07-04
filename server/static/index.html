@@ -87,7 +87,7 @@ function Login({onAuth,setup}){
     return <div style={{minHeight:'100vh',background:T.bg,display:'flex',alignItems:'center',justifyContent:'center'}}>
         <div style={{background:T.sb,borderRadius:14,padding:'44px 40px',border:`1px solid ${T.bd}`,width:380,textAlign:'center'}}>
             <div style={{fontSize:36,fontWeight:800,color:T.ac,letterSpacing:'-1px',lineHeight:1,marginBottom:4}}>BYTE</div>
-            <div style={{fontSize:11,color:T.t2,letterSpacing:'3px',fontWeight:600,marginBottom:36}}>TRANSCODE v3.9</div>
+            <div style={{fontSize:11,color:T.t2,letterSpacing:'3px',fontWeight:600,marginBottom:36}}>TRANSCODE v3.10</div>
             {setup&&<div style={{fontSize:13,color:T.ac,marginBottom:16,padding:'10px 14px',background:`${T.ac}15`,borderRadius:8}}>First time — create your admin account</div>}
             {e&&<div style={{fontSize:13,color:T.er,marginBottom:14}}>{e}</div>}
             <input value={u} onChange={ev=>setU(ev.target.value)} placeholder="Username" style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'12px 16px',color:T.tx,fontSize:14,marginBottom:12}}/>
@@ -274,7 +274,7 @@ function App(){
         <nav style={{width:218,background:T.sb,borderRight:`1px solid ${T.bd}`,display:'flex',flexDirection:'column',position:'sticky',top:0,height:'100vh',flexShrink:0}}>
             <div style={{padding:'22px 18px',borderBottom:`1px solid ${T.bd}`}}>
                 <div style={{fontSize:24,fontWeight:800,color:T.ac,letterSpacing:'-0.5px',lineHeight:1}}>BYTE</div>
-                <div style={{fontSize:10,color:T.t2,letterSpacing:'2.5px',fontWeight:600,marginTop:4}}>TRANSCODE v3.9</div>
+                <div style={{fontSize:10,color:T.t2,letterSpacing:'2.5px',fontWeight:600,marginTop:4}}>TRANSCODE v3.10</div>
             </div>
             <div style={{padding:10,flex:1,overflowY:'auto'}}>
                 {/* Main */}
@@ -358,7 +358,7 @@ function App(){
                     </div>
                     <div style={{background:T.bg,borderRadius:8,padding:'10px 14px',border:`1px solid ${T.bd}`}}>
                         <div style={{fontSize:10,color:T.t2,fontWeight:600}}>VERSION</div>
-                        <div className="mono" style={{fontSize:15,fontWeight:700,color:T.t1,marginTop:2}}>3.9</div>
+                        <div className="mono" style={{fontSize:15,fontWeight:700,color:T.t1,marginTop:2}}>3.10</div>
                     </div>
                     <div style={{background:T.bg,borderRadius:8,padding:'10px 14px',border:`1px solid ${T.bd}`}}>
                         <div style={{fontSize:10,color:T.t2,fontWeight:600}}>STATUS</div>
@@ -1063,6 +1063,9 @@ function App(){
                         <SB T={T} title="DoVi → P8" desc="Convert any Dolby Vision profile (5, 7, ...) to Profile 8 during transcode.">
                             <label style={{display:'flex',alignItems:'center',gap:12,cursor:'pointer'}}><Tog on={lSettings.dovi_convert_p8==='true'} onTog={()=>setLS(s=>({...s,dovi_convert_p8:s.dovi_convert_p8==='true'?'false':'true'}))} T={T}/><span style={{fontSize:14,color:T.tx}}>{lSettings.dovi_convert_p8==='true'?'Enabled':'Disabled'}</span></label>
                         </SB>
+                        <SB T={T} title="Keep Languages" desc="Audio/subtitle languages kept by Audio Cleanup and Compatibility filtering (comma-separated ISO codes, e.g. eng,jpn or eng,spa,fre). Untagged tracks are always kept.">
+                            <input className="mono" value={lSettings.keep_langs||'eng,jpn'} onChange={e=>setLS(s=>({...s,keep_langs:e.target.value}))} placeholder="eng,jpn" style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'10px 14px',color:T.tx,fontSize:13}}/>
+                        </SB>
                         <SB T={T} title="Compatibility Target Codec" desc="Codec used when the Compatibility pipeline re-encodes a flagged file. H.264 plays on everything; HEVC is smaller but needs a modern device.">
                             <select value={lSettings.compat_target||'h264'} onChange={e=>setLS(s=>({...s,compat_target:e.target.value}))} style={{background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'10px 14px',color:T.tx,fontSize:13,cursor:'pointer'}}>
                                 <option value="h264">H.264 (most compatible)</option>
@@ -1100,7 +1103,7 @@ function App(){
                     {(()=>{const pv=lSettings.translate_provider||'anthropic';const eff=(lSettings.translate_api_key||'')||(pv==='anthropic'?(lSettings.claude_api_key||''):'');return (pv!=='openai_compatible'&&!eff)?<div style={{padding:'10px 14px',background:`${T.wn}15`,border:`1px solid ${T.wn}44`,borderRadius:8,marginBottom:14,fontSize:12,color:T.wn,display:'flex',gap:8,alignItems:'center'}}><I n="search" s={14}/> No API key set for the selected provider ({pv}) — SubGen translation jobs will fail until you add one below.</div>:null;})()}
                     <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(300px,1fr))',gap:14}}>
                         <SB T={T} title="Translation Provider" desc="Pick any AI service. 'OpenAI-compatible' + Base URL covers local Ollama/LM Studio and OpenRouter/DeepSeek/etc.">
-                            <select value={lSettings.translate_provider||'anthropic'} onChange={e=>setLS(s=>({...s,translate_provider:e.target.value}))} style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'10px 14px',color:T.tx,fontSize:14}}>
+                            <select value={lSettings.translate_provider||'gemini'} onChange={e=>setLS(s=>({...s,translate_provider:e.target.value}))} style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'10px 14px',color:T.tx,fontSize:14}}>
                                 <option value="anthropic">Anthropic (Claude)</option>
                                 <option value="openai">OpenAI</option>
                                 <option value="gemini">Google (Gemini)</option>
@@ -1145,6 +1148,16 @@ function App(){
                         </SB>
                         <SB T={T} title="Translation Chunk Size" desc="SRT entries per API call. 40 is a safe default.">
                             <input type="number" min={10} max={100} value={lSettings.subgen_translate_chunk||'40'} onChange={e=>setLS(s=>({...s,subgen_translate_chunk:e.target.value}))} className="mono" style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'10px 14px',color:T.tx,fontSize:13}}/>
+                        </SB>
+                        <SB T={T} title="Subtitle Output" desc="Embed new tracks into the file (mkvmerge) or write external .srt beside it. 'auto' embeds small files, external for big ones.">
+                            <select value={lSettings.subgen_embed||'auto'} onChange={e=>setLS(s=>({...s,subgen_embed:e.target.value}))} style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'10px 14px',color:T.tx,fontSize:14}}>
+                                <option value="auto">auto (embed small, external for big)</option>
+                                <option value="always">always embed (mkvmerge remux)</option>
+                                <option value="never">always external .srt</option>
+                            </select>
+                        </SB>
+                        <SB T={T} title="Embed Size Limit (GB)" desc="In 'auto' mode: files at or below this size get embedded; larger files get external SRTs (remux would be slow).">
+                            <input type="number" min={1} max={200} value={lSettings.subgen_embed_max_gb||'25'} onChange={e=>setLS(s=>({...s,subgen_embed_max_gb:e.target.value}))} className="mono" style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'10px 14px',color:T.tx,fontSize:13}}/>
                         </SB>
                         <SB T={T} title="Glossary / Context (optional)" desc="Recurring names, terms, honorifics or show context to keep translations consistent. Applied to every chunk.">
                             <textarea value={lSettings.translate_glossary||''} onChange={e=>setLS(s=>({...s,translate_glossary:e.target.value}))} rows={4} placeholder={"e.g. Show: The Sopranos. Tony→トニー, Carmela→カーメラ. Keep mob slang and profanity."} style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'10px 14px',color:T.tx,fontSize:13,fontFamily:'inherit',resize:'vertical'}}/>

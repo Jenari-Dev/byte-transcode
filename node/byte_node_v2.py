@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Byte Transcode Node v2.9
+Byte Transcode Node v2.10
 ========================
 v2.5 — Server→Node path translation
 v2.6 — Critical fixes:
@@ -110,6 +110,8 @@ class ByteNode:
         self._whisper_model_name = None
         self._whisper_device = None
         self._whisper_compute = None
+        # v2.9 — guards model load so two concurrent SubGen jobs don't double-load
+        self._whisper_lock = threading.Lock()
 
         # v2.4 — GUI status flags. byte_node_gui.py polls these to
         # update its top-bar indicator from "Connecting" → "Connected".
@@ -142,7 +144,7 @@ class ByteNode:
                 self.log(f"  WARN: {tool_name} not found in PATH (fallback: {tool_path!r}). "
                          f"Install it or add its directory to PATH.", "WARN")
 
-        self.log(f"Byte Node v2.9 initialized")
+        self.log(f"Byte Node v2.10 initialized")
         self.log(f"  Worker ID: {self.worker_id}")
         self.log(f"  Server: {self.server}")
         self.log(f"  GPU: {self.gpu}")
@@ -583,6 +585,38 @@ class ByteNode:
             self.current_process = None
             return False, str(e)
 
+    def _normalize_default_audio(self, mkv_path, job_id):
+        """
+        v2.9 — ensure exactly ONE audio track carries the default flag (the
+        first). mkvmerge remuxes of MP4 sources can leave default=1 on every
+        audio track, and duplicate defaults break track selection on some
+        players (observed: ExoPlayer direct-play with no audio at all).
+        Best-effort: logs a warning on failure, never fails the job.
+        """
+        try:
+            r = subprocess.run([self.mkvmerge, "-J", mkv_path],
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=120)
+            if r.returncode != 0:
+                return
+            tracks = json.loads(r.stdout).get("tracks", [])
+            n_audio = sum(1 for t in tracks if t.get("type") == "audio")
+            if n_audio == 0:
+                return
+            # Always assert default on the first audio track — a lone track
+            # with default=0 can still confuse strict track selectors.
+            cmd = [self.mkvpropedit, mkv_path, "--edit", "track:a1", "--set", "flag-default=1"]
+            for i in range(2, n_audio + 1):
+                cmd += ["--edit", f"track:a{i}", "--set", "flag-default=0"]
+            r2 = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                                errors="replace", timeout=120)
+            if r2.returncode == 0:
+                self.send_log(job_id, f"  Normalized default audio flag (1 of {n_audio} tracks default)")
+            else:
+                self.send_log(job_id, f"  [WARN] Could not normalize default audio flags: {(r2.stderr or r2.stdout)[:150]}")
+        except Exception as e:
+            self.send_log(job_id, f"  [WARN] Default-audio normalize skipped: {e}")
+
     def cleanup_workdir(self, work_dir):
         """Clean up temp files on failure."""
         if work_dir and os.path.isdir(work_dir):
@@ -909,6 +943,38 @@ class ByteNode:
     # ─── RemuxClean (job_type='remuxclean') ──────────────────────────────────
     KEEP_LANGS = {"eng", "en", "jpn", "ja", "und", ""}
 
+    # v2.10 — ISO 639-1/639-2(B/T) equivalence groups: entering any member
+    # of a group in the keep_langs setting keeps them all.
+    LANG_GROUPS = [
+        {"en", "eng"}, {"ja", "jpn"}, {"de", "ger", "deu"}, {"fr", "fre", "fra"},
+        {"es", "spa"}, {"it", "ita"}, {"pt", "por"}, {"ru", "rus"},
+        {"zh", "chi", "zho"}, {"ko", "kor"}, {"nl", "dut", "nld"}, {"pl", "pol"},
+        {"sv", "swe"}, {"no", "nor"}, {"da", "dan"}, {"fi", "fin"},
+        {"hi", "hin"}, {"ar", "ara"}, {"tr", "tur"}, {"th", "tha"},
+        {"vi", "vie"}, {"cs", "cze", "ces"}, {"el", "gre", "ell"},
+        {"hu", "hun"}, {"ro", "rum", "ron"}, {"sk", "slo", "slk"},
+    ]
+
+    def _keep_langs(self, settings):
+        """
+        v2.10 — languages to KEEP for cleanup-style track filtering, from
+        the keep_langs setting (comma-separated ISO codes, default
+        "eng,jpn"). Undetermined/untagged tracks are always kept. Both
+        2- and 3-letter forms of each entered language are honored.
+        """
+        raw = (settings.get("keep_langs") or "eng,jpn").lower()
+        langs = {"und", ""}
+        for tok in raw.replace(";", ",").split(","):
+            tok = tok.strip()
+            if not tok:
+                continue
+            langs.add(tok)
+            for group in self.LANG_GROUPS:
+                if tok in group:
+                    langs.update(group)
+                    break
+        return langs
+
     LANG_DISPLAY = {
         "eng": "English", "en": "English",
         "jpn": "Japanese", "ja": "Japanese",
@@ -1047,7 +1113,8 @@ class ByteNode:
         ff_streams_by_index = {s.get("index", -1): s for s in probe.get("streams", [])}
         return {"mkv": mkv_data, "ffprobe": probe, "ff_by_index": ff_streams_by_index}
 
-    def _plan_remux_clean(self, analysis, job_id):
+    def _plan_remux_clean(self, analysis, job_id, keep_langs=None):
+        keep = keep_langs if keep_langs is not None else self.KEEP_LANGS
         """
         Given analysis from _analyze_mkv_for_clean, decide which tracks to keep.
         Returns dict:
@@ -1116,21 +1183,21 @@ class ByteNode:
 
         # Filter audio
         for a in all_audio:
-            if a["lang"] in self.KEEP_LANGS:
+            if a["lang"] in keep:
                 plan["audio_keep_ids"].append(a["id"])
 
         # Safety: NEVER strip all audio. If filter removed everything, keep first audio track.
         if not plan["audio_keep_ids"] and all_audio:
             plan["audio_keep_ids"].append(all_audio[0]["id"])
             self.send_log(job_id,
-                "  [SAFETY] No English/Japanese audio found — keeping first audio track")
+                "  [SAFETY] No kept-language audio found — keeping first audio track")
 
         plan["removed_audio"] = len(all_audio) - len(plan["audio_keep_ids"])
         plan["kept_audio"] = len(plan["audio_keep_ids"])
 
         # Filter subs (no safety net — fine to remove all subs)
         for s in all_subs:
-            if s["lang"] in self.KEEP_LANGS:
+            if s["lang"] in keep:
                 plan["subtitle_keep_ids"].append(s["id"])
         plan["removed_subs"] = len(all_subs) - len(plan["subtitle_keep_ids"])
         plan["kept_subs"] = len(plan["subtitle_keep_ids"])
@@ -1241,7 +1308,7 @@ class ByteNode:
             step = f"[Step 2/{total_steps}] Planning track filter"
             self.update_progress(job_id, 15, step)
             self.send_log(job_id, step)
-            plan = self._plan_remux_clean(analysis, job_id)
+            plan = self._plan_remux_clean(analysis, job_id, keep_langs=self._keep_langs(settings))
 
             self.send_log(job_id,
                 f"  Audio: keep {plan['kept_audio']}, remove {plan['removed_audio']}")
@@ -1672,14 +1739,17 @@ class ByteNode:
             self.send_log(job_id, "  Flagged: " + "; ".join(reasons))
         self.send_log(job_id, f"  Strategy: {strategy}")
 
+        # v2.10 — subtitle filtering honors the configurable keep_langs setting
+        keep = sorted(l for l in self._keep_langs(settings) if l)
+
         try:
             if strategy == "remux":
-                step = "[Step 1/1] mkvmerge rewrap to MKV" + (" (eng/jpn subs only)" if filter_subs else "")
+                step = "[Step 1/1] mkvmerge rewrap to MKV" + (f" ({'/'.join(keep)} subs only)" if filter_subs else "")
                 self.update_progress(job_id, 20, step)
                 self.send_log(job_id, step)
                 cmd = [self.mkvmerge, "-o", output_mkv]
                 if filter_subs:
-                    cmd += ["--subtitle-tracks", "eng,jpn,und"]
+                    cmd += ["--subtitle-tracks", ",".join(keep)]
                 cmd += [filepath]
                 ok, err = self.run_cmd_with_watchdog(cmd, "mkvmerge Rewrap", job_id, stale_timeout=300)
                 if not ok:
@@ -1694,8 +1764,13 @@ class ByteNode:
                     duration_sec = 0
 
                 base_cmd = [self.ffmpeg, "-y", "-i", filepath, "-map", "0:v:0", "-map", "0:a?"]
-                sub_maps = (["-map", "0:s:m:language:eng?", "-map", "0:s:m:language:jpn?"]
-                            if filter_subs else ["-map", "0:s?"])
+                if filter_subs:
+                    sub_maps = []
+                    for lang in keep:
+                        if lang != "und":
+                            sub_maps += ["-map", f"0:s:m:language:{lang}?"]
+                else:
+                    sub_maps = ["-map", "0:s?"]
                 vf = ["-vf", "yadif"] if deinterlace else []
                 enc_args = ["-c:v", encoder, "-preset", settings.get("preset", "p5"),
                             "-cq", str(cq), "-pix_fmt", "yuv420p",
@@ -1747,14 +1822,23 @@ class ByteNode:
 
     # ─── Subtitle Generation (job_type='subgen') ─────────────────────────────
     def _ensure_whisper(self, model_name, device, compute_type, job_id):
-        """Lazy-load faster-whisper model. Auto-installs if missing."""
-        # Already loaded with the same params?
-        if (self._whisper_model is not None
-                and self._whisper_model_name == model_name
-                and self._whisper_device == device
-                and self._whisper_compute == compute_type):
+        """Lazy-load faster-whisper model, thread-safely. The lock prevents two
+        concurrent SubGen jobs (transcode_gpu_count>1) from double-loading it."""
+        def _loaded():
+            return (self._whisper_model is not None
+                    and self._whisper_model_name == model_name
+                    and self._whisper_device == device
+                    and self._whisper_compute == compute_type)
+        if _loaded():
             return self._whisper_model
+        with self._whisper_lock:
+            if _loaded():          # another job may have loaded it while we waited
+                return self._whisper_model
+            return self._load_whisper(model_name, device, compute_type, job_id)
 
+    def _load_whisper(self, model_name, device, compute_type, job_id):
+        """Import (installing if needed), resolve auto device/compute, and load the
+        model. Caller must hold self._whisper_lock."""
         # Try to import; install if needed
         try:
             from faster_whisper import WhisperModel  # noqa
@@ -1875,101 +1959,207 @@ class ByteNode:
             out.append("")
         return "\n".join(out)
 
-    def _claude_translate_chunk(self, api_key, model, chunk, prev_context, title, job_id):
-        """
-        Send a chunk of SRT entries to Claude for Japanese translation.
-        Returns translated chunk (list of dicts with 'text' replaced).
-        """
-        # Build the request payload
+    # ─── Translation providers (multi-vendor, user-selectable) ───────────────
+    # Any OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, OpenRouter,
+    # Together, DeepSeek, …) works via provider 'openai_compatible' + base_url.
+    _LANG_NAMES = {
+        "jpn": "Japanese", "ja": "Japanese", "eng": "English", "en": "English",
+        "spa": "Spanish", "fre": "French", "fra": "French", "ger": "German",
+        "deu": "German", "ita": "Italian", "por": "Portuguese", "kor": "Korean",
+        "chi": "Chinese", "zho": "Chinese", "rus": "Russian", "ara": "Arabic",
+    }
+
+    def _lang_name(self, code):
+        code = (code or "jpn").lower()
+        return self._LANG_NAMES.get(code, code.capitalize())
+
+    def _resolve_translate_cfg(self, settings):
+        """Provider-agnostic translation config. Falls back to the legacy
+        claude_api_key / claude_model settings so existing installs keep working."""
+        provider = (settings.get("translate_provider") or "anthropic").strip().lower()
+        cfg = {
+            "provider": provider,
+            "api_key": (settings.get("translate_api_key") or "").strip(),
+            "model": (settings.get("translate_model") or "").strip(),
+            "base_url": (settings.get("translate_base_url") or "").strip().rstrip("/"),
+            "glossary": (settings.get("translate_glossary") or "").strip(),
+        }
+        if provider == "anthropic":
+            cfg["api_key"] = cfg["api_key"] or (settings.get("claude_api_key") or "").strip()
+            cfg["model"] = cfg["model"] or (settings.get("claude_model") or "claude-sonnet-4-6").strip()
+        return cfg
+
+    def _build_translate_prompts(self, chunk, prev_context, title, target_lang, glossary):
+        """Shared prompt used by every provider. Returns (system, user)."""
+        lang = self._lang_name(target_lang)
         chunk_for_api = [{"i": i, "t": e["text"]} for i, e in enumerate(chunk)]
         prev_lines = "\n".join(f"- {t}" for t in prev_context[-10:]) if prev_context else "(start of file)"
-
         system_prompt = (
-            "You are translating English movie/TV subtitles to natural, native-sounding Japanese. "
-            "Translate as if you were writing subtitles for a Japanese audience watching this content. "
-            "Preserve tone, register, and character voice. Use natural Japanese sentence structure, "
-            "not literal word-for-word translation. Keep idioms idiomatic. "
-            "Do not add explanatory notes. Output ONLY a JSON array."
+            f"You are a professional subtitle translator localizing film/TV subtitles into {lang}. "
+            f"Write natural, idiomatic {lang} the way a native subtitler would — never literal, "
+            f"word-for-word translation. Preserve each speaker's tone, register and character voice; "
+            f"use appropriate politeness/honorific levels; keep slang, profanity and crude language "
+            f"intact (do NOT censor or soften it); keep idioms idiomatic and short enough to read as "
+            f"subtitles. Preserve speaker labels, musical ♪ markers and (sound) caption cues, "
+            f"translating their content. Do not add notes or explanations. Output ONLY a JSON array."
         )
+        gloss = f"\nGlossary / context (apply consistently):\n{glossary}\n" if glossary else ""
         user_prompt = (
-            f"Title: {title}\n\n"
-            f"Previous context (already translated):\n{prev_lines}\n\n"
-            f"Translate the following English subtitle entries to Japanese. "
-            f"Each has an index 'i' and English text 't'. "
-            f"Return JSON array of objects with 'i' (same index) and 't' (Japanese translation). "
-            f"Output ONLY the JSON array, no markdown, no explanation.\n\n"
+            f"Title: {title}\n{gloss}\n"
+            f"Previous lines already translated (for continuity):\n{prev_lines}\n\n"
+            f"Translate each subtitle entry below into {lang}. Each entry has an index 'i' and source "
+            f"text 't'. Return a JSON array of objects, each with 'i' (same index) and 't' (the {lang} "
+            f"translation). Output ONLY the JSON array — no markdown, no commentary.\n\n"
             f"Entries:\n{json.dumps(chunk_for_api, ensure_ascii=False)}"
         )
+        return system_prompt, user_prompt
 
+    def _call_anthropic(self, cfg, system_prompt, user_prompt, job_id):
+        base = cfg["base_url"] or "https://api.anthropic.com"
         try:
             r = requests.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "max_tokens": 8192,
-                    "system": system_prompt,
-                    "messages": [{"role": "user", "content": user_prompt}],
-                },
-                timeout=120,
+                f"{base}/v1/messages",
+                headers={"x-api-key": cfg["api_key"], "anthropic-version": "2023-06-01",
+                         "content-type": "application/json"},
+                json={"model": cfg["model"], "max_tokens": 8192, "system": system_prompt,
+                      "messages": [{"role": "user", "content": user_prompt}]},
+                timeout=180,
             )
         except Exception as e:
-            self.send_log(job_id, f"  [ERROR] Claude API request failed: {e}")
+            self.send_log(job_id, f"  [ERROR] Anthropic request failed: {e}")
             return None
-
         if r.status_code != 200:
-            self.send_log(job_id, f"  [ERROR] Claude API {r.status_code}: {r.text[:300]}")
+            self.send_log(job_id, f"  [ERROR] Anthropic API {r.status_code}: {r.text[:300]}")
             return None
-
         try:
             data = r.json()
-            content_blocks = data.get("content", [])
-            text_parts = [b.get("text", "") for b in content_blocks if b.get("type") == "text"]
-            response_text = "".join(text_parts).strip()
+            return "".join(b.get("text", "") for b in data.get("content", [])
+                           if b.get("type") == "text").strip()
         except Exception as e:
-            self.send_log(job_id, f"  [ERROR] Could not parse Claude response: {e}")
+            self.send_log(job_id, f"  [ERROR] Could not parse Anthropic response: {e}")
             return None
 
-        # Strip code fences if Claude added them despite instructions
-        response_text = re.sub(r"^```(?:json)?\s*", "", response_text)
-        response_text = re.sub(r"\s*```$", "", response_text)
+    def _call_openai(self, cfg, system_prompt, user_prompt, job_id):
+        """OpenAI Chat Completions shape — also serves any OpenAI-compatible
+        endpoint (local Ollama/LM Studio/vLLM, OpenRouter, etc.) via base_url."""
+        base = cfg["base_url"] or "https://api.openai.com/v1"
+        headers = {"content-type": "application/json"}
+        if cfg["api_key"]:
+            headers["Authorization"] = f"Bearer {cfg['api_key']}"
+        try:
+            r = requests.post(
+                f"{base}/chat/completions",
+                headers=headers,
+                json={"model": cfg["model"], "temperature": 0.3, "max_tokens": 8192,
+                      "messages": [{"role": "system", "content": system_prompt},
+                                   {"role": "user", "content": user_prompt}]},
+                timeout=300,
+            )
+        except Exception as e:
+            self.send_log(job_id, f"  [ERROR] OpenAI-compatible request failed: {e}")
+            return None
+        if r.status_code != 200:
+            self.send_log(job_id, f"  [ERROR] OpenAI-compatible API {r.status_code}: {r.text[:300]}")
+            return None
+        try:
+            return (r.json()["choices"][0]["message"]["content"] or "").strip()
+        except Exception as e:
+            self.send_log(job_id, f"  [ERROR] Could not parse OpenAI-compatible response: {e}")
+            return None
 
+    def _call_gemini(self, cfg, system_prompt, user_prompt, job_id):
+        base = cfg["base_url"] or "https://generativelanguage.googleapis.com"
+        url = f"{base}/v1beta/models/{cfg['model']}:generateContent?key={cfg['api_key']}"
+        try:
+            r = requests.post(
+                url, headers={"content-type": "application/json"},
+                json={"systemInstruction": {"parts": [{"text": system_prompt}]},
+                      "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
+                      "generationConfig": {"temperature": 0.3, "maxOutputTokens": 8192,
+                                           "responseMimeType": "application/json"}},
+                timeout=180,
+            )
+        except Exception as e:
+            self.send_log(job_id, f"  [ERROR] Gemini request failed: {e}")
+            return None
+        if r.status_code != 200:
+            self.send_log(job_id, f"  [ERROR] Gemini API {r.status_code}: {r.text[:300]}")
+            return None
+        try:
+            cand = (r.json().get("candidates") or [{}])[0]
+            parts = (cand.get("content") or {}).get("parts") or []
+            return "".join(p.get("text", "") for p in parts).strip()
+        except Exception as e:
+            self.send_log(job_id, f"  [ERROR] Could not parse Gemini response: {e}")
+            return None
+
+    def _translate_chunk(self, cfg, chunk, prev_context, title, target_lang, job_id):
+        """Translate one chunk via the configured provider.
+        Returns list of entries with 'text' replaced (timestamps preserved)."""
+        system_prompt, user_prompt = self._build_translate_prompts(
+            chunk, prev_context, title, target_lang, cfg.get("glossary", ""))
+        provider = cfg["provider"]
+        if provider == "anthropic":
+            response_text = self._call_anthropic(cfg, system_prompt, user_prompt, job_id)
+        elif provider == "gemini":
+            response_text = self._call_gemini(cfg, system_prompt, user_prompt, job_id)
+        elif provider in ("openai", "openai_compatible"):
+            response_text = self._call_openai(cfg, system_prompt, user_prompt, job_id)
+        else:
+            self.send_log(job_id, f"  [ERROR] Unknown translate_provider '{provider}'")
+            return None
+        if not response_text:
+            return None
+
+        # Strip code fences the model may have added despite instructions
+        response_text = re.sub(r"^```(?:json)?\s*", "", response_text)
+        response_text = re.sub(r"\s*```$", "", response_text).strip()
         try:
             translated = json.loads(response_text)
-        except json.JSONDecodeError as e:
-            self.send_log(job_id, f"  [ERROR] Claude returned non-JSON: {e}")
-            self.send_log(job_id, f"  Response: {response_text[:300]}")
-            return None
+        except json.JSONDecodeError:
+            # Some models wrap the array in prose or an object — pull out the array
+            m = re.search(r"\[.*\]", response_text, re.DOTALL)
+            if not m:
+                self.send_log(job_id, f"  [ERROR] {provider} returned non-JSON: {response_text[:200]}")
+                return None
+            try:
+                translated = json.loads(m.group(0))
+            except json.JSONDecodeError as e:
+                self.send_log(job_id, f"  [ERROR] {provider} JSON parse failed: {e}")
+                return None
+        if isinstance(translated, dict):  # e.g. {"translations": [...]}
+            for v in translated.values():
+                if isinstance(v, list):
+                    translated = v
+                    break
 
-        # Build dict by index for fast lookup
         by_idx = {item.get("i"): item.get("t", "") for item in translated if isinstance(item, dict)}
-
-        # Apply translations preserving timestamps
         result = []
         for i, src in enumerate(chunk):
-            translated_text = by_idx.get(i, src["text"])  # fallback to original if missing
             new_entry = dict(src)
-            new_entry["text"] = translated_text
+            txt = by_idx.get(i)
+            new_entry["text"] = txt if txt else src["text"]  # fallback to source if missing
             result.append(new_entry)
         return result
 
-    def _translate_srt_to_japanese(self, entries, api_key, model, chunk_size, title, job_id):
-        """Translate full SRT entries list to Japanese in chunks. Returns translated entries."""
+    def _translate_srt(self, entries, cfg, chunk_size, title, target_lang, job_id):
+        """Translate full SRT entries to target_lang in chunks via the configured
+        provider. Returns translated entries (timestamps preserved) or None."""
         if not entries:
             return entries
-        if not api_key:
-            self.send_log(job_id, "  [ERROR] Claude API key not set in server settings")
+        # A key is required for every hosted provider; local OpenAI-compatible
+        # servers (Ollama/LM Studio) legitimately need no key.
+        if not cfg.get("api_key") and cfg["provider"] != "openai_compatible":
+            self.send_log(job_id, "  [ERROR] Translation API key not set in settings")
             return None
 
+        lang = self._lang_name(target_lang)
         translated_all = []
-        prev_context = []  # list of recently-translated texts
+        prev_context = []  # recently-translated lines, for cross-chunk continuity
         total_chunks = (len(entries) + chunk_size - 1) // chunk_size
         self.send_log(job_id,
-            f"  Translating {len(entries)} subtitle entries in {total_chunks} chunks of {chunk_size}")
+            f"  Translating {len(entries)} entries → {lang} via {cfg['provider']} "
+            f"({cfg.get('model') or 'default'}) in {total_chunks} chunks of {chunk_size}")
 
         for ci in range(total_chunks):
             if self.cancelled:
@@ -1977,13 +2167,11 @@ class ByteNode:
                 return None
             chunk = entries[ci * chunk_size : (ci + 1) * chunk_size]
             self.send_log(job_id, f"  Chunk {ci+1}/{total_chunks} ({len(chunk)} entries)...")
-            translated = self._claude_translate_chunk(
-                api_key, model, chunk, prev_context, title, job_id)
+            translated = self._translate_chunk(cfg, chunk, prev_context, title, target_lang, job_id)
             if translated is None:
                 self.send_log(job_id, f"  [ERROR] Translation failed at chunk {ci+1}")
                 return None
             translated_all.extend(translated)
-            # Add the most recent translations to context for next chunk
             for e in translated[-10:]:
                 prev_context.append(e["text"])
 
@@ -2144,17 +2332,106 @@ class ByteNode:
 
         return None
 
+    # ─── SubGen sync verification + cancellation (v2.9) ───────────────────────
+    def _audio_stream_start_pts(self, probe, audio_stream_idx):
+        """Container start time (seconds) of the given audio stream — the offset
+        Whisper timings are implicitly relative to. 0.0 if unknown."""
+        for s in (probe or {}).get("streams", []):
+            if s.get("index") == audio_stream_idx:
+                try:
+                    return float(s.get("start_time") or 0.0)
+                except (TypeError, ValueError):
+                    return 0.0
+        return 0.0
+
+    def _normalize_srt_timing(self, entries, offset, job_id):
+        """Shift all cues by `offset` seconds when it is significant. Whisper emits
+        timings relative to decoded audio starting at 0; if the source audio stream
+        has a nonzero start PTS, the muxed subs would drift without this."""
+        if not entries or abs(offset) < 0.1:
+            return entries
+        self.send_log(job_id, f"  Adjusting subtitle timing by {offset:+.3f}s (audio start PTS)")
+        for e in entries:
+            e["start"] = max(0.0, e["start"] + offset)
+            e["end"] = max(0.0, e["end"] + offset)
+        return entries
+
+    def _verify_srt_sync(self, entries, duration, job_id):
+        """Non-fatal sanity check on final cue timings; logs warnings if off."""
+        if not entries:
+            self.send_log(job_id, "  [WARN] No subtitle entries to verify")
+            return False
+        ok = True
+        if entries[0]["start"] < -0.05:
+            self.send_log(job_id, f"  [WARN] First cue starts before zero ({entries[0]['start']:.2f}s)")
+            ok = False
+        prev = -1.0
+        for e in entries:
+            if e["end"] < e["start"]:
+                self.send_log(job_id, "  [WARN] A cue ends before it starts"); ok = False; break
+            if e["start"] < prev - 0.5:
+                self.send_log(job_id, "  [WARN] Non-monotonic cue timings detected"); ok = False; break
+            prev = e["start"]
+        if duration and entries[-1]["end"] > duration + 5:
+            self.send_log(job_id,
+                f"  [WARN] Last cue ({entries[-1]['end']:.0f}s) exceeds media duration ({duration:.0f}s)")
+            ok = False
+        if ok:
+            self.send_log(job_id,
+                f"  Sync OK: {len(entries)} cues over 0–{entries[-1]['end']:.0f}s (media {duration:.0f}s)")
+        return ok
+
+    def _subgen_cancel_poller(self, job_id, stop_event):
+        """Runs for the whole subgen() lifetime. check_cancel() sets the per-job
+        cancelled flag (cross-thread safe via the job registry) so the in-process
+        Whisper and translation loops actually observe a user cancel."""
+        while not stop_event.wait(3):
+            try:
+                if self.check_cancel(job_id):
+                    return
+            except Exception:
+                pass
+
+    _TEXT_SUB_CODECS = {"subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text"}
+
+    def _find_text_sub_stream(self, probe, langset):
+        """Return the index of the first TEXT subtitle stream whose language is in
+        `langset`, or None. Image subs (PGS/VobSub) don't count — can't translate them."""
+        for s in (probe or {}).get("streams", []):
+            if s.get("codec_type") != "subtitle":
+                continue
+            if (s.get("codec_name") or "").lower() not in self._TEXT_SUB_CODECS:
+                continue
+            lng = ((s.get("tags") or {}).get("language") or "").lower()
+            if lng in langset:
+                return s.get("index")
+        return None
+
+    def _dur(self, probe):
+        try:
+            return float((probe.get("format") or {}).get("duration") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
     def subgen(self, job, settings):
         """
-        Subtitle generation pipeline. Produces a Japanese SRT and muxes it into the file.
+        Subtitle generation. Ensures the file has BOTH an English and a target-language
+        (default Japanese) TEXT subtitle track, creating whichever is missing:
+          • English  — from an existing eng text sub, else Whisper-transcribed from audio.
+          • Japanese — translated from the English pivot via the configured AI provider
+                       (or Whisper-transcribed directly when only target-language audio exists).
+        New tracks are embedded via mkvmerge when that's quick (small files, or embed=always),
+        otherwise written as external SRTs next to the video (embed=auto over the size
+        threshold, or embed=never).
         """
         job_id = job["id"]
         filepath = job["file_path"]
         filename = job["file_name"]
         file_size_gb = job["file_size_gb"]
 
-        api_key = settings.get("claude_api_key", "")
-        claude_model = settings.get("claude_model", "claude-sonnet-4-6")
+        target_lang = (settings.get("subgen_target_lang") or "jpn").lower()
+        target_set = {"jpn", "ja"} if target_lang in ("jpn", "ja") else {target_lang}
+        tcfg = self._resolve_translate_cfg(settings)
         whisper_model = settings.get("whisper_model", "large-v3")
         whisper_device = settings.get("whisper_device", "auto")
         whisper_compute = settings.get("whisper_compute", "auto")
@@ -2162,118 +2439,166 @@ class ByteNode:
             chunk_size = int(settings.get("subgen_translate_chunk", "40"))
         except (TypeError, ValueError):
             chunk_size = 40
+        embed_mode = (settings.get("subgen_embed") or "auto").lower()   # auto | always | never
+        try:
+            embed_max_gb = float(settings.get("subgen_embed_max_gb") or 25)
+        except (TypeError, ValueError):
+            embed_max_gb = 25.0
 
         basename = os.path.splitext(filename)[0]
         work_dir = self._work_dir(job_id, settings)
+        lang_name = self._lang_name(target_lang)
+
+        # v2.9 — poll for cancellation for the whole SubGen duration. The Whisper
+        # and translation loops check self.cancelled but (unlike run_cmd) spawn no
+        # subprocess whose poller would set it — so drive check_cancel() here.
+        _cancel_stop = threading.Event()
+        _cancel_thr = threading.Thread(
+            target=self._subgen_cancel_poller, args=(job_id, _cancel_stop), daemon=True)
+        _cancel_thr.start()
+
+        def _need_key():
+            return not tcfg["api_key"] and tcfg["provider"] != "openai_compatible"
 
         try:
-            # Step 1: Probe to determine pipeline path
-            step = "[Step 1/5] Probing source for subtitle/audio streams"
+            step = "[SubGen] Probing source streams"
             self.update_progress(job_id, 5, step)
             self.send_log(job_id, step)
             probe = self.probe_file(filepath, job_id)
             if not probe:
                 return False, "Failed to probe source file", None, work_dir
 
-            choice = self._select_subgen_source(probe, job_id)
-            if not choice:
-                return False, "No usable audio or subtitle source for SubGen", None, work_dir
-            self.send_log(job_id, f"  Source: {choice['description']}")
+            eng_sub_idx = self._find_text_sub_stream(probe, {"eng", "en"})
+            tgt_sub_idx = self._find_text_sub_stream(probe, target_set)
+            audio_streams = [s for s in probe.get("streams", []) if s.get("codec_type") == "audio"]
+            def _alang(a): return ((a.get("tags") or {}).get("language") or "und").lower()
+            eng_audio = next((a for a in audio_streams if _alang(a) in ("eng", "en")), None)
+            tgt_audio = next((a for a in audio_streams if _alang(a) in target_set), None)
 
-            # Step 2: Get English/source-language entries
-            step = "[Step 2/5] Acquiring source subtitle entries"
-            self.update_progress(job_id, 15, step)
-            self.send_log(job_id, step)
-            source_entries = None
-            translate_to_japanese = False  # if False, output IS Japanese (whisper_jpn)
+            need_eng = eng_sub_idx is None
+            need_tgt = tgt_sub_idx is None
+            if not need_eng and not need_tgt:
+                self.send_log(job_id, "  Already has English + target subs — nothing to do")
+                return True, None, {"no_op": True, "output_path": filepath,
+                                    "output_size_gb": file_size_gb, "reduction_pct": 0, "saved_gb": 0}, work_dir
+            self.send_log(job_id, "  Missing: " +
+                ", ".join(([("English")] if need_eng else []) + ([lang_name] if need_tgt else [])))
 
-            if choice["mode"] == "translate_text":
-                # Extract English SRT, parse it
-                src_srt_path = os.path.join(work_dir, f"{basename}.eng.srt")
-                if not self._extract_text_subtitle(
-                        filepath, choice["sub_stream_idx"], src_srt_path, job_id):
+            # ── Acquire the English pivot (and, when only target audio exists, a direct
+            #    target-language transcription).
+            eng_entries = None    # English cues — pivot + English track
+            tgt_direct = None     # target cues transcribed directly from target-lang audio
+            if eng_sub_idx is not None:
+                self.update_progress(job_id, 15, "Extracting existing English subtitles")
+                src_srt = os.path.join(work_dir, f"{basename}.eng.extract.srt")
+                if not self._extract_text_subtitle(filepath, eng_sub_idx, src_srt, job_id):
                     return False, "Failed to extract English subtitle stream", None, work_dir
-                with open(src_srt_path, "r", encoding="utf-8", errors="replace") as f:
-                    srt_text = f.read()
-                source_entries = self._parse_srt(srt_text)
-                if not source_entries:
-                    return False, "Source SRT was empty after parsing", None, work_dir
-                translate_to_japanese = True
-
-            elif choice["mode"] == "whisper_jpn":
-                # Whisper transcribe Japanese audio directly — output IS Japanese
-                wav_path = os.path.join(work_dir, f"{basename}.audio.wav")
+                eng_entries = self._parse_srt(open(src_srt, encoding="utf-8", errors="replace").read())
+                if not eng_entries:
+                    return False, "Extracted English SRT was empty", None, work_dir
+            elif eng_audio is not None or tgt_audio is None:
+                a = eng_audio or (audio_streams[0] if audio_streams else None)
+                if a is None:
+                    return False, "No audio or subtitle source for SubGen", None, work_dir
+                a_idx = a.get("index")
+                wav = os.path.join(work_dir, f"{basename}.audio.wav")
                 self.update_progress(job_id, 18, "Extracting audio for Whisper")
-                if not self._extract_audio_for_whisper(
-                        filepath, choice["audio_stream_idx"], wav_path, job_id):
+                if not self._extract_audio_for_whisper(filepath, a_idx, wav, job_id):
                     return False, "Failed to extract audio", None, work_dir
-                source_entries = self._whisper_transcribe(
-                    wav_path, whisper_model, whisper_device, whisper_compute,
-                    language="ja", task="transcribe", job_id=job_id)
-                if source_entries is None:
+                eng_entries = self._whisper_transcribe(
+                    wav, whisper_model, whisper_device, whisper_compute,
+                    language=("en" if eng_audio is not None else None), task="transcribe", job_id=job_id)
+                if eng_entries is None:
                     return False, "Whisper transcription failed", None, work_dir
-                translate_to_japanese = False
-
-            elif choice["mode"] == "whisper_en_translate":
-                # Whisper transcribe (auto-detect or English), then Claude translates to Japanese
-                wav_path = os.path.join(work_dir, f"{basename}.audio.wav")
+                eng_entries = self._normalize_srt_timing(
+                    eng_entries, self._audio_stream_start_pts(probe, a_idx), job_id)
+            else:
+                # No English sub or audio, but target-language audio exists → transcribe it directly.
+                a_idx = tgt_audio.get("index")
+                wav = os.path.join(work_dir, f"{basename}.audio.wav")
                 self.update_progress(job_id, 18, "Extracting audio for Whisper")
-                if not self._extract_audio_for_whisper(
-                        filepath, choice["audio_stream_idx"], wav_path, job_id):
+                if not self._extract_audio_for_whisper(filepath, a_idx, wav, job_id):
                     return False, "Failed to extract audio", None, work_dir
-                # Auto-detect language for the source — keep transcribe (not Whisper-translate)
-                # to preserve fidelity, then Claude does the JP translation
-                source_entries = self._whisper_transcribe(
-                    wav_path, whisper_model, whisper_device, whisper_compute,
-                    language=None, task="transcribe", job_id=job_id)
-                if source_entries is None:
+                tgt_direct = self._whisper_transcribe(
+                    wav, whisper_model, whisper_device, whisper_compute,
+                    language=("ja" if target_lang in ("jpn", "ja") else None), task="transcribe", job_id=job_id)
+                if tgt_direct is None:
                     return False, "Whisper transcription failed", None, work_dir
-                translate_to_japanese = True
-            else:
-                return False, f"Unknown SubGen mode: {choice['mode']}", None, work_dir
+                tgt_direct = self._normalize_srt_timing(
+                    tgt_direct, self._audio_stream_start_pts(probe, a_idx), job_id)
 
-            self.send_log(job_id, f"  Acquired {len(source_entries)} subtitle entries")
+            # ── Build the tracks we need to add: list of (lang_code, track_name, entries)
+            tracks = []
+            if need_tgt:
+                if tgt_direct is not None:
+                    tgt_entries = tgt_direct
+                else:
+                    if _need_key():
+                        return False, "Translation API key not set — open Settings → AI / Subtitles", None, work_dir
+                    step = f"[SubGen] Translating English → {lang_name} via {tcfg['provider']}"
+                    self.update_progress(job_id, 55, step)
+                    self.send_log(job_id, step)
+                    tgt_entries = self._translate_srt(eng_entries, tcfg, chunk_size, basename, target_lang, job_id)
+                    if tgt_entries is None:
+                        return False, "Translation failed (see log)", None, work_dir
+                self._verify_srt_sync(tgt_entries, self._dur(probe), job_id)
+                tracks.append((target_lang, lang_name, tgt_entries))
 
-            # Step 3: Translate to Japanese (if needed)
-            if translate_to_japanese:
-                step = "[Step 3/5] Translating to Japanese via Claude API"
-                self.update_progress(job_id, 60, step)
-                self.send_log(job_id, step)
-                if not api_key:
-                    return False, "Claude API key not set — open Settings → AI to add it", None, work_dir
-                jpn_entries = self._translate_srt_to_japanese(
-                    source_entries, api_key, claude_model, chunk_size, basename, job_id)
-                if jpn_entries is None:
-                    return False, "Claude translation failed (see log)", None, work_dir
-            else:
-                # Whisper-Japanese: source IS already Japanese
-                jpn_entries = source_entries
-                self.send_log(job_id, "[Step 3/5] Source is Japanese — skipping translation")
-                self.update_progress(job_id, 90, "Japanese transcription ready")
+            if need_eng:
+                if eng_entries is None and tgt_direct is not None:
+                    if _need_key():
+                        return False, "Translation API key not set — open Settings → AI / Subtitles", None, work_dir
+                    self.update_progress(job_id, 78, "[SubGen] Translating → English")
+                    eng_entries = self._translate_srt(tgt_direct, tcfg, chunk_size, basename, "eng", job_id)
+                    if eng_entries is None:
+                        return False, "English translation failed (see log)", None, work_dir
+                if eng_entries is not None:
+                    self._verify_srt_sync(eng_entries, self._dur(probe), job_id)
+                    tracks.append(("eng", "English", eng_entries))
 
-            # Step 4: Write Japanese SRT
-            step = "[Step 4/5] Writing Japanese SRT"
-            self.update_progress(job_id, 92, step)
-            self.send_log(job_id, step)
-            jpn_srt_path = os.path.join(work_dir, f"{basename}.jpn.srt")
-            with open(jpn_srt_path, "w", encoding="utf-8") as f:
-                f.write(self._serialize_srt(jpn_entries))
-            self.send_log(job_id, f"  Wrote {os.path.getsize(jpn_srt_path)} bytes to {jpn_srt_path}")
+            if not tracks:
+                return True, None, {"no_op": True, "output_path": filepath,
+                                    "output_size_gb": file_size_gb, "reduction_pct": 0, "saved_gb": 0}, work_dir
 
-            # Step 5: mkvmerge to add Japanese SRT track to the file
-            step = "[Step 5/5] mkvmerge: adding Japanese SRT track"
+            # ── Decide embed vs external (embed preferred when quick)
+            if embed_mode == "always":
+                do_embed = True
+            elif embed_mode == "never":
+                do_embed = False
+            else:  # auto — embed small files, external for big ones (remux would be slow)
+                do_embed = file_size_gb <= embed_max_gb
+            self.send_log(job_id,
+                f"  Output: {'embed (mkvmerge)' if do_embed else 'external SRT'} "
+                f"[file {file_size_gb:.1f}GB, threshold {embed_max_gb:.0f}GB, mode={embed_mode}]")
+
+            # ── Write SRT files (work dir for embed; next to the video for external)
+            self.update_progress(job_id, 92, "Writing subtitle files")
+            written = []
+            for lang, name, entries in tracks:
+                out_dir = work_dir if do_embed else os.path.dirname(filepath)
+                srt_path = os.path.join(out_dir, f"{basename}.{lang}.srt")
+                with open(srt_path, "w", encoding="utf-8") as f:
+                    f.write(self._serialize_srt(entries))
+                written.append((lang, name, srt_path))
+                self.send_log(job_id, f"  Wrote {name} SRT ({len(entries)} cues) → {srt_path}")
+
+            # ── External: done — no remux, don't replace the original (no_op result)
+            if not do_embed:
+                self.update_progress(job_id, 100, "Complete (external subtitles)")
+                self.send_log(job_id, f"  COMPLETE: wrote {len(written)} external subtitle file(s) beside the video")
+                return True, None, {"no_op": True, "output_path": filepath,
+                                    "output_size_gb": file_size_gb, "reduction_pct": 0, "saved_gb": 0}, work_dir
+
+            # ── Embed: add all new tracks in one mkvmerge pass
+            step = f"[SubGen] mkvmerge: embedding {len(written)} subtitle track(s)"
             self.update_progress(job_id, 95, step)
             self.send_log(job_id, step)
-            output_mkv = os.path.join(work_dir, f"{basename}_jpn.mkv")
-            cmd = [
-                self.mkvmerge, "-o", output_mkv,
-                filepath,
-                "--language", "0:jpn",
-                "--track-name", "0:Japanese",
-                jpn_srt_path,
-            ]
+            output_mkv = os.path.join(work_dir, f"{basename}_subgen.mkv")
+            cmd = [self.mkvmerge, "-o", output_mkv, filepath]
+            for lang, name, srt_path in written:
+                cmd += ["--language", f"0:{lang}", "--track-name", f"0:{name}", srt_path]
             ok, err = self.run_cmd_with_watchdog(
-                cmd, "mkvmerge add Japanese SRT", job_id, stale_timeout=300)
+                cmd, "mkvmerge add subtitle tracks", job_id, stale_timeout=600)
             if not ok:
                 return False, f"mkvmerge failed: {err[:200]}", None, work_dir
             if not os.path.exists(output_mkv) or os.path.getsize(output_mkv) < 1024:
@@ -2281,12 +2606,9 @@ class ByteNode:
 
             output_gb = os.path.getsize(output_mkv) / (1024**3)
             size_change_pct = (1 - output_gb / file_size_gb) * 100 if file_size_gb > 0 else 0
-
             self.update_progress(job_id, 100, "Complete")
             self.send_log(job_id,
-                f"  COMPLETE: Added Japanese SRT ({len(jpn_entries)} entries) "
-                f"to {basename}.mkv")
-
+                f"  COMPLETE: embedded {', '.join(n for _, n, _ in written)} into {basename}.mkv")
             return True, None, {
                 "output_path": output_mkv,
                 "output_size_gb": output_gb,
@@ -2301,6 +2623,8 @@ class ByteNode:
             self.send_log(job_id, f"[ERROR] SubGen exception: {e}")
             self.send_log(job_id, f"[ERROR] {tb[-500:]}")
             return False, str(e), None, work_dir
+        finally:
+            _cancel_stop.set()
 
     def _translate_path(self, server_path, settings):
         """
@@ -2452,6 +2776,12 @@ class ByteNode:
                 self.current_job_id = None
                 return
 
+            # v2.9 — exactly one default audio track (duplicate default flags
+            # from MP4-source remuxes caused silent audio on ExoPlayer
+            # direct-play). SubGen outputs excluded (owned elsewhere).
+            if job_type != "subgen" and result["output_path"].lower().endswith(".mkv"):
+                self._normalize_default_audio(result["output_path"], job_id)
+
             # Handle file replacement
             final_path = self.replace_original(job, result, settings, work_dir)
             result["output_path"] = final_path
@@ -2498,7 +2828,7 @@ class ByteNode:
 
         while self.running:
             try:
-                r = self.api("POST", "/api/jobs/next", {"worker_id": self.worker_id})
+                r = self.api("POST", "/api/jobs/next", {"worker_id": self.worker_id}, timeout=90)
                 if r and r.get("job"):
                     self.process_job(r)
                 elif r:
@@ -2601,7 +2931,7 @@ class ByteNode:
         time.sleep(worker_idx * 0.5)
         while self.running:
             try:
-                r = self.api("POST", "/api/jobs/next", {"worker_id": self.worker_id})
+                r = self.api("POST", "/api/jobs/next", {"worker_id": self.worker_id}, timeout=90)
                 if r and r.get("job"):
                     job = r["job"]
                     fname = job.get("file_name", "")

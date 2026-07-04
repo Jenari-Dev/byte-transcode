@@ -293,7 +293,7 @@ class ByteNodeGUI:
         title_frame.pack(side="left")
         tk.Label(title_frame, text="Byte Transcode Node", font=("Segoe UI", 18, "bold"),
                  fg=C["accent"], bg=C["bg"]).pack(side="left")
-        tk.Label(title_frame, text="  v2.8", font=("Segoe UI", 10),
+        tk.Label(title_frame, text="  v2.10", font=("Segoe UI", 10),
                  fg=C["text2"], bg=C["bg"]).pack(side="left", pady=(6, 0))
 
         # Exit button

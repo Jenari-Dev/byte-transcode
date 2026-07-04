@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 from flask import Flask, request, jsonify, send_from_directory, Response, session, redirect
 
-SERVER_VERSION = "3.9"
+SERVER_VERSION = "3.10"
 DEFAULT_PORT = 5800
 DB_PATH = os.environ.get("BYTE_DB_PATH", "/config/byte_transcode.db")
 LOG_DIR = os.environ.get("BYTE_LOG_DIR", "/config/logs")
@@ -189,13 +189,19 @@ def init_db():
             "whisper_compute": "auto",
             "subgen_target_lang": "jpn",
             "subgen_translate_chunk": "40",
+            # v3.9 — SubGen ensures BOTH English + target-lang text subs exist, creating
+            # whichever is missing (English via Whisper; target via AI translation).
+            # Embed new tracks via mkvmerge when quick; write external SRTs for big files.
+            "subgen_embed": "auto",              # auto | always | never
+            "subgen_embed_max_gb": "25",         # auto: embed if file <= this, else external SRT
             # v3.9 — provider-agnostic translation. Users pick any AI service and
             # supply their own key. 'openai_compatible' + translate_base_url covers
             # local Ollama/LM Studio/vLLM and OpenRouter/Together/DeepSeek/etc.
             # Empty translate_* falls back to the legacy claude_api_key/claude_model.
-            "translate_provider": "anthropic",   # anthropic | openai | gemini | openai_compatible
+            # Default = Gemini 2.5 Flash (best quality-per-cost; free tier available).
+            "translate_provider": "gemini",      # anthropic | openai | gemini | openai_compatible
             "translate_api_key": "",
-            "translate_model": "",               # blank = provider default / legacy claude_model
+            "translate_model": "gemini-2.5-flash",  # blank = provider default / legacy claude_model
             "translate_base_url": "",            # required for openai_compatible; optional override otherwise
             "translate_glossary": "",            # optional recurring names/terms/context for consistency
             # v3.4 — Per-job-type processing toggles. Each defaults to "true";
@@ -208,6 +214,9 @@ def init_db():
             "processing_enabled_dv78only": "true",
             # v3.8 — Compatibility pipeline (flag + fix playback-risk files)
             "processing_enabled_compatfix": "true",
+            # v3.10 — languages kept by Audio/Track Cleanup and Compatibility
+            # subtitle filtering (comma-separated ISO codes; und always kept)
+            "keep_langs": "eng,jpn",
             # v3.9 — DV Profile 5 conversion mode: 'reencode' re-encodes the
             # IPTPQc2 base layer to real PQ HDR10 (correct on all devices);
             # 'relabel' is the old metadata-only pass (fast but leaves
@@ -537,6 +546,37 @@ def probe_file(path):
 # ─── Cleanup Analysis (RemuxClean) ───────────────────────────────────────────
 KEEP_LANGS = {"eng", "en", "jpn", "ja", "und", ""}  # empty string = no lang tag = treat as und
 
+# v3.10 — ISO 639-1/639-2(B/T) equivalence groups so the keep_langs setting
+# accepts either form (e.g. "de" keeps ger+deu-tagged tracks too)
+LANG_GROUPS = [
+    {"en", "eng"}, {"ja", "jpn"}, {"de", "ger", "deu"}, {"fr", "fre", "fra"},
+    {"es", "spa"}, {"it", "ita"}, {"pt", "por"}, {"ru", "rus"},
+    {"zh", "chi", "zho"}, {"ko", "kor"}, {"nl", "dut", "nld"}, {"pl", "pol"},
+    {"sv", "swe"}, {"no", "nor"}, {"da", "dan"}, {"fi", "fin"},
+    {"hi", "hin"}, {"ar", "ara"}, {"tr", "tur"}, {"th", "tha"},
+    {"vi", "vie"}, {"cs", "cze", "ces"}, {"el", "gre", "ell"},
+    {"hu", "hun"}, {"ro", "rum", "ron"}, {"sk", "slo", "slk"},
+]
+
+def get_keep_langs():
+    """
+    v3.10 — languages to KEEP for cleanup filtering, from the keep_langs
+    setting (comma-separated ISO codes, default "eng,jpn"). Undetermined
+    and untagged tracks are always kept.
+    """
+    raw = (get_setting("keep_langs") or "eng,jpn").lower()
+    langs = {"und", ""}
+    for tok in raw.replace(";", ",").split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        langs.add(tok)
+        for group in LANG_GROUPS:
+            if tok in group:
+                langs.update(group)
+                break
+    return langs
+
 DIRTY_NAME_KEYWORDS = [
     "blu-ray", "bluray", "blu ray", "uhd", "web-dl", "web dl", "webrip",
     "bdrip", "hdrip", "brrip", "remux", "1080p", "2160p", "720p", "4k",
@@ -562,14 +602,16 @@ def is_dirty_track_name(name):
         return True
     return False
 
-def analyze_for_cleanup(probe_json):
+def analyze_for_cleanup(probe_json, keep_langs=None):
     """
     Given parsed ffprobe JSON, return cleanup analysis.
     Returns dict with: unwanted_audio, unwanted_subs, dirty_names,
     total_audio, total_subs, needs_cleanup (bool).
+    v3.10: keep_langs is configurable via the keep_langs setting.
     """
     if not probe_json:
         return None
+    keep = keep_langs if keep_langs is not None else KEEP_LANGS
     streams = probe_json.get("streams", [])
     audio = [s for s in streams if s.get("codec_type") == "audio"]
     subs = [s for s in streams if s.get("codec_type") == "subtitle"]
@@ -581,7 +623,7 @@ def analyze_for_cleanup(probe_json):
     for s in audio:
         tags = s.get("tags") or {}
         lang = (tags.get("language") or "und").lower()
-        if lang not in KEEP_LANGS:
+        if lang not in keep:
             unwanted_audio += 1
         title = tags.get("title") or ""
         if is_dirty_track_name(title):
@@ -595,7 +637,7 @@ def analyze_for_cleanup(probe_json):
     for s in subs:
         tags = s.get("tags") or {}
         lang = (tags.get("language") or "und").lower()
-        if lang not in KEEP_LANGS:
+        if lang not in keep:
             unwanted_subs += 1
         title = tags.get("title") or ""
         if is_dirty_track_name(title):
@@ -789,7 +831,7 @@ def scan_remuxclean_task(library_id):
                 skipped += 1
                 continue
 
-            cleanup = analyze_for_cleanup(probe_json)
+            cleanup = analyze_for_cleanup(probe_json, keep_langs=get_keep_langs())
             if not cleanup or not cleanup["needs_cleanup"]:
                 skipped_clean += 1
                 continue
@@ -1317,6 +1359,7 @@ def scan_subgen_task(library_id):
             has_jp_audio = bool(has_target_set & audio_langs)
             has_any_jp_sub = has_subtitle_lang(probe_json, has_target_set)
             has_jp_text_sub = has_text_subtitle_lang(probe_json, has_target_set)
+            has_eng_text_sub = has_text_subtitle_lang(probe_json, {"eng", "en"})
 
             # Build common metadata
             fmt = probe_json.get("format", {})
@@ -1331,36 +1374,32 @@ def scan_subgen_task(library_id):
             sub_count = sum(1 for s in probe_json.get("streams", []) if s.get("codec_type") == "subtitle")
 
             # ── Decision ────────────────────────────────────────────────────
-            if has_jp_text_sub:
-                # Already has text-based JP subs (subrip/ass/etc) — fully covered
+            # Goal: every file has BOTH an English and a target-language TEXT subtitle.
+            # Queue if either is missing; skip only when both are already present.
+            tgt_up = target_lang.upper()
+            if has_jp_text_sub and has_eng_text_sub:
                 status = "skipped"
-                reason = "Has Japanese text subs"
-                step = "Skipped: Japanese text subtitles already present"
-                health = "skipped"
-            elif has_any_jp_sub:
-                # Has JP subs but only image-based (PGS) — flag but skip for now
-                status = "skipped"
-                reason = "Has Japanese PGS (image) subs"
-                step = "Skipped: Japanese image subs already present"
-                health = "skipped"
-            elif has_jp_audio:
-                # JP audio means viewer can hear in Japanese — skip subs generation
-                status = "skipped"
-                reason = "Has Japanese audio"
-                step = "Skipped: Japanese audio track already present"
+                reason = f"Has English + {tgt_up} text subs"
+                step = "Skipped: English and target-language subtitles already present"
                 health = "skipped"
             else:
-                # Genuinely needs JP subs — queue for processing
-                # Determine which path the node will take
-                if has_text_subtitle_lang(probe_json, {"eng", "en"}):
-                    pipeline_label = "English text subs → Claude translate"
+                need = []
+                if not has_eng_text_sub:
+                    need.append("English")
+                if not has_jp_text_sub:
+                    need.append(tgt_up)
+                # Where the English pivot comes from (node decides definitively at run time)
+                if has_eng_text_sub:
+                    src = "existing English subs"
                 elif "eng" in audio_langs or "en" in audio_langs:
-                    pipeline_label = "English audio → Whisper + Claude translate"
+                    src = "Whisper English audio"
+                elif has_jp_audio:
+                    src = "Whisper target audio"
                 else:
-                    pipeline_label = "Audio → Whisper + Claude translate"
+                    src = "Whisper audio"
                 status = "pending"
                 reason = None
-                step = f"Pending: {pipeline_label}"
+                step = f"Pending: create {' + '.join(need)} ({src} → AI translate)"
                 health = "pending"
 
             with get_db() as db:
