@@ -89,7 +89,7 @@ function Login({onAuth,setup}){
     return <div style={{minHeight:'100vh',background:T.bg,display:'flex',alignItems:'center',justifyContent:'center'}}>
         <div style={{background:T.sb,borderRadius:14,padding:'44px 40px',border:`1px solid ${T.bd}`,width:380,textAlign:'center'}}>
             <div style={{fontSize:36,fontWeight:800,color:T.ac,letterSpacing:'-1px',lineHeight:1,marginBottom:4}}>BYTE</div>
-            <div style={{fontSize:11,color:T.t2,letterSpacing:'3px',fontWeight:600,marginBottom:36}}>TRANSCODE v3.19</div>
+            <div style={{fontSize:11,color:T.t2,letterSpacing:'3px',fontWeight:600,marginBottom:36}}>TRANSCODE v3.20</div>
             {setup&&<div style={{fontSize:13,color:T.ac,marginBottom:16,padding:'10px 14px',background:`${T.ac}15`,borderRadius:8}}>First time — create your admin account</div>}
             {e&&<div style={{fontSize:13,color:T.er,marginBottom:14}}>{e}</div>}
             <input value={u} onChange={ev=>setU(ev.target.value)} placeholder="Username" style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'12px 16px',color:T.tx,fontSize:14,marginBottom:12}}/>
@@ -214,7 +214,7 @@ function FileModal({item,T,onClose,onAct}){
 /*═══ MAIN APP ═══*/
 function App(){
     const[authed,setAuthed]=useState(false);const[setup,setSetup]=useState(false);
-    const[tab,setTab]=useState('dashboard');const[theme,setTheme]=useState('dark');
+    const[tab,setTab]=useState('overview');const[theme,setTheme]=useState('dark');
     const[qTab,setQTab]=useState('queued');const[search,setSearch]=useState('');const[sort,setSort]=useState('priority');
     const[hdrF,setHdrF]=useState('all');const[libF,setLibF]=useState('all');const[qTypeT,setQTypeT]=useState('transcode');
     const[settingsTab,setSettingsTab]=useState('transcode');
@@ -297,21 +297,21 @@ function App(){
         <nav style={{width:218,background:T.sb,borderRight:`1px solid ${T.bd}`,display:'flex',flexDirection:'column',position:'sticky',top:0,height:'100vh',flexShrink:0}}>
             <div style={{padding:'22px 18px',borderBottom:`1px solid ${T.bd}`}}>
                 <div style={{fontSize:24,fontWeight:800,color:T.ac,letterSpacing:'-0.5px',lineHeight:1}}>BYTE</div>
-                <div style={{fontSize:10,color:T.t2,letterSpacing:'2.5px',fontWeight:600,marginTop:4}}>TRANSCODE v3.19</div>
+                <div style={{fontSize:10,color:T.t2,letterSpacing:'2.5px',fontWeight:600,marginTop:4}}>TRANSCODE v3.20</div>
             </div>
             <div style={{padding:10,flex:1,overflowY:'auto'}}>
                 {/* Main */}
-                {[['dashboard','Dashboard','monitor',T.ac],['stats','Stats','zap',T.ac],['libraries','Libraries','folder',T.ac]].map(([id,label,icon,c])=>{
-                    const procCount=id==='dashboard'?(s.processing||[]).filter(p=>(p.job_type||'transcode')===qTypeT).length:0;
-                    return <button key={id} onClick={()=>{setTab(id);if(id==='dashboard'){setQTypeT('transcode');setQTab('queued');}}} style={{display:'flex',alignItems:'center',gap:9,width:'100%',padding:'11px 14px',margin:'2px 0',border:'none',cursor:'pointer',background:tab===id?`${c}18`:'transparent',color:tab===id?c:T.t3,fontSize:14,fontWeight:tab===id?600:400,borderRadius:6,position:'relative'}}>
+                {[['overview','Dashboard','monitor'],['stats','Stats','zap'],['libraries','Libraries','folder']].map(([id,label,icon])=>{
+                    const c=T.ac;const proc=id==='overview'?(s.processing||[]).length:0;
+                    return <button key={id} onClick={()=>setTab(id)} style={{display:'flex',alignItems:'center',gap:9,width:'100%',padding:'11px 14px',margin:'2px 0',border:'none',cursor:'pointer',background:tab===id?`${c}18`:'transparent',color:tab===id?c:T.t3,fontSize:14,fontWeight:tab===id?600:400,borderRadius:6,position:'relative'}}>
                         <I n={icon} s={17}/> {label}
-                        {id==='dashboard'&&procCount>0&&<span style={{width:7,height:7,borderRadius:4,background:c,animation:'pulse 1.5s infinite',marginLeft:4}}/>}
-                        {id==='dashboard'&&gcType(qTypeT,'queued')+gcType(qTypeT,'pending')>0&&<span className="mono" style={{marginLeft:'auto',fontSize:10,fontWeight:700,background:`${c}20`,color:c,padding:'2px 8px',borderRadius:10}}>{gcType(qTypeT,'queued')+gcType(qTypeT,'pending')}</span>}
+                        {id==='overview'&&proc>0&&<span className="mono" style={{marginLeft:'auto',fontSize:10,fontWeight:700,background:`${c}20`,color:c,padding:'2px 8px',borderRadius:10}}>{proc} live</span>}
                     </button>;
                 })}
                 {/* Tools section header */}
                 <div style={{fontSize:9,color:T.t2,fontWeight:700,letterSpacing:'1.5px',padding:'14px 14px 6px',marginTop:6}}>TOOLS</div>
                 {[
+                    ['tool-transcode','Transcoder','zap',T.ac,'transcode'],
                     ['tool-subgen','AI Subtitles','log',T.ok,'subgen'],
                     ['tool-cleanup','Audio Cleanup','check',T.in,'remuxclean'],
                     ['tool-dv78','DV → P8','play',T.a2,'dv78only'],
@@ -375,10 +375,92 @@ function App(){
         {/* MAIN */}
         <main style={{flex:1,padding:'22px 30px',overflowY:'auto',maxHeight:'100vh'}}>
 
-        {/*═══ DASHBOARD ═══*/}
+        {/*═══ OVERVIEW (true dashboard) ═══*/}
+        {tab==='overview'&&(()=>{
+            const pipeLabel={transcode:'Transcode',subgen:'AI Subtitles',remuxclean:'Track Cleanup',dv78only:'DV → P8',compatfix:'Compatibility'};
+            const pipeColor={transcode:T.ac,subgen:T.ok,remuxclean:T.in,dv78only:T.a2,compatfix:T.wn};
+            const proc=s.processing||[];const srv=s.server||{};
+            const scans=Object.entries(s.scan_progress||{}).filter(([k,v])=>v&&v.status==='scanning');
+            const onlineNodes=workers.filter(w=>w._on).length;
+            const bar=(pct,c)=><div style={{height:6,borderRadius:3,background:T.t2+'22',overflow:'hidden'}}><div style={{width:Math.min(100,pct||0)+'%',height:'100%',background:c,borderRadius:3,transition:'width .5s'}}/></div>;
+            return <div>
+                <h1 style={{fontSize:20,fontWeight:700,color:T.t1,marginBottom:16}}>Dashboard</h1>
+                <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:12,marginBottom:20}}>
+                    {[['Space Saved',(s.saved_gb||0).toFixed(0)+' GB',T.ok],
+                      ['Active Jobs',proc.length+' / '+(s.capacity||0),T.ac],
+                      ['Queued',totalQ,T.in],
+                      ['Nodes Online',onlineNodes+' / '+workers.length,T.a2],
+                      ['Processing',s.processing_enabled?'Running':'Paused',s.processing_enabled?T.ok:T.wn]].map(([label,val,c])=>
+                      <div key={label} style={{background:T.card,borderRadius:10,padding:'14px 18px',border:`1px solid ${T.bd}`}}>
+                        <div style={{fontSize:10,color:T.t2,fontWeight:600,textTransform:'uppercase',letterSpacing:'.5px'}}>{label}</div>
+                        <div className="mono" style={{fontSize:23,fontWeight:800,color:c,marginTop:4}}>{val}</div>
+                      </div>)}
+                </div>
+                <div style={{fontSize:15,fontWeight:700,color:T.t1,marginBottom:10}}>Resources</div>
+                <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(250px,1fr))',gap:12,marginBottom:20}}>
+                    <div style={{background:T.card,borderRadius:10,padding:'16px 18px',border:`1px solid ${T.bd}`}}>
+                        <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:12}}><I n="cpu" s={15}/><span style={{fontSize:13,fontWeight:700,color:T.t1}}>Server (host)</span></div>
+                        {srv.cpu_pct!==undefined?<>
+                            <div style={{fontSize:11,color:T.t2,marginBottom:3}}>CPU<span className="mono" style={{float:'right',color:T.t1}}>{Math.round(srv.cpu_pct)}%</span></div>{bar(srv.cpu_pct,T.ac)}
+                            <div style={{fontSize:11,color:T.t2,margin:'9px 0 3px'}}>Memory<span className="mono" style={{float:'right',color:T.t1}}>{srv.mem_used_gb}/{srv.mem_total_gb} GB</span></div>{bar(srv.mem_pct,T.in)}
+                        </>:<div style={{fontSize:12,color:T.t2}}>No metrics available</div>}
+                    </div>
+                    {workers.map(w=><div key={w.id} style={{background:T.card,borderRadius:10,padding:'16px 18px',border:`1px solid ${w._on?T.bd:T.er+'44'}`}}>
+                        <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:12}}>
+                            <span style={{width:8,height:8,borderRadius:4,background:w._on?T.ok:T.t2,flexShrink:0}}/>
+                            <span style={{fontSize:13,fontWeight:700,color:T.t1}}>{w.name}</span>
+                            <span style={{fontSize:10,color:T.t2}}>{w.gpu}</span>
+                            <span className="mono" style={{marginLeft:'auto',fontSize:10,color:w._on?T.ok:T.t2}}>{w._on?'online':(w._stale?'stale':'offline')}</span>
+                        </div>
+                        <div style={{fontSize:11,color:T.t2,marginBottom:3}}>CPU<span className="mono" style={{float:'right',color:T.t1}}>{Math.round(w.cpu_usage||0)}%</span></div>{bar(w.cpu_usage,T.ac)}
+                        <div style={{fontSize:11,color:T.t2,margin:'9px 0 3px'}}>GPU<span className="mono" style={{float:'right',color:T.t1}}>{Math.round(w.gpu_usage||0)}%</span></div>{bar(w.gpu_usage,T.a2)}
+                        <div style={{fontSize:11,color:T.t2,margin:'9px 0 3px'}}>VRAM<span className="mono" style={{float:'right',color:T.t1}}>{Math.round(w.vram_usage||0)}%</span></div>{bar(w.vram_usage,T.wn)}
+                    </div>)}
+                </div>
+                <div style={{fontSize:15,fontWeight:700,color:T.t1,marginBottom:10}}>Active Jobs <span className="mono" style={{fontSize:12,color:T.t2,fontWeight:400}}>({proc.length} running)</span></div>
+                <div style={{background:T.card,borderRadius:10,border:`1px solid ${T.bd}`,marginBottom:20,overflow:'hidden'}}>
+                    {proc.length===0?<div style={{padding:'22px',textAlign:'center',color:T.t2,fontSize:13}}>No jobs running right now</div>:<div>
+                        <div style={{display:'grid',gridTemplateColumns:'120px 96px 1fr 150px 60px',gap:8,padding:'8px 16px',fontSize:10,fontWeight:600,color:T.t2,textTransform:'uppercase',borderBottom:`1px solid ${T.bd}`}}>
+                            <span>Node</span><span>Tool</span><span>File</span><span>Step</span><span>Prog</span>
+                        </div>
+                        {proc.map(p=>{const jt=p.job_type||'transcode';const c=pipeColor[jt]||T.ac;
+                            return <div key={p.id} style={{display:'grid',gridTemplateColumns:'120px 96px 1fr 150px 60px',gap:8,padding:'10px 16px',fontSize:12,borderBottom:`1px solid ${T.bd}`,alignItems:'center'}}>
+                                <span style={{fontWeight:600,color:T.t1,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{p.worker_name||'—'}</span>
+                                <span style={{color:c,fontWeight:600,fontSize:11}}>{pipeLabel[jt]||jt}</span>
+                                <span style={{color:T.t3,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}} title={p.file_name}>{p.file_name}</span>
+                                <span style={{color:T.t2,fontSize:11,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{p.current_step||'…'}</span>
+                                <span className="mono" style={{color:c,fontWeight:700}}>{Math.round(p.progress||0)}%</span>
+                            </div>;})}
+                    </div>}
+                </div>
+                <div style={{fontSize:15,fontWeight:700,color:T.t1,marginBottom:10}}>Pipelines</div>
+                <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(185px,1fr))',gap:12,marginBottom:20}}>
+                    {Object.keys(pipeLabel).map(jt=>{const c=pipeColor[jt];const q=gcType(jt,'queued')+gcType(jt,'pending');const pr=proc.filter(p=>(p.job_type||'transcode')===jt).length;const done=gcType(jt,'complete');const err=gcType(jt,'error');
+                        return <button key={jt} onClick={()=>{setTab('dashboard');setQTypeT(jt);setQTab('queued');}} style={{textAlign:'left',background:T.card,borderRadius:10,padding:'14px 16px',border:`1px solid ${T.bd}`,borderLeft:`3px solid ${c}`,cursor:'pointer'}}>
+                            <div style={{fontSize:13,fontWeight:700,color:T.t1,marginBottom:8}}>{pipeLabel[jt]}</div>
+                            <div style={{display:'flex',gap:12,fontSize:11,flexWrap:'wrap'}}>
+                                <span style={{color:T.t2}}>Active <b className="mono" style={{color:c}}>{pr}</b></span>
+                                <span style={{color:T.t2}}>Queued <b className="mono" style={{color:T.t1}}>{q}</b></span>
+                                <span style={{color:T.t2}}>Done <b className="mono" style={{color:T.ok}}>{done}</b></span>
+                                {err>0&&<span style={{color:T.t2}}>Err <b className="mono" style={{color:T.er}}>{err}</b></span>}
+                            </div>
+                        </button>;})}
+                </div>
+                {scans.length>0&&<><div style={{fontSize:15,fontWeight:700,color:T.t1,marginBottom:10}}>Scans in Progress</div>
+                    <div style={{background:T.card,borderRadius:10,border:`1px solid ${T.bd}`,padding:'6px 16px',marginBottom:20}}>
+                        {scans.map(([k,v])=>{const pct=Math.round((v.scanned/Math.max(v.total,1))*100);
+                            return <div key={k} style={{padding:'9px 0',borderBottom:`1px solid ${T.bd}`}}>
+                                <div style={{display:'flex',justifyContent:'space-between',fontSize:12,marginBottom:4}}><span style={{color:T.t3}}>{k}</span><span className="mono" style={{color:T.t2}}>{v.scanned}/{v.total} ({pct}%)</span></div>
+                                {bar(pct,T.ac)}
+                            </div>;})}
+                    </div></>}
+            </div>;
+        })()}
+
+        {/*═══ TRANSCODER (per-pipeline job view) ═══*/}
         {tab==='dashboard'&&<div>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14}}>
-                <h1 style={{fontSize:20,fontWeight:700,color:T.t1}}>Dashboard</h1>
+                <h1 style={{fontSize:20,fontWeight:700,color:T.t1}}>{({transcode:'Transcoder',subgen:'AI Subtitles',remuxclean:'Audio Cleanup',dv78only:'DV → P8',compatfix:'Compatibility'}[qTypeT])||'Transcoder'}</h1>
                 <div style={{display:'flex',gap:8}}>
                     {!s.processing_enabled?
                         <button onClick={()=>doAct('/queue/start')} style={{background:`${T.ok}18`,border:`1px solid ${T.ok}44`,borderRadius:8,padding:'8px 18px',cursor:'pointer',color:T.ok,fontSize:13,fontWeight:700,display:'flex',alignItems:'center',gap:5}}><I n="play" s={14}/> Start Processing</button>:
@@ -407,7 +489,7 @@ function App(){
                     </div>
                     <div style={{background:T.bg,borderRadius:8,padding:'10px 14px',border:`1px solid ${T.bd}`}}>
                         <div style={{fontSize:10,color:T.t2,fontWeight:600}}>VERSION</div>
-                        <div className="mono" style={{fontSize:15,fontWeight:700,color:T.t1,marginTop:2}}>3.19</div>
+                        <div className="mono" style={{fontSize:15,fontWeight:700,color:T.t1,marginTop:2}}>3.20</div>
                     </div>
                     <div style={{background:T.bg,borderRadius:8,padding:'10px 14px',border:`1px solid ${T.bd}`}}>
                         <div style={{fontSize:10,color:T.t2,fontWeight:600}}>STATUS</div>

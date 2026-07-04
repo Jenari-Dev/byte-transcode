@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 from flask import Flask, request, jsonify, send_from_directory, Response, session, redirect
 
-SERVER_VERSION = "3.19"
+SERVER_VERSION = "3.20"
 NODE_VERSION = "2.10"   # latest node version this server ships/expects
 # Where the update checker looks for the newest published versions.
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main/version.json"
@@ -2904,7 +2904,25 @@ def api_dashboard():
         jt = row["job_type"] or "transcode"
         status_stats_by_type.setdefault(jt, {})[row["status"]] = row["c"]
 
+    # v3.19 — server host resources + fleet capacity for the overview dashboard
+    server_res = {}
+    try:
+        import psutil
+        mem = psutil.virtual_memory()
+        server_res = {
+            "cpu_pct": psutil.cpu_percent(interval=0.05),
+            "mem_used_gb": round(mem.used / (1024**3), 1),
+            "mem_total_gb": round(mem.total / (1024**3), 1),
+            "mem_pct": round(mem.percent),
+        }
+    except Exception:
+        server_res = {}
+    with get_db() as db:
+        capacity = _effective_worker_cap(db)
+
     return jsonify({
+        "server": server_res,
+        "capacity": capacity,
         "status_stats": {s["status"]: {"count": s["c"], "total_gb": s["gb"]} for s in ss},
         "status_stats_by_type": status_stats_by_type,
         "hdr_stats": {h["hdr_type"]: h["c"] for h in hs},
