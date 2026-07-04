@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 from flask import Flask, request, jsonify, send_from_directory, Response, session, redirect
 
-SERVER_VERSION = "3.11"
+SERVER_VERSION = "3.12"
 DEFAULT_PORT = 5800
 DB_PATH = os.environ.get("BYTE_DB_PATH", "/config/byte_transcode.db")
 LOG_DIR = os.environ.get("BYTE_LOG_DIR", "/config/logs")
@@ -237,6 +237,14 @@ def init_db():
             # Target codec for compat re-encodes: h264 = plays on everything,
             # hevc = smaller files, plays on most modern devices
             "compat_target": "h264",
+            # Worker / concurrency counts (v3.0+; defaults surfaced v3.11).
+            # transcode_gpu_count = concurrent transcode workers per node.
+            # healthcheck_(gpu|cpu)_count = how many file health checks the
+            # SERVER runs in parallel (CPU/ffprobe validation, not GPU work).
+            "transcode_gpu_count": "1",
+            "transcode_cpu_count": "0",
+            "healthcheck_gpu_count": "3",
+            "healthcheck_cpu_count": "0",
             # v3.5 — Server→Node path translation. The server stores library
             # paths from its own viewpoint (e.g. /media/data/media/movies because
             # /mnt/media is bind-mounted to /media inside Docker). The node runs
@@ -1510,98 +1518,116 @@ def scan_subgen_task(library_id):
 
 
 # ─── Health Check ────────────────────────────────────────────────────────────
-def health_check_task():
-    """Run health checks on pending items — verify files exist, are readable, and have valid media streams."""
-    with get_db() as db:
-        # Limit to 3 concurrent health checks (like Tdarr)
-        active_hc = db.execute("SELECT COUNT(*) as c FROM queue WHERE health_status='checking'").fetchone()["c"]
-        limit = max(0, 3 - active_hc)
-        if limit == 0:
-            return
-        pending = db.execute("SELECT * FROM queue WHERE health_status = 'pending' ORDER BY priority LIMIT ?", (limit,)).fetchall()
+def _health_check_concurrency():
+    """
+    v3.11 — how many health checks to run at once. Wired to the health-check
+    worker counts the user sets on the worker card (healthcheck_gpu_count +
+    healthcheck_cpu_count). Health checks are CPU/disk validation on the
+    server (ffprobe), NOT GPU work — the "GPU" label is historical. Falls
+    back to 3, capped at 16 so a big scan can't swamp the NAS CPU.
+    """
+    try:
+        conc = int(get_setting("healthcheck_gpu_count") or "0") + int(get_setting("healthcheck_cpu_count") or "0")
+    except (TypeError, ValueError):
+        conc = 0
+    if conc < 1:
+        conc = 3
+    return min(conc, 16)
 
-    for item in pending:
-        path = item["file_path"]
-        job_id = item["id"]
-        filename = item["file_name"]
-        status = "healthy"
-        error = None
 
-        # Mark as checking
-        hc_checking_since[job_id] = time.time()
-        with get_db() as db:
-            db.execute("UPDATE queue SET health_status='checking', current_step='Health check starting...' WHERE id=?", (job_id,))
-
-        add_log(f"[Health Check] Starting: {filename}", source="healthcheck", job_id=job_id)
-
-        # Step 1: File exists
-        add_log(f"[Health Check] Step 1: Checking file exists", source="healthcheck", job_id=job_id)
+def _health_check_one(item):
+    """Validate one queue item: exists, readable, ffprobe-valid. Writes the
+    result (healthy→queued, else error) with lock-retry. v3.11: extracted so
+    a batch can run in parallel; logging trimmed to one line per file."""
+    path = item["file_path"]
+    job_id = item["id"]
+    filename = item["file_name"]
+    status, error = "healthy", None
+    try:
         if not os.path.exists(path):
-            status = "missing"
-            error = "File not found on disk"
-            add_log(f"[Health Check] FAILED: {error}", level="ERROR", source="healthcheck", job_id=job_id)
+            status, error = "missing", "File not found on disk"
         elif os.path.getsize(path) == 0:
-            status = "corrupt"
-            error = "File is empty (0 bytes)"
-            add_log(f"[Health Check] FAILED: {error}", level="ERROR", source="healthcheck", job_id=job_id)
+            status, error = "corrupt", "File is empty (0 bytes)"
         else:
-            file_size = os.path.getsize(path)
-            add_log(f"[Health Check] Step 1: File exists ({file_size/(1024**3):.2f} GB)", source="healthcheck", job_id=job_id)
-
-            # Step 2: Read test
-            add_log(f"[Health Check] Step 2: Read test", source="healthcheck", job_id=job_id)
             try:
                 with open(path, "rb") as f:
-                    f.read(65536)  # Read 64KB
-                add_log(f"[Health Check] Step 2: Read test passed", source="healthcheck", job_id=job_id)
+                    f.read(65536)
             except Exception as e:
-                status = "unreadable"
-                error = f"Cannot read file: {str(e)}"
-                add_log(f"[Health Check] FAILED: {error}", level="ERROR", source="healthcheck", job_id=job_id)
-
-            # Step 3: FFprobe validation (only if read test passed)
+                status, error = "unreadable", f"Cannot read file: {e}"
             if status == "healthy":
-                add_log(f"[Health Check] Step 3: FFprobe media validation", source="healthcheck", job_id=job_id)
                 try:
-                    with get_db() as db:
-                        db.execute("UPDATE queue SET current_step='Health check: FFprobe validation...' WHERE id=?", (job_id,))
-                    cmd = [FFPROBE, "-v", "error", "-show_entries", "format=duration,size,nb_streams", "-of", "json", path]
-                    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+                    cmd = [FFPROBE, "-v", "error", "-show_entries",
+                           "format=duration,size,nb_streams", "-of", "json", path]
+                    r = subprocess.run(cmd, capture_output=True, text=True,
+                                       encoding="utf-8", errors="replace", timeout=120)
                     if r.returncode != 0:
-                        status = "corrupt"
-                        error = f"FFprobe failed: {r.stderr[:200] if r.stderr else 'Unknown error'}"
-                        add_log(f"[Health Check] FAILED: {error}", level="ERROR", source="healthcheck", job_id=job_id)
+                        status, error = "corrupt", f"FFprobe failed: {(r.stderr or 'Unknown')[:200]}"
                     else:
                         probe = json.loads(r.stdout)
                         streams = int(probe.get("format", {}).get("nb_streams", 0))
                         duration = float(probe.get("format", {}).get("duration", 0))
                         if streams == 0:
-                            status = "corrupt"
-                            error = "No media streams found"
-                            add_log(f"[Health Check] FAILED: {error}", level="ERROR", source="healthcheck", job_id=job_id)
+                            status, error = "corrupt", "No media streams found"
                         elif duration < 1:
-                            status = "corrupt"
-                            error = "Duration is 0 — file may be corrupt"
-                            add_log(f"[Health Check] FAILED: {error}", level="WARN", source="healthcheck", job_id=job_id)
-                        else:
-                            add_log(f"[Health Check] Step 3: Valid media ({streams} streams, {duration/60:.1f} min)", source="healthcheck", job_id=job_id)
+                            status, error = "corrupt", "Duration is 0 — file may be corrupt"
                 except subprocess.TimeoutExpired:
-                    status = "timeout"
-                    error = "FFprobe timed out after 120s"
-                    add_log(f"[Health Check] FAILED: {error}", level="ERROR", source="healthcheck", job_id=job_id)
-                except Exception as e:
-                    add_log(f"[Health Check] Step 3: FFprobe unavailable, skipping ({e})", level="WARN", source="healthcheck", job_id=job_id)
+                    status, error = "timeout", "FFprobe timed out after 120s"
+                except Exception:
+                    pass  # ffprobe unavailable — best-effort pass
+    except Exception as e:
+        status, error = "error", str(e)[:200]
 
-        # Final result
+    def _write():
         with get_db() as db:
             if status == "healthy":
                 db.execute("UPDATE queue SET health_status='healthy', status='queued', current_step='Health check passed' WHERE id=?", (job_id,))
-                add_log(f"[Health Check] PASSED: {filename}", source="healthcheck", job_id=job_id)
             else:
                 db.execute("UPDATE queue SET health_status=?, status='error', error_message=?, current_step='Health check failed' WHERE id=?",
                            (status, error, job_id))
-                add_log(f"[Health Check] FAILED: {filename} — {error}", level="ERROR", source="healthcheck", job_id=job_id)
-        hc_checking_since.pop(job_id, None)
+    try:
+        db_write_retry(_write)
+    except Exception as e:
+        log.error(f"[Health Check] result write failed for #{job_id}: {e}")
+    hc_checking_since.pop(job_id, None)
+    if status == "healthy":
+        add_log(f"[Health Check] PASSED: {filename}", source="healthcheck", job_id=job_id)
+    else:
+        add_log(f"[Health Check] FAILED: {filename} — {error}", level="ERROR", source="healthcheck", job_id=job_id)
+
+
+def health_check_task():
+    """v3.11 — run health checks in PARALLEL, up to the configured concurrency
+    (was: sequential, hard-capped at 3). Maintains a steady pool: each 5s tick
+    tops up to `conc` in-flight checks. The 'checking' count gates spawning so
+    we never exceed it."""
+    conc = _health_check_concurrency()
+    with get_db() as db:
+        active_hc = db.execute("SELECT COUNT(*) as c FROM queue WHERE health_status='checking'").fetchone()["c"]
+        limit = max(0, conc - active_hc)
+        if limit == 0:
+            return
+        pending = db.execute("SELECT * FROM queue WHERE health_status = 'pending' ORDER BY priority LIMIT ?", (limit,)).fetchall()
+    if not pending:
+        return
+
+    # Mark the whole batch 'checking' up front so the next 5s tick sees an
+    # accurate in-flight count (prevents over-spawning).
+    now = time.time()
+    for item in pending:
+        hc_checking_since[item["id"]] = now
+    def _mark():
+        with get_db() as db:
+            db.executemany("UPDATE queue SET health_status='checking', current_step='Health check…' WHERE id=?",
+                           [(item["id"],) for item in pending])
+    try:
+        db_write_retry(_mark)
+    except Exception:
+        pass
+
+    # Spawn one thread per item and return (don't join): the active_hc gate on
+    # the next tick maintains ~conc concurrent checks without blocking the loop.
+    for item in pending:
+        threading.Thread(target=_health_check_one, args=(item,), daemon=True).start()
 
 # v3.7 — when the HC thread marked each job 'checking' (monotonic time).
 # Auto-recovery uses this to re-queue checks orphaned by a server restart

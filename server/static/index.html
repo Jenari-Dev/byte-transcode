@@ -87,7 +87,7 @@ function Login({onAuth,setup}){
     return <div style={{minHeight:'100vh',background:T.bg,display:'flex',alignItems:'center',justifyContent:'center'}}>
         <div style={{background:T.sb,borderRadius:14,padding:'44px 40px',border:`1px solid ${T.bd}`,width:380,textAlign:'center'}}>
             <div style={{fontSize:36,fontWeight:800,color:T.ac,letterSpacing:'-1px',lineHeight:1,marginBottom:4}}>BYTE</div>
-            <div style={{fontSize:11,color:T.t2,letterSpacing:'3px',fontWeight:600,marginBottom:36}}>TRANSCODE v3.11</div>
+            <div style={{fontSize:11,color:T.t2,letterSpacing:'3px',fontWeight:600,marginBottom:36}}>TRANSCODE v3.12</div>
             {setup&&<div style={{fontSize:13,color:T.ac,marginBottom:16,padding:'10px 14px',background:`${T.ac}15`,borderRadius:8}}>First time — create your admin account</div>}
             {e&&<div style={{fontSize:13,color:T.er,marginBottom:14}}>{e}</div>}
             <input value={u} onChange={ev=>setU(ev.target.value)} placeholder="Username" style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'12px 16px',color:T.tx,fontSize:14,marginBottom:12}}/>
@@ -278,7 +278,7 @@ function App(){
         <nav style={{width:218,background:T.sb,borderRight:`1px solid ${T.bd}`,display:'flex',flexDirection:'column',position:'sticky',top:0,height:'100vh',flexShrink:0}}>
             <div style={{padding:'22px 18px',borderBottom:`1px solid ${T.bd}`}}>
                 <div style={{fontSize:24,fontWeight:800,color:T.ac,letterSpacing:'-0.5px',lineHeight:1}}>BYTE</div>
-                <div style={{fontSize:10,color:T.t2,letterSpacing:'2.5px',fontWeight:600,marginTop:4}}>TRANSCODE v3.11</div>
+                <div style={{fontSize:10,color:T.t2,letterSpacing:'2.5px',fontWeight:600,marginTop:4}}>TRANSCODE v3.12</div>
             </div>
             <div style={{padding:10,flex:1,overflowY:'auto'}}>
                 {/* Main */}
@@ -362,7 +362,7 @@ function App(){
                     </div>
                     <div style={{background:T.bg,borderRadius:8,padding:'10px 14px',border:`1px solid ${T.bd}`}}>
                         <div style={{fontSize:10,color:T.t2,fontWeight:600}}>VERSION</div>
-                        <div className="mono" style={{fontSize:15,fontWeight:700,color:T.t1,marginTop:2}}>3.11</div>
+                        <div className="mono" style={{fontSize:15,fontWeight:700,color:T.t1,marginTop:2}}>3.12</div>
                     </div>
                     <div style={{background:T.bg,borderRadius:8,padding:'10px 14px',border:`1px solid ${T.bd}`}}>
                         <div style={{fontSize:10,color:T.t2,fontWeight:600}}>STATUS</div>
@@ -448,7 +448,8 @@ function App(){
                         <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginTop:12}}>
                             {[['Transcode','transcode'],['Health Check','healthcheck']].map(([label,type])=>
                                 <div key={type} style={{background:T.bg,borderRadius:8,padding:'10px 14px',border:`1px solid ${T.bd}`}}>
-                                    <div style={{fontSize:11,fontWeight:600,color:T.t3,marginBottom:8}}>{label} Workers</div>
+                                    <div style={{fontSize:11,fontWeight:600,color:T.t3,marginBottom:2}}>{label} Workers</div>
+                                    <div style={{fontSize:9,color:T.t2,marginBottom:8}}>{type==='transcode'?'Concurrent jobs on this node':'Parallel file checks on the server (CPU/ffprobe — CPU+GPU are summed)'}</div>
                                     <div style={{display:'flex',gap:16}}>
                                         {[['CPU','cpu'],['GPU','gpu']].map(([wl,wt])=>{
                                             const key=type+'_'+wt+'_count';const val=parseInt(lSettings?.[key])||( wt==='gpu'?1:0);
