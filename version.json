@@ -1,7 +1,7 @@
 {
-  "server": "3.18",
+  "server": "3.19",
   "node": "2.12",
-  "released": "2026-07-04",
-  "notes": "Node fix: Whisper subtitle jobs now install cuBLAS/cuDNN and register their DLL dirs (fixes 'cublas64_12.dll not found'), with automatic CPU fallback if CUDA still can't load. GUI now logs startup errors to byte_node_gui_error.log and shows a dialog instead of silently failing.",
+  "released": "2026-07-05",
+  "notes": "Concurrency fix: the fleet now runs as many jobs as your nodes' combined worker counts (2 nodes x3 = 6) instead of a flat cap of 4. Poison-job protection parks a file in Errored after 5 auto-requeues instead of looping forever. Each running job now reports which node is doing it. Node v2.12: Whisper cuBLAS/cuDNN fix + GUI startup diagnostics.",
   "update_docs": "https://github.com/Jenari-Dev/byte-transcode#updating"
 }

@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 from flask import Flask, request, jsonify, send_from_directory, Response, session, redirect
 
-SERVER_VERSION = "3.18"
+SERVER_VERSION = "3.19"
 NODE_VERSION = "2.10"   # latest node version this server ships/expects
 # Where the update checker looks for the newest published versions.
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main/version.json"
@@ -275,7 +275,9 @@ def init_db():
                 'skipped_reason': 'TEXT', 'probe_data': 'TEXT', 'progress': 'REAL DEFAULT 0', 'duration_str': 'TEXT DEFAULT ""',
                 'job_type': "TEXT DEFAULT 'transcode'",
                 # v3.17 — external submissions (Byte Media Manager etc.)
-                'requested_by': 'TEXT', 'ext_issues': 'TEXT', 'ext_note': 'TEXT', 'file_size_bytes': 'INTEGER'}
+                'requested_by': 'TEXT', 'ext_issues': 'TEXT', 'ext_note': 'TEXT', 'file_size_bytes': 'INTEGER',
+                # v3.19 — poison-job protection: auto-requeue attempt counter
+                'attempts': 'INTEGER DEFAULT 0'}
             for col, typedef in queue_needed.items():
                 if col not in queue_cols:
                     db.execute(f'ALTER TABLE queue ADD COLUMN {col} {typedef}')
@@ -335,6 +337,7 @@ def init_db():
                             ext_issues TEXT,
                             ext_note TEXT,
                             file_size_bytes INTEGER,
+                            attempts INTEGER DEFAULT 0,
                             FOREIGN KEY (library_id) REFERENCES libraries(id),
                             UNIQUE (file_path, job_type)
                         );
@@ -347,7 +350,7 @@ def init_db():
                         'priority','status','health_status','progress','current_step','eta','worker_id',
                         'output_path','output_size_gb','reduction_pct','error_message','started_at',
                         'completed_at','created_at','accepted','skipped_reason','probe_data','job_type',
-                        'requested_by','ext_issues','ext_note','file_size_bytes'
+                        'requested_by','ext_issues','ext_note','file_size_bytes','attempts'
                     )]
                     cols_csv = ", ".join(common)
                     db.execute(f"INSERT INTO queue ({cols_csv}) SELECT {cols_csv} FROM _queue_pre_v31")
@@ -1790,7 +1793,8 @@ def start_health_check_loop():
                     # endpoint, created an endless requeue loop. Now: if the
                     # worker is alive and still on this job, leave it alone
                     # regardless of reported progress.
-                    ghost_jobs = db.execute("""SELECT q.id, q.worker_id, q.file_name FROM queue q
+                    ghost_jobs = db.execute("""SELECT q.id, q.worker_id, q.file_name,
+                            COALESCE(q.attempts,0) AS attempts FROM queue q
                         WHERE q.status='processing'
                           AND q.started_at < datetime('now','localtime', '-300 seconds')
                           AND NOT EXISTS (
@@ -1799,12 +1803,22 @@ def start_health_check_loop():
                                 AND w.current_job_id = q.id
                                 AND w.last_heartbeat > datetime('now','localtime', '-180 seconds'))""").fetchall()
                     for sj in ghost_jobs:
-                        db.execute("""UPDATE queue SET status='queued', worker_id=NULL, started_at=NULL,
-                            current_step='Requeued (worker went offline)' WHERE id=?""", (sj["id"],))
+                        att = (sj["attempts"] or 0) + 1
+                        if att >= MAX_REQUEUE_ATTEMPTS:
+                            # v3.19 — poison job: stop re-feeding it to workers.
+                            db.execute("""UPDATE queue SET status='error', worker_id=NULL, started_at=NULL,
+                                attempts=?, current_step='Failed', completed_at=datetime('now','localtime'),
+                                error_message=? WHERE id=?""",
+                                (att, f"Auto-failed after {att} worker-offline requeues (likely a bad file or node issue)", sj["id"]))
+                            deferred_logs.append((f"Parked poison job #{sj['id']} after {att} requeues: {sj['file_name']}", "WARN", sj["id"]))
+                        else:
+                            db.execute("""UPDATE queue SET status='queued', worker_id=NULL, started_at=NULL,
+                                attempts=?, current_step='Requeued (worker went offline)' WHERE id=?""",
+                                (att, sj["id"]))
+                            deferred_logs.append((f"Auto-requeued job #{sj['id']} (worker offline, attempt {att}/{MAX_REQUEUE_ATTEMPTS}): {sj['file_name']}", "WARN", sj["id"]))
                         if sj["worker_id"]:
                             db.execute("UPDATE workers SET status='idle', current_job_id=NULL WHERE id=? AND current_job_id=?",
                                        (sj["worker_id"], sj["id"]))
-                        deferred_logs.append((f"Auto-requeued job #{sj['id']} (worker offline): {sj['file_name']}", "WARN", sj["id"]))
 
                     # Jobs stuck mid-work for 2+ hours (worker alive but no
                     # progress advance) still error out for manual attention.
@@ -2150,13 +2164,13 @@ def api_requeue_library():
         if lid:
             db.execute("""UPDATE queue SET status='pending', health_status='pending',
                 progress=0, current_step='', eta='', error_message=NULL,
-                worker_id=NULL, started_at=NULL, completed_at=NULL
+                worker_id=NULL, started_at=NULL, completed_at=NULL, attempts=0
                 WHERE library_id=? AND status IN ('error','skipped','cancelled')""", (lid,))
             count = db.execute("SELECT changes()").fetchone()[0]
         else:
             db.execute("""UPDATE queue SET status='pending', health_status='pending',
                 progress=0, current_step='', eta='', error_message=NULL,
-                worker_id=NULL, started_at=NULL, completed_at=NULL
+                worker_id=NULL, started_at=NULL, completed_at=NULL, attempts=0
                 WHERE status IN ('error','skipped','cancelled')""")
             count = db.execute("SELECT changes()").fetchone()[0]
     add_log(f"Requeued {count} items" + (f" for library #{lid}" if lid else ""))
@@ -2174,14 +2188,14 @@ def api_requeue_by_status(status):
             db.execute("""UPDATE queue SET status='pending', health_status='pending',
                 progress=0, current_step='', eta='', error_message=NULL,
                 worker_id=NULL, started_at=NULL, completed_at=NULL,
-                accepted=0, skipped_reason=NULL
+                accepted=0, skipped_reason=NULL, attempts=0
                 WHERE status=? AND COALESCE(NULLIF(job_type,''),'transcode')=?""",
                 (status, job_type))
         else:
             db.execute("""UPDATE queue SET status='pending', health_status='pending',
                 progress=0, current_step='', eta='', error_message=NULL,
                 worker_id=NULL, started_at=NULL, completed_at=NULL,
-                accepted=0, skipped_reason=NULL
+                accepted=0, skipped_reason=NULL, attempts=0
                 WHERE status=?""", (status,))
         count = db.execute("SELECT changes()").fetchone()[0]
     add_log(f"Bulk requeue: {count} jobs from status '{status}'" + (f" (type {job_type})" if job_type else ""))
@@ -2212,7 +2226,7 @@ def api_requeue(jid):
         db.execute("""UPDATE queue SET status='pending', health_status='pending',
             progress=0, current_step='', eta='', error_message=NULL,
             worker_id=NULL, started_at=NULL, completed_at=NULL,
-            accepted=0, skipped_reason=NULL WHERE id=?""", (jid,))
+            accepted=0, skipped_reason=NULL, attempts=0 WHERE id=?""", (jid,))
     add_log(f"Job #{jid} requeued for re-processing ({job['file_name']})", job_id=jid)
     return jsonify({"ok": True})
 
@@ -2642,6 +2656,41 @@ def api_heartbeat():
     return jsonify({"ok": True})
 
 # Jobs
+MAX_REQUEUE_ATTEMPTS = 5   # v3.19 — park a poison job in Errored after this many auto-requeues
+
+def _effective_worker_cap(db):
+    """
+    v3.19 — total concurrent-job capacity = sum of each ONLINE node's transcode
+    worker count (global transcode_gpu_count, overridden per-node), floored at
+    the manual max_workers safety value. The old flat max_workers=4 capped the
+    whole fleet regardless of how many workers each node ran, so a 2-node x3
+    setup only ever ran ~4 jobs instead of 6. This auto-scales as nodes join/leave.
+    """
+    try:
+        manual = int(get_setting("max_workers") or "4")
+    except (TypeError, ValueError):
+        manual = 4
+    try:
+        global_tw = int(get_setting("transcode_gpu_count") or "1")
+    except (TypeError, ValueError):
+        global_tw = 1
+    online = db.execute(
+        "SELECT id FROM workers WHERE last_heartbeat > datetime('now','localtime','-90 seconds')"
+    ).fetchall()
+    total = 0
+    for w in online:
+        n = global_tw
+        raw = get_setting(f"worker_config_{w['id']}")
+        if raw:
+            try:
+                v = json.loads(raw).get("transcode_gpu_count")
+                if v is not None:
+                    n = int(v)
+            except Exception:
+                pass
+        total += max(1, n)
+    return max(total, manual)
+
 @app.route("/api/jobs/next", methods=["POST"])
 def api_next_job():
     d = request.json
@@ -2663,9 +2712,9 @@ def api_next_job():
         staged_limit = int(get_setting("staged_limit") or "100")
         if staged_limit == 0:
             return jsonify({"job": None, "reason": "Staged limit is 0 — paused"})
-        max_w = int(get_setting("max_workers") or "4")
+        max_w = _effective_worker_cap(db)
         active = db.execute("SELECT COUNT(*) as c FROM queue WHERE status='processing'").fetchone()["c"]
-        if active >= max_w: return jsonify({"job": None, "reason": "Max workers reached"})
+        if active >= max_w: return jsonify({"job": None, "reason": "Fleet at capacity"})
         if active >= staged_limit: return jsonify({"job": None, "reason": "Staged limit reached"})
 
         # v3.4: only claim jobs whose type's pipeline is enabled
@@ -2843,6 +2892,11 @@ def api_dashboard():
         processing = db.execute("SELECT * FROM queue WHERE status='processing' ORDER BY priority").fetchall()
         recent_complete = db.execute("SELECT * FROM queue WHERE status='complete' ORDER BY completed_at DESC LIMIT 10").fetchall()
         settings = {r["key"]: r["value"] for r in db.execute("SELECT * FROM settings").fetchall()}
+        # v3.19 — map worker_id -> node name so every running job shows which
+        # machine (and, with job_type, which pipeline) is doing it. All threads
+        # on one node share a worker_id, so the workers table alone can't show
+        # a node's concurrent jobs — the processing queue can.
+        wname = {w["id"]: w["name"] for w in db.execute("SELECT id, name FROM workers").fetchall()}
 
     # Build {job_type: {status: count}}
     status_stats_by_type = {}
@@ -2855,7 +2909,8 @@ def api_dashboard():
         "status_stats_by_type": status_stats_by_type,
         "hdr_stats": {h["hdr_type"]: h["c"] for h in hs},
         "workers": [dict(w) for w in ws],
-        "processing": [{k:v for k,v in dict(p).items() if k!="probe_data"} for p in processing],
+        "processing": [{**{k:v for k,v in dict(p).items() if k!="probe_data"},
+                        "worker_name": wname.get(p["worker_id"], "—")} for p in processing],
         "recent_complete": [{k:v for k,v in dict(c).items() if k!="probe_data"} for c in recent_complete],
         "saved_gb": saved["s"],
         "settings": settings,
