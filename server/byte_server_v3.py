@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 from flask import Flask, request, jsonify, send_from_directory, Response, session, redirect
 
-SERVER_VERSION = "3.21"
+SERVER_VERSION = "3.22"
 NODE_VERSION = "2.10"   # latest node version this server ships/expects
 # Where the update checker looks for the newest published versions.
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main/version.json"
@@ -1838,11 +1838,13 @@ def start_health_check_loop():
                     db.execute("""UPDATE workers SET status='idle', current_job_id=NULL
                         WHERE status='active' AND last_heartbeat < datetime('now','localtime', '-300 seconds')""")
 
-                    # Auto-delete workers with no heartbeat for 30+ minutes (dead nodes)
+                    # Auto-delete workers with no heartbeat for 10+ minutes (dead
+                    # nodes). v3.22 — was 30 min, which left stale rows inflating
+                    # the "nodes online" count long after a node stopped.
                     deleted = db.execute("""DELETE FROM workers
-                        WHERE last_heartbeat < datetime('now','localtime', '-1800 seconds')""")
+                        WHERE last_heartbeat < datetime('now','localtime', '-600 seconds')""")
                     if deleted.rowcount > 0:
-                        log.info(f"Auto-deleted {deleted.rowcount} dead worker(s) (no heartbeat for 30+ min)")
+                        log.info(f"Auto-deleted {deleted.rowcount} dead worker(s) (no heartbeat for 10+ min)")
 
             except Exception as e:
                 log.error(f"Auto-recovery error: {e}")
@@ -2644,11 +2646,38 @@ def api_register_worker():
     d = request.json
     wid = d.get("id", "")
     if not wid: return jsonify({"error": "ID required"}), 400
+    name = d.get("name", "")
     with get_db() as db:
         db.execute("INSERT OR REPLACE INTO workers (id,name,host,gpu,status,last_heartbeat) VALUES (?,?,?,?,'idle',datetime('now','localtime'))",
-                   (wid, d.get("name",""), d.get("host",""), d.get("gpu","")))
-    add_log(f"Worker registered: {d.get('name','')} ({d.get('gpu','')})")
+                   (wid, name, d.get("host",""), d.get("gpu","")))
+        # v3.22 — collapse duplicate rows for the same node name that are no
+        # longer heartbeating (e.g. a node relaunched from a different folder,
+        # or whose id changed). A genuinely live same-name node keeps a fresh
+        # heartbeat and is preserved.
+        if name:
+            db.execute("""DELETE FROM workers WHERE name=? AND id<>?
+                AND (last_heartbeat IS NULL OR last_heartbeat < datetime('now','localtime','-120 seconds'))""",
+                (name, wid))
+    add_log(f"Worker registered: {name} ({d.get('gpu','')})")
     return jsonify({"ok": True})
+
+@app.route("/api/workers/prune", methods=["POST"])
+@login_required
+def api_prune_workers():
+    """v3.22 — immediately drop nodes that haven't heartbeat in >2 min, so a
+    stopped node stops inflating the 'nodes online' count without waiting for
+    the 10-min auto-delete. Any processing jobs they held are requeued."""
+    with get_db() as db:
+        stale = db.execute("""SELECT id FROM workers
+            WHERE last_heartbeat IS NULL OR last_heartbeat < datetime('now','localtime','-120 seconds')""").fetchall()
+        ids = [w["id"] for w in stale]
+        for wid in ids:
+            db.execute("""UPDATE queue SET status='queued', worker_id=NULL, started_at=NULL,
+                current_step='Requeued (node removed)' WHERE worker_id=? AND status='processing'""", (wid,))
+        if ids:
+            db.execute(f"DELETE FROM workers WHERE id IN ({','.join('?'*len(ids))})", ids)
+    add_log(f"Pruned {len(ids)} offline node(s)")
+    return jsonify({"ok": True, "removed": len(ids)})
 
 @app.route("/api/workers/heartbeat", methods=["POST"])
 def api_heartbeat():
