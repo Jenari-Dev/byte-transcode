@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 from flask import Flask, request, jsonify, send_from_directory, Response, session, redirect
 
-SERVER_VERSION = "3.12"
+SERVER_VERSION = "3.13"
 DEFAULT_PORT = 5800
 DB_PATH = os.environ.get("BYTE_DB_PATH", "/config/byte_transcode.db")
 LOG_DIR = os.environ.get("BYTE_LOG_DIR", "/config/logs")
@@ -429,6 +429,69 @@ def db_write_retry(fn, attempts=8, base_delay=0.4):
             if "locked" not in str(e).lower() or i == attempts - 1:
                 raise
             time.sleep(base_delay * (i + 1))
+
+
+# ── v3.13 — async progress/log buffering ─────────────────────────────────────
+# The node POSTs progress ~1×/sec/job and logs many lines per job. Each of
+# those was a synchronous UPDATE/INSERT competing for the single SQLite write
+# lock against the health-check loop + scans. Under a big queue that made
+# /api/jobs/<id>/progress take 7+ SECONDS, so the node blocked on every update,
+# never made real progress, and the ghost-requeue loop reassigned its jobs.
+# Now those endpoints write to an in-memory buffer and return instantly; a
+# single background thread flushes to the DB every ~2s (progress is latest-
+# wins, logs are appended in batch). This decouples node responsiveness from
+# DB write contention entirely.
+_progress_buffer = {}       # jid -> dict(progress, step, eta, fps, compression)
+_progress_lock = threading.Lock()
+_log_buffer = []            # list of (level, source, message, job_id)
+_log_lock = threading.Lock()
+
+def buffer_progress(jid, d):
+    with _progress_lock:
+        _progress_buffer[jid] = {
+            "progress": d.get("progress", 0), "step": d.get("step", ""),
+            "eta": d.get("eta", ""), "fps": d.get("fps", ""),
+            "compression": d.get("compression", 0),
+        }
+
+def buffer_log(level, source, message, job_id):
+    with _log_lock:
+        _log_buffer.append((level, source, message, job_id))
+        if len(_log_buffer) > 5000:      # hard cap so a runaway can't eat RAM
+            del _log_buffer[:1000]
+
+def _flush_buffers():
+    # snapshot + clear under lock, then write outside the lock
+    with _progress_lock:
+        prog = list(_progress_buffer.items()); _progress_buffer.clear()
+    with _log_lock:
+        logs = _log_buffer[:]; _log_buffer.clear()
+    if prog:
+        def _wp():
+            with get_db() as db:
+                db.executemany(
+                    "UPDATE queue SET progress=?, current_step=?, eta=?, fps=?, reduction_pct=? WHERE id=?",
+                    [(v["progress"], v["step"], v["eta"], v["fps"], v["compression"], jid)
+                     for jid, v in prog])
+        try: db_write_retry(_wp)
+        except Exception as e: log.error(f"progress flush failed: {e}")
+    if logs:
+        def _wl():
+            with get_db() as db:
+                db.executemany(
+                    "INSERT INTO logs (level, source, message, job_id) VALUES (?, ?, ?, ?)", logs)
+        try: db_write_retry(_wl)
+        except Exception as e: log.error(f"log flush failed: {e}")
+
+def start_buffer_flusher():
+    def loop():
+        while True:
+            time.sleep(2)
+            try:
+                _flush_buffers()
+            except Exception as e:
+                log.error(f"buffer flush error: {e}")
+    threading.Thread(target=loop, daemon=True, name="buffer-flusher").start()
 
 
 # ─── Auth ────────────────────────────────────────────────────────────────────
@@ -1682,24 +1745,32 @@ def start_health_check_loop():
                     if stuck_libs2.rowcount > 0:
                         log.warning(f"Auto-reset {stuck_libs2.rowcount} stuck new library scans")
 
-                    # v3.8: 'processing' at 0% for 30+ min means the node never
-                    # actually started it (e.g. the claim response was lost to a
-                    # network timeout) — REQUEUE it, no work is lost. Previously
-                    # these sat for 2 hours and then errored, needing manual
-                    # requeue.
-                    ghost_jobs = db.execute("""SELECT id, worker_id, file_name FROM queue
-                        WHERE status='processing' AND started_at < datetime('now','localtime', '-1800 seconds')
-                        AND (progress = 0 OR progress IS NULL)""").fetchall()
+                    # v3.13: a job is only a "ghost" if the worker that claimed
+                    # it is actually GONE (no heartbeat for 3+ min) or has moved
+                    # on to a different job. The old rule (0% progress for 30
+                    # min) also caught jobs that were genuinely being worked on
+                    # but slow to report — which, combined with the 7s progress
+                    # endpoint, created an endless requeue loop. Now: if the
+                    # worker is alive and still on this job, leave it alone
+                    # regardless of reported progress.
+                    ghost_jobs = db.execute("""SELECT q.id, q.worker_id, q.file_name FROM queue q
+                        WHERE q.status='processing'
+                          AND q.started_at < datetime('now','localtime', '-300 seconds')
+                          AND NOT EXISTS (
+                              SELECT 1 FROM workers w
+                              WHERE w.id = q.worker_id
+                                AND w.current_job_id = q.id
+                                AND w.last_heartbeat > datetime('now','localtime', '-180 seconds'))""").fetchall()
                     for sj in ghost_jobs:
                         db.execute("""UPDATE queue SET status='queued', worker_id=NULL, started_at=NULL,
-                            current_step='Requeued (claim was lost — node never started it)' WHERE id=?""", (sj["id"],))
+                            current_step='Requeued (worker went offline)' WHERE id=?""", (sj["id"],))
                         if sj["worker_id"]:
                             db.execute("UPDATE workers SET status='idle', current_job_id=NULL WHERE id=? AND current_job_id=?",
                                        (sj["worker_id"], sj["id"]))
-                        deferred_logs.append((f"Auto-requeued ghost job #{sj['id']} (claimed but never started): {sj['file_name']}", "WARN", sj["id"]))
+                        deferred_logs.append((f"Auto-requeued job #{sj['id']} (worker offline): {sj['file_name']}", "WARN", sj["id"]))
 
-                    # Jobs stuck mid-work (progress > 0) for 2+ hours still error
-                    # out for manual attention — something real went wrong there.
+                    # Jobs stuck mid-work for 2+ hours (worker alive but no
+                    # progress advance) still error out for manual attention.
                     stuck_jobs = db.execute("""SELECT id, worker_id, file_name FROM queue
                         WHERE status='processing' AND started_at < datetime('now','localtime', '-7200 seconds')
                         AND progress > 0""").fetchall()
@@ -2148,7 +2219,9 @@ def api_check_cancel(jid):
 # Feature 19: Job log streaming — node sends log lines in real-time
 @app.route("/api/jobs/<int:jid>/log", methods=["POST"])
 def api_job_log(jid):
-    """Receive log lines from the node during transcode."""
+    """Receive log lines from the node during transcode.
+    v3.13 — buffered (see async buffering above) so the node's many per-job
+    log posts don't block on the DB write lock."""
     d = request.json
     lines = d.get("lines", [])
     if isinstance(lines, str):
@@ -2159,7 +2232,7 @@ def api_job_log(jid):
             level = "ERROR"
         elif "[WARN]" in line:
             level = "WARN"
-        add_log(line, level=level, source="node", job_id=jid)
+        buffer_log(level, "node", line, jid)
     return jsonify({"ok": True})
 
 # Feature 20: Worker counts stored in settings (transcode_gpu_count etc.)
@@ -2344,11 +2417,9 @@ def api_force_start(jid):
 
 @app.route("/api/jobs/<int:jid>/progress", methods=["POST"])
 def api_progress(jid):
-    d = request.json
-    with get_db() as db:
-        db.execute("UPDATE queue SET progress=?, current_step=?, eta=?, fps=?, reduction_pct=? WHERE id=?",
-                   (d.get("progress",0), d.get("step",""), d.get("eta",""),
-                    d.get("fps",""), d.get("compression",0), jid))
+    # v3.13 — buffer + return instantly (see async buffering above). No DB
+    # write in the request path, so the node never blocks on lock contention.
+    buffer_progress(jid, request.json or {})
     return jsonify({"ok": True})
 
 @app.route("/api/jobs/<int:jid>/complete", methods=["POST"])
@@ -2356,11 +2427,17 @@ def api_complete(jid):
     d = request.json
     wid = d.get("worker_id", "")
     auto = get_setting("auto_accept") == "true"
-    with get_db() as db:
-        db.execute("UPDATE queue SET status='complete', progress=100, current_step='Done', output_path=?, output_size_gb=?, reduction_pct=?, completed_at=datetime('now','localtime'), accepted=? WHERE id=?",
-                   (d.get("output_path",""), d.get("output_size_gb",0), d.get("reduction_pct",0), int(auto), jid))
-        db.execute("UPDATE workers SET status='idle', current_job_id=NULL, jobs_completed=jobs_completed+1, total_saved_gb=total_saved_gb+? WHERE id=?",
-                   (d.get("saved_gb",0), wid))
+    # v3.13 — drop any buffered progress for this job so a late async flush
+    # can't overwrite the final 'Done'/100% state, and use write-retry.
+    with _progress_lock:
+        _progress_buffer.pop(jid, None)
+    def _w():
+        with get_db() as db:
+            db.execute("UPDATE queue SET status='complete', progress=100, current_step='Done', output_path=?, output_size_gb=?, reduction_pct=?, completed_at=datetime('now','localtime'), accepted=? WHERE id=?",
+                       (d.get("output_path",""), d.get("output_size_gb",0), d.get("reduction_pct",0), int(auto), jid))
+            db.execute("UPDATE workers SET status='idle', current_job_id=NULL, jobs_completed=jobs_completed+1, total_saved_gb=total_saved_gb+? WHERE id=?",
+                       (d.get("saved_gb",0), wid))
+    db_write_retry(_w)
     add_log(f"Job #{jid} complete: {d.get('reduction_pct',0):.0f}% reduction", job_id=jid)
     if get_setting("ntfy_on_complete") == "true":
         with get_db() as db:
@@ -2374,20 +2451,25 @@ def api_error(jid):
     d = request.json
     wid = d.get("worker_id", "")
     err = d.get("error", "Unknown")
+    with _progress_lock:
+        _progress_buffer.pop(jid, None)   # v3.13 — no late flush over final state
     with get_db() as db:
         cur = db.execute("SELECT status FROM queue WHERE id=?", (jid,)).fetchone()
-        # v3.7: a node reporting "Cancelled by user" is the tail end of a
-        # user cancel, not a failure — keep the 'cancelled' status the
-        # cancel endpoint already set instead of flipping it to 'error'
-        # (which also fired a false "Transcode Failed" notification).
-        is_cancel = (cur and cur["status"] == "cancelled") or "cancelled by user" in err.lower()
-        if is_cancel:
-            db.execute("UPDATE queue SET status='cancelled', progress=0, current_step='Cancelled', error_message=?, completed_at=datetime('now','localtime') WHERE id=?",
-                       (err, jid))
-        else:
-            db.execute("UPDATE queue SET status='error', progress=0, current_step='Failed', error_message=?, completed_at=datetime('now','localtime') WHERE id=?",
-                       (err, jid))
-        db.execute("UPDATE workers SET status='idle', current_job_id=NULL WHERE id=?", (wid,))
+    # v3.7: a node reporting "Cancelled by user" is the tail end of a
+    # user cancel, not a failure — keep the 'cancelled' status the
+    # cancel endpoint already set instead of flipping it to 'error'
+    # (which also fired a false "Transcode Failed" notification).
+    is_cancel = (cur and cur["status"] == "cancelled") or "cancelled by user" in err.lower()
+    def _w():
+        with get_db() as db:
+            if is_cancel:
+                db.execute("UPDATE queue SET status='cancelled', progress=0, current_step='Cancelled', error_message=?, completed_at=datetime('now','localtime') WHERE id=?",
+                           (err, jid))
+            else:
+                db.execute("UPDATE queue SET status='error', progress=0, current_step='Failed', error_message=?, completed_at=datetime('now','localtime') WHERE id=?",
+                           (err, jid))
+            db.execute("UPDATE workers SET status='idle', current_job_id=NULL WHERE id=?", (wid,))
+    db_write_retry(_w)
     if is_cancel:
         add_log(f"Job #{jid} cancelled (node confirmed)", job_id=jid)
         return jsonify({"ok": True})
@@ -2512,6 +2594,7 @@ def main():
         return
 
     start_health_check_loop()
+    start_buffer_flusher()   # v3.13 — async progress/log flush
     log.info(f"Byte Transcode Server v3 on http://{args.host}:{args.port}")
     app.run(host=args.host, port=args.port, debug=args.debug, threaded=True)
 
