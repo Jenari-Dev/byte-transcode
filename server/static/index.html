@@ -87,7 +87,7 @@ function Login({onAuth,setup}){
     return <div style={{minHeight:'100vh',background:T.bg,display:'flex',alignItems:'center',justifyContent:'center'}}>
         <div style={{background:T.sb,borderRadius:14,padding:'44px 40px',border:`1px solid ${T.bd}`,width:380,textAlign:'center'}}>
             <div style={{fontSize:36,fontWeight:800,color:T.ac,letterSpacing:'-1px',lineHeight:1,marginBottom:4}}>BYTE</div>
-            <div style={{fontSize:11,color:T.t2,letterSpacing:'3px',fontWeight:600,marginBottom:36}}>TRANSCODE v3.10</div>
+            <div style={{fontSize:11,color:T.t2,letterSpacing:'3px',fontWeight:600,marginBottom:36}}>TRANSCODE v3.11</div>
             {setup&&<div style={{fontSize:13,color:T.ac,marginBottom:16,padding:'10px 14px',background:`${T.ac}15`,borderRadius:8}}>First time — create your admin account</div>}
             {e&&<div style={{fontSize:13,color:T.er,marginBottom:14}}>{e}</div>}
             <input value={u} onChange={ev=>setU(ev.target.value)} placeholder="Username" style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'12px 16px',color:T.tx,fontSize:14,marginBottom:12}}/>
@@ -278,7 +278,7 @@ function App(){
         <nav style={{width:218,background:T.sb,borderRight:`1px solid ${T.bd}`,display:'flex',flexDirection:'column',position:'sticky',top:0,height:'100vh',flexShrink:0}}>
             <div style={{padding:'22px 18px',borderBottom:`1px solid ${T.bd}`}}>
                 <div style={{fontSize:24,fontWeight:800,color:T.ac,letterSpacing:'-0.5px',lineHeight:1}}>BYTE</div>
-                <div style={{fontSize:10,color:T.t2,letterSpacing:'2.5px',fontWeight:600,marginTop:4}}>TRANSCODE v3.10</div>
+                <div style={{fontSize:10,color:T.t2,letterSpacing:'2.5px',fontWeight:600,marginTop:4}}>TRANSCODE v3.11</div>
             </div>
             <div style={{padding:10,flex:1,overflowY:'auto'}}>
                 {/* Main */}
@@ -362,7 +362,7 @@ function App(){
                     </div>
                     <div style={{background:T.bg,borderRadius:8,padding:'10px 14px',border:`1px solid ${T.bd}`}}>
                         <div style={{fontSize:10,color:T.t2,fontWeight:600}}>VERSION</div>
-                        <div className="mono" style={{fontSize:15,fontWeight:700,color:T.t1,marginTop:2}}>3.10</div>
+                        <div className="mono" style={{fontSize:15,fontWeight:700,color:T.t1,marginTop:2}}>3.11</div>
                     </div>
                     <div style={{background:T.bg,borderRadius:8,padding:'10px 14px',border:`1px solid ${T.bd}`}}>
                         <div style={{fontSize:10,color:T.t2,fontWeight:600}}>STATUS</div>
@@ -662,6 +662,50 @@ function App(){
                     <I n={icons[qTypeT]||'monitor'} s={20} c={c}/>
                     <h2 style={{fontSize:16,fontWeight:700,color:c}}>{lbl}</h2>
                     <span style={{fontSize:11,color:T.t2,marginLeft:6}}>·  {gcTypeTotal(qTypeT)} total jobs</span>
+                </div>;
+            })()}
+
+            {/* v3.11 — PER-TAB PROGRESS TRACKER. Makes it obvious that every file
+                in the library was examined: files needing work move pending →
+                (health check) → queued → processing → complete; files that are
+                already fine are counted as "no work needed". */}
+            {(()=>{
+                const colors={transcode:T.ac,subgen:T.ok,remuxclean:T.in,dv78only:T.a2,compatfix:T.wn};
+                const c=colors[qTypeT]||T.ac;
+                const inHC=gcType(qTypeT,'pending');        // pending = awaiting / in health check
+                const ready=gcType(qTypeT,'queued');         // passed health check, ready for a worker
+                const proc=gcType(qTypeT,'processing');
+                const done=gcType(qTypeT,'complete');
+                const skip=gcType(qTypeT,'skipped');         // examined, no work needed
+                const err=gcType(qTypeT,'error');
+                const total=inHC+ready+proc+done+skip+err;
+                const examined=done+skip+err;                 // reached a resting state
+                const pct=total>0?Math.round(examined/total*100):0;
+                const sp=s.scan_progress||{};
+                const scanKey=qTypeT==='transcode'?String(qTypeT):null; // transcode scan uses library keys; others prefixed
+                const anyScanning=Object.keys(sp).some(k=>(qTypeT==='remuxclean'&&k.startsWith('remuxclean_'))||(qTypeT==='dv78only'&&k.startsWith('dv78only_'))||(qTypeT==='subgen'&&k.startsWith('subgen_'))||(qTypeT==='compatfix'&&k.startsWith('compatfix_'))||(qTypeT==='transcode'&&/^\d+$/.test(k)))&&Object.entries(sp).some(([k,v])=>v&&v.status==='scanning'&&((qTypeT==='remuxclean'&&k.startsWith('remuxclean_'))||(qTypeT==='dv78only'&&k.startsWith('dv78only_'))||(qTypeT==='subgen'&&k.startsWith('subgen_'))||(qTypeT==='compatfix'&&k.startsWith('compatfix_'))||(qTypeT==='transcode'&&/^\d+$/.test(k))));
+                const chip=(label,n,col)=>n>0?<span key={label} style={{fontSize:11,fontWeight:600,color:col,background:`${col}18`,padding:'3px 9px',borderRadius:12}}>{n.toLocaleString()} {label}</span>:null;
+                return <div style={{marginBottom:12,padding:'12px 16px',background:T.card,borderRadius:10,border:`1px solid ${T.bd}`}}>
+                    <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8}}>
+                        <span style={{fontSize:11,color:T.t2,textTransform:'uppercase',letterSpacing:'0.5px',fontWeight:700}}>Current Progress</span>
+                        {anyScanning&&<span style={{fontSize:10,fontWeight:700,color:c,background:`${c}18`,padding:'2px 8px',borderRadius:10,display:'flex',alignItems:'center',gap:5}}><span style={{width:7,height:7,borderRadius:4,background:c,animation:'pulse 1.5s infinite'}}/>SCANNING LIBRARY…</span>}
+                        <span style={{marginLeft:'auto',fontSize:12,color:T.t2}}>{examined.toLocaleString()} / {total.toLocaleString()} examined</span>
+                        <span className="mono" style={{fontSize:13,fontWeight:700,color:c}}>{pct}%</span>
+                    </div>
+                    <div style={{height:8,borderRadius:4,background:`${T.t2}20`,overflow:'hidden',marginBottom:10,display:'flex'}}>
+                        <div style={{width:`${total>0?done/total*100:0}%`,background:T.ok}} title="Complete"/>
+                        <div style={{width:`${total>0?skip/total*100:0}%`,background:T.t2}} title="No work needed"/>
+                        <div style={{width:`${total>0?err/total*100:0}%`,background:T.er}} title="Error"/>
+                    </div>
+                    <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+                        {chip('in health check',inHC,T.wn)}
+                        {chip('queued (ready)',ready,c)}
+                        {chip('processing',proc,T.ac)}
+                        {chip('complete',done,T.ok)}
+                        {chip('no work needed',skip,T.t2)}
+                        {chip('error',err,T.er)}
+                        {total===0&&<span style={{fontSize:12,color:T.t3}}>No files scanned for this pipeline yet — go to Libraries and run its scan.</span>}
+                    </div>
                 </div>;
             })()}
 

@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 from flask import Flask, request, jsonify, send_from_directory, Response, session, redirect
 
-SERVER_VERSION = "3.10"
+SERVER_VERSION = "3.11"
 DEFAULT_PORT = 5800
 DB_PATH = os.environ.get("BYTE_DB_PATH", "/config/byte_transcode.db")
 LOG_DIR = os.environ.get("BYTE_LOG_DIR", "/config/logs")
@@ -64,6 +64,17 @@ def _session_secret():
 
 app.config["SECRET_KEY"] = _session_secret()
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=30)
+
+# v3.11 — do NOT sort JSON keys. The in-memory scan_progress dict is keyed by
+# BOTH ints (transcode scans use library_id) and strings (other scans use
+# "remuxclean_<id>" etc). Flask's default sort_keys=True tried to order those
+# mixed keys during serialization and crashed the whole /api/dashboard endpoint
+# with "'<' not supported between instances of 'str' and 'int'" — which made the
+# dashboard show no stats/history at all once more than one scan type had run.
+try:
+    app.json.sort_keys = False
+except Exception:
+    pass
 
 os.makedirs(LOG_DIR, exist_ok=True)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s",
@@ -393,6 +404,23 @@ def set_setting(key, value):
             if attempt == 2:
                 raise
             time.sleep(0.5 * (attempt + 1))
+
+
+def db_write_retry(fn, attempts=8, base_delay=0.4):
+    """
+    v3.11 — run a write callable, retrying on SQLite "database is locked".
+    Multiple scan threads + health checks + the node all write to one SQLite
+    file; under heavy scan load a lone insert could exceed busy_timeout and
+    kill the whole scan thread mid-library. Retrying keeps scans alive so
+    every file gets recorded. Returns fn()'s result, or raises after attempts.
+    """
+    for i in range(attempts):
+        try:
+            return fn()
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e).lower() or i == attempts - 1:
+                raise
+            time.sleep(base_delay * (i + 1))
 
 
 # ─── Auth ────────────────────────────────────────────────────────────────────
@@ -832,56 +860,67 @@ def scan_remuxclean_task(library_id):
                 continue
 
             cleanup = analyze_for_cleanup(probe_json, keep_langs=get_keep_langs())
-            if not cleanup or not cleanup["needs_cleanup"]:
-                skipped_clean += 1
-                continue
+            audio_count = (cleanup or {}).get("total_audio", 0)
+            sub_count = (cleanup or {}).get("total_subs", 0)
 
-            # Build a brief description for the queue row
-            audio_count = cleanup["total_audio"]
-            sub_count = cleanup["total_subs"]
-            note = []
-            if cleanup["unwanted_audio"]:
-                note.append(f"{cleanup['unwanted_audio']} unwanted audio")
-            if cleanup["unwanted_subs"]:
-                note.append(f"{cleanup['unwanted_subs']} unwanted subs")
-            if cleanup["dirty_names"]:
-                note.append(f"{cleanup['dirty_names']} dirty names")
-            current_step = "Pending: " + ", ".join(note)
-
-            # Get duration from probe for display
+            # Get duration + video info from probe for display
             fmt = probe_json.get("format", {})
             try:
                 dur_min = float(fmt.get("duration", 0)) / 60
             except Exception:
                 dur_min = 0
             dur_str = f"{int(dur_min//60)}h {int(dur_min%60)}m" if dur_min >= 60 else f"{int(dur_min)}m"
-
-            # Pull video codec/resolution for display consistency
             v = next((s for s in probe_json.get("streams", []) if s.get("codec_type") == "video"), {})
             vcodec = v.get("codec_name", "")
             res = f"{v.get('width', 0)}x{v.get('height', 0)}"
 
-            with get_db() as db:
-                max_pri = db.execute("SELECT COALESCE(MAX(priority), 0) FROM queue").fetchone()[0]
-                try:
+            # v3.11 — record EVERY file, like the SubGen/Compatibility scans:
+            # files needing cleanup queue as pending → health check → queued;
+            # already-clean files are recorded as 'skipped' with a reason, so
+            # the tab clearly shows every file was examined (not just missing).
+            if not cleanup or not cleanup["needs_cleanup"]:
+                status, health, current_step, reason = ("skipped", "healthy",
+                    "No cleanup needed — already clean", "Already clean — requeue to force")
+            else:
+                note = []
+                if cleanup["unwanted_audio"]:
+                    note.append(f"{cleanup['unwanted_audio']} unwanted audio")
+                if cleanup["unwanted_subs"]:
+                    note.append(f"{cleanup['unwanted_subs']} unwanted subs")
+                if cleanup["dirty_names"]:
+                    note.append(f"{cleanup['dirty_names']} dirty names")
+                status, health, current_step, reason = ("pending", "pending",
+                    "Pending: " + ", ".join(note), None)
+
+            def _do_insert(status=status, health=health, current_step=current_step, reason=reason,
+                           filepath=filepath, filename=filename, size_gb=size_gb, dur_min=dur_min,
+                           dur_str=dur_str, vcodec=vcodec, res=res, audio_count=audio_count,
+                           sub_count=sub_count, probe_json=probe_json):
+                with get_db() as db:
+                    max_pri = db.execute("SELECT COALESCE(MAX(priority), 0) FROM queue").fetchone()[0]
                     db.execute("""INSERT INTO queue (
                         file_path, file_name, file_size_gb, duration_min, duration_str,
                         video_codec, resolution, hdr_type, audio_track_count, subtitle_track_count,
                         library_id, library_name, status, health_status, priority, probe_data,
-                        job_type, current_step
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'SDR', ?, ?, ?, ?, 'pending', 'pending', ?, ?, 'remuxclean', ?)""",
+                        job_type, current_step, skipped_reason
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'SDR', ?, ?, ?, ?, ?, ?, ?, ?, 'remuxclean', ?, ?)""",
                     (filepath, filename, size_gb, dur_min, dur_str,
                      vcodec, res, audio_count, sub_count,
-                     library_id, lib["name"], max_pri + 1, json.dumps(probe_json),
-                     current_step))
+                     library_id, lib["name"], status, health, max_pri + 1, json.dumps(probe_json),
+                     current_step, reason))
+            try:
+                db_write_retry(_do_insert)
+                if status == "skipped":
+                    skipped_clean += 1
+                else:
                     added += 1
-                except sqlite3.IntegrityError:
-                    skipped_dup += 1
+            except sqlite3.IntegrityError:
+                skipped_dup += 1
 
     scan_progress[pkey] = {"total": total_files, "scanned": total_files,
                            "current_file": "", "eta": "done", "status": "complete"}
     add_log(f"[RemuxClean Scan] {lib['name']} — {added} queued, "
-            f"{skipped_clean} already clean, {skipped_dup} already in queue, "
+            f"{skipped_clean} recorded clean (no work needed), {skipped_dup} already in queue, "
             f"{skipped} probe-failed, {file_count} total MKVs")
     if get_setting("ntfy_on_scan") == "true":
         send_notification("Cleanup Scan Complete",
@@ -994,10 +1033,7 @@ def scan_dv78only_task(library_id):
                 skipped_probe += 1
                 continue
 
-            dv = analyze_for_dv78(probe_json)
-            if not dv or not dv["needs_conversion"]:
-                skipped_no_p7 += 1
-                continue
+            dv = analyze_for_dv78(probe_json) or {}
 
             fmt = probe_json.get("format", {})
             try:
@@ -1008,28 +1044,56 @@ def scan_dv78only_task(library_id):
             v = next((s for s in probe_json.get("streams", []) if s.get("codec_type") == "video"), {})
             vcodec = v.get("codec_name", "")
             res = f"{v.get('width', 0)}x{v.get('height', 0)}"
+            src_profile = dv.get("dovi_profile")
+            has_dovi = 1 if dv.get("has_dovi") else 0
 
-            src_profile = dv["dovi_profile"]
-            with get_db() as db:
-                max_pri = db.execute("SELECT COALESCE(MAX(priority), 0) FROM queue").fetchone()[0]
-                try:
+            # v3.11 — record EVERY file: files needing conversion queue as
+            # pending → health check → queued; files already at Profile 8 or
+            # with no Dolby Vision are recorded as 'skipped' with a reason so
+            # the tab shows the whole library was examined.
+            if not dv.get("needs_conversion"):
+                if has_dovi:
+                    reason = f"Already DV Profile {src_profile} — no conversion needed"
+                else:
+                    reason = "No Dolby Vision"
+                status, health, current_step, skipped_reason, hdr = (
+                    "skipped", "healthy", reason, reason + " (requeue to force)",
+                    ("DoVi" if has_dovi else "SDR"))
+            else:
+                status, health, current_step, skipped_reason, hdr = (
+                    "pending", "pending", f"Pending: DV Profile {src_profile} → 8 conversion",
+                    None, "DoVi")
+
+            def _do_insert(status=status, health=health, current_step=current_step,
+                           skipped_reason=skipped_reason, hdr=hdr, has_dovi=has_dovi,
+                           src_profile=src_profile, filepath=filepath, filename=filename,
+                           size_gb=size_gb, dur_min=dur_min, dur_str=dur_str, vcodec=vcodec,
+                           res=res, probe_json=probe_json):
+                with get_db() as db:
+                    max_pri = db.execute("SELECT COALESCE(MAX(priority), 0) FROM queue").fetchone()[0]
                     db.execute("""INSERT INTO queue (
                         file_path, file_name, file_size_gb, duration_min, duration_str,
                         video_codec, resolution, hdr_type, has_dovi, dovi_profile,
                         library_id, library_name, status, health_status, priority, probe_data,
-                        job_type, current_step
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'DoVi', 1, ?, ?, ?, 'pending', 'pending', ?, ?, 'dv78only', ?)""",
+                        job_type, current_step, skipped_reason
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'dv78only', ?, ?)""",
                     (filepath, filename, size_gb, dur_min, dur_str,
-                     vcodec, res, src_profile, library_id, lib["name"], max_pri + 1, json.dumps(probe_json),
-                     f"Pending: DV Profile {src_profile} → 8 conversion"))
+                     vcodec, res, hdr, has_dovi, src_profile, library_id, lib["name"],
+                     status, health, max_pri + 1, json.dumps(probe_json),
+                     current_step, skipped_reason))
+            try:
+                db_write_retry(_do_insert)
+                if status == "skipped":
+                    skipped_no_p7 += 1
+                else:
                     added += 1
-                except sqlite3.IntegrityError:
-                    skipped_dup += 1
+            except sqlite3.IntegrityError:
+                skipped_dup += 1
 
     scan_progress[pkey] = {"total": total_files, "scanned": total_files,
                            "current_file": "", "eta": "done", "status": "complete"}
     add_log(f"[DV→P8 Scan] {lib['name']} — {added} queued, "
-            f"{skipped_no_p7} already P8 / no DV, {skipped_dup} already in queue, "
+            f"{skipped_no_p7} recorded already-P8/no-DV, {skipped_dup} already in queue, "
             f"{skipped_probe} probe-failed, {file_count} total MKVs")
 
 
@@ -1198,9 +1262,11 @@ def scan_compat_task(library_id):
             else:
                 status, current_step, skipped_reason = "skipped", "No compatibility issues detected", "No issues — requeue to force-convert"
 
-            with get_db() as db:
-                max_pri = db.execute("SELECT COALESCE(MAX(priority), 0) FROM queue").fetchone()[0]
-                try:
+            def _do_insert(status=status, current_step=current_step, skipped_reason=skipped_reason,
+                           hdr_type=hdr_type, filepath=filepath, filename=filename, size_gb=size_gb,
+                           dur_min=dur_min, dur_str=dur_str, vcodec=vcodec, res=res, probe_json=probe_json):
+                with get_db() as db:
+                    max_pri = db.execute("SELECT COALESCE(MAX(priority), 0) FROM queue").fetchone()[0]
                     db.execute("""INSERT INTO queue (
                         file_path, file_name, file_size_gb, duration_min, duration_str,
                         video_codec, resolution, hdr_type, library_id, library_name,
@@ -1211,12 +1277,14 @@ def scan_compat_task(library_id):
                      library_id, lib["name"], status,
                      "pending" if status == "pending" else "healthy",
                      max_pri + 1, json.dumps(probe_json), current_step, skipped_reason))
-                    if status == "pending":
-                        flagged += 1
-                    else:
-                        recorded_ok += 1
-                except sqlite3.IntegrityError:
-                    skipped_dup += 1
+            try:
+                db_write_retry(_do_insert)
+                if status == "pending":
+                    flagged += 1
+                else:
+                    recorded_ok += 1
+            except sqlite3.IntegrityError:
+                skipped_dup += 1
 
     scan_progress[pkey] = {"total": total_files, "scanned": total_files,
                            "current_file": "", "eta": "done", "status": "complete"}
