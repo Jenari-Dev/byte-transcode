@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 from flask import Flask, request, jsonify, send_from_directory, Response, session, redirect
 
-SERVER_VERSION = "3.20"
+SERVER_VERSION = "3.21"
 NODE_VERSION = "2.10"   # latest node version this server ships/expects
 # Where the update checker looks for the newest published versions.
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main/version.json"
@@ -1212,8 +1212,11 @@ def scan_dv78only_task(library_id):
 # be force-converted later via Requeue even if the heuristics passed it.
 
 COMPAT_OK_CONTAINERS = {'.mkv', '.mp4', '.m4v'}
+# v3.21 — AV1 and VP9 removed: modern TVs/clients direct-play them and they're
+# already efficient, so flagging them just wasted worker time re-encoding fine
+# files. Only genuinely legacy/problematic codecs remain.
 COMPAT_BAD_VCODECS = {'vc1', 'mpeg2video', 'mpeg4', 'msmpeg4v3', 'msmpeg4v2',
-                      'wmv1', 'wmv2', 'wmv3', 'vp8', 'vp9', 'av1', 'h263', 'mjpeg'}
+                      'wmv1', 'wmv2', 'wmv3', 'vp8', 'h263', 'mjpeg'}
 COMPAT_MAX_SUB_TRACKS = 12
 
 def analyze_for_compat(probe_json, ext):

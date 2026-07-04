@@ -1,5 +1,5 @@
 {
-  "server": "3.20",
+  "server": "3.21",
   "node": "2.12",
   "released": "2026-07-05",
   "notes": "Concurrency fix: the fleet now runs as many jobs as your nodes' combined worker counts (2 nodes x3 = 6) instead of a flat cap of 4. Poison-job protection parks a file in Errored after 5 auto-requeues instead of looping forever. Each running job now reports which node is doing it. Node v2.12: Whisper cuBLAS/cuDNN fix + GUI startup diagnostics.",
