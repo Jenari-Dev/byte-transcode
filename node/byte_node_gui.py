@@ -720,5 +720,32 @@ class ByteNodeGUI:
 
 # ─── Main ────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    app = ByteNodeGUI()
-    app.run()
+    # v2.12 — a double-clicked GUI that crashes on startup shows nothing (the
+    # console window closes instantly). Capture any startup exception to a log
+    # file next to the script AND a dialog, so failures are diagnosable.
+    try:
+        app = ByteNodeGUI()
+        app.run()
+    except Exception:
+        import traceback
+        tb = traceback.format_exc()
+        try:
+            errlog = os.path.join(os.path.dirname(os.path.abspath(__file__)), "byte_node_gui_error.log")
+            with open(errlog, "w", encoding="utf-8") as f:
+                f.write(tb)
+        except Exception:
+            errlog = "(could not write log)"
+        try:
+            import tkinter as _tk
+            from tkinter import messagebox as _mb
+            _r = _tk.Tk(); _r.withdraw()
+            _mb.showerror("Byte Node — startup error",
+                          f"The node GUI failed to start:\n\n{tb[-1500:]}\n\nSaved to:\n{errlog}")
+            _r.destroy()
+        except Exception:
+            print(tb)
+            try:
+                input("\nStartup failed. Press Enter to close...")
+            except Exception:
+                pass
+        sys.exit(1)

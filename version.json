@@ -1,7 +1,7 @@
 {
   "server": "3.18",
-  "node": "2.11",
+  "node": "2.12",
   "released": "2026-07-04",
-  "notes": "Byte Media Manager REST integration, richer per-tool stats page (space saved / subtitles generated / tracks cleaned per pipeline), and node self-update — the desktop GUI and console now check for updates and can update themselves like the web UI.",
+  "notes": "Node fix: Whisper subtitle jobs now install cuBLAS/cuDNN and register their DLL dirs (fixes 'cublas64_12.dll not found'), with automatic CPU fallback if CUDA still can't load. GUI now logs startup errors to byte_node_gui_error.log and shows a dialog instead of silently failing.",
   "update_docs": "https://github.com/Jenari-Dev/byte-transcode#updating"
 }

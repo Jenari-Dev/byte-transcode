@@ -81,7 +81,7 @@ except ImportError:
 # ─── Self-update (v2.11) ─────────────────────────────────────────────────────
 # The node checks the same published manifest the web UI uses and can pull its
 # own new files from GitHub, then relaunch — matching the website's update flow.
-NODE_VERSION = "2.11"
+NODE_VERSION = "2.12"
 GITHUB_RAW = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main"
 VERSION_MANIFEST_URL = GITHUB_RAW + "/version.json"
 NODE_FILES = ["byte_node_v2.py", "byte_node_gui.py", "setup_tools.py",
@@ -1907,6 +1907,55 @@ class ByteNode:
                 return self._whisper_model
             return self._load_whisper(model_name, device, compute_type, job_id)
 
+    def _register_cuda_dll_dirs(self):
+        """
+        faster-whisper (via CTranslate2) needs cuBLAS + cuDNN DLLs at RUNTIME
+        — cublas64_12.dll / cudnn*.dll. When installed via pip they land under
+        site-packages/nvidia/<lib>/bin, which is NOT on the Windows DLL search
+        path, so the model loads but transcription dies with
+        'Library cublas64_12.dll is not found or cannot be loaded'. Register
+        those bin dirs explicitly. Returns True if at least one was found.
+        v2.12 — fixes SubGen failures on nodes without a system CUDA toolkit.
+        """
+        if os.name != "nt":
+            return True  # Linux uses the wheels' bundled .so via RPATH
+        found = False
+        try:
+            import importlib.util
+            for pkg in ("nvidia.cublas", "nvidia.cudnn"):
+                try:
+                    spec = importlib.util.find_spec(pkg)
+                except Exception:
+                    spec = None
+                locs = list(getattr(spec, "submodule_search_locations", None) or [])
+                if not locs:
+                    continue
+                bindir = os.path.join(locs[0], "bin")
+                if os.path.isdir(bindir):
+                    try:
+                        os.add_dll_directory(bindir)
+                        found = True
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        return found
+
+    def _ensure_cuda_libs(self, job_id):
+        """Install the pip-packaged CUDA runtime libs faster-whisper needs on a
+        GPU node, then register their DLL dirs. Idempotent and quiet if present."""
+        if not self._register_cuda_dll_dirs():
+            self.send_log(job_id, "  Installing CUDA runtime libs for Whisper (cuBLAS + cuDNN, one-time)")
+            try:
+                subprocess.check_call([sys.executable, "-m", "pip", "install",
+                                       "nvidia-cublas-cu12", "nvidia-cudnn-cu12",
+                                       "-q", "--break-system-packages"])
+            except Exception as e:
+                self.send_log(job_id, f"  [WARN] CUDA lib install failed ({e}) — Whisper will use CPU")
+                return False
+            return self._register_cuda_dll_dirs()
+        return True
+
     def _load_whisper(self, model_name, device, compute_type, job_id):
         """Import (installing if needed), resolve auto device/compute, and load the
         model. Caller must hold self._whisper_lock."""
@@ -1932,6 +1981,9 @@ class ByteNode:
         # Resolve auto values
         resolved_device = device
         resolved_compute = compute_type
+        # Make cuBLAS/cuDNN loadable before any CUDA attempt (install if absent).
+        if resolved_device in ("auto", "cuda"):
+            self._ensure_cuda_libs(job_id)
         if resolved_device == "auto":
             # Try CUDA first, fall back to CPU
             try:
@@ -2266,8 +2318,8 @@ class ByteNode:
         self.send_log(job_id,
             f"  Whisper transcribing: lang={language or 'auto'}, task={task}")
 
-        try:
-            segments, info = model.transcribe(
+        def _run(m):
+            return m.transcribe(
                 audio_path,
                 language=language,
                 task=task,
@@ -2275,12 +2327,37 @@ class ByteNode:
                 vad_filter=True,  # voice-activity detection — better timestamps
                 vad_parameters=dict(min_silence_duration_ms=500),
             )
+
+        try:
+            segments, info = _run(model)
             self.send_log(job_id,
                 f"  Detected language: {info.language} (prob {info.language_probability:.2f}), "
                 f"duration {info.duration:.0f}s")
         except Exception as e:
-            self.send_log(job_id, f"  [ERROR] Whisper transcribe failed: {e}")
-            return None
+            # v2.12 — a missing/unloadable cuBLAS or cuDNN DLL only surfaces here
+            # (model load succeeds, inference doesn't). Reload on CPU and retry
+            # once so the subtitle job completes instead of hard-failing.
+            msg = str(e).lower()
+            cuda_lib_issue = any(k in msg for k in
+                ("cublas", "cudnn", "cannot be loaded", "is not found", "cuda", "libcu"))
+            if cuda_lib_issue and self._whisper_device == "cuda":
+                self.send_log(job_id, f"  [WARN] CUDA transcribe failed ({e}); reloading Whisper on CPU and retrying")
+                with self._whisper_lock:
+                    self._whisper_model = None  # force a fresh CPU load
+                    model = self._load_whisper(model_name, "cpu", "int8", job_id)
+                if model is None:
+                    return None
+                try:
+                    segments, info = _run(model)
+                    self.send_log(job_id,
+                        f"  Detected language: {info.language} (prob {info.language_probability:.2f}), "
+                        f"duration {info.duration:.0f}s (CPU)")
+                except Exception as e2:
+                    self.send_log(job_id, f"  [ERROR] Whisper CPU transcribe also failed: {e2}")
+                    return None
+            else:
+                self.send_log(job_id, f"  [ERROR] Whisper transcribe failed: {e}")
+                return None
 
         entries = []
         last_log_time = time.time()
