@@ -61,45 +61,45 @@ import sys, os, time, json, hashlib, shutil, subprocess, threading, signal, re, 
 from datetime import datetime
 
 
-def _drop_local_site(reason=""):
-    """
-    v2.13 — a stray Lib/site-packages inside the node folder (left by an old
-    partial pip install) can shadow the real packages with a BROKEN copy, e.g.
-    a 'requests' missing its 'idna' dep. If importing failed, drop that folder
-    from sys.path so the interpreter's real site-packages is used instead.
-    """
-    here = os.path.dirname(os.path.abspath(__file__))
-    bad = os.path.normcase(os.path.join(here, "Lib", "site-packages"))
-    kept = [p for p in sys.path if os.path.normcase(os.path.abspath(p)) != bad]
-    if len(kept) != len(sys.path):
-        sys.path[:] = kept
-        return True
-    return False
-
-
 def _pip(*args):
     return subprocess.call([sys.executable, "-m", "pip", *args],
                            stdout=subprocess.DEVNULL if "-q" in args else None)
 
 
+def _refresh_site_dirs():
+    """Make freshly pip-installed packages importable in THIS running process.
+    On a misconfigured Python whose prefix resolves to the node folder, pip
+    installs into <node>/Lib/site-packages; add every plausible site dir and
+    clear import caches so the new packages are found without a restart."""
+    try:
+        import site, importlib
+        here = os.path.dirname(os.path.abspath(__file__))
+        for cand in (os.path.join(here, "Lib", "site-packages"),
+                     os.path.join(sys.prefix, "Lib", "site-packages"),
+                     os.path.join(sys.base_prefix, "Lib", "site-packages")):
+            if os.path.isdir(cand):
+                site.addsitedir(cand)
+        importlib.invalidate_caches()
+    except Exception:
+        pass
+
+
 def _ensure_requests():
     """
-    Import requests, self-healing on a broken/missing install or a Python
-    without pip — both of which produced cryptic startup crashes on some nodes.
+    Import requests, self-healing on a broken/missing/partial install or a
+    Python without pip — all of which produced cryptic startup crashes on some
+    nodes. Key: after installing, re-scan site dirs so the just-installed
+    packages import in this same process (v2.14 — v2.13 wrongly dropped the
+    node-folder site dir, which is the ONLY site dir on a broken Python, so the
+    freshly-installed requests couldn't be found).
     """
     try:
         import requests  # noqa
         return requests
     except Exception:
         pass
-    # A broken partial copy in the node folder's Lib may be shadowing — drop it and retry.
-    if _drop_local_site():
-        try:
-            import requests  # noqa
-            return requests
-        except Exception:
-            pass
-    # Make pip available (ensurepip) then install the full requests stack.
+    # Ensure pip exists (ensurepip), then install/complete the full stack. A
+    # partial install missing e.g. 'idna' is completed here.
     if _pip("--version") != 0:
         try:
             subprocess.call([sys.executable, "-m", "ensurepip", "--default-pip"])
@@ -108,20 +108,22 @@ def _ensure_requests():
     if _pip("--version") == 0:
         _pip("install", "-q", "--upgrade", "requests", "idna",
              "charset-normalizer", "urllib3", "certifi")
+    _refresh_site_dirs()
     try:
         import requests  # noqa
         return requests
     except Exception as e:
+        here = os.path.dirname(os.path.abspath(__file__))
         sys.stderr.write(
-            "\n[Byte Node] Could not load the 'requests' library and couldn't auto-install it.\n"
+            "\n[Byte Node] Could not load 'requests' even after installing it.\n"
             f"  Python : {sys.executable}\n"
             f"  Error  : {e}\n\n"
-            "One-time fix (run these in a terminal, then start the node again):\n"
-            f'  rmdir /s /q \"{os.path.join(os.path.dirname(os.path.abspath(__file__)), "Lib")}\"\n'
-            f'  \"{sys.executable}\" -m ensurepip --default-pip\n'
-            f'  \"{sys.executable}\" -m pip install requests psutil faster-whisper\n\n'
-            "If that Python has no pip, install/reinstall Python from python.org\n"
-            "(check 'Add to PATH' and 'pip'), or point run_node.bat at a Python that has pip.\n")
+            "Your Python looks broken ('Could not find platform independent libraries'\n"
+            "means it can't locate its own standard library). Cleanest fix:\n"
+            "  1) Install Python 3.12 or 3.13 from python.org (tick 'Add to PATH' + pip).\n"
+            f"  2) Delete these folders:  {os.path.join(here,'Lib')}   and   {os.path.join(here,'Scripts')}\n"
+            "  3) Open a NEW terminal, confirm 'python -m pip --version' works, then\n"
+            "     run run_node.bat again.\n")
         sys.exit(1)
 
 
@@ -142,7 +144,7 @@ except Exception:
 # ─── Self-update (v2.11) ─────────────────────────────────────────────────────
 # The node checks the same published manifest the web UI uses and can pull its
 # own new files from GitHub, then relaunch — matching the website's update flow.
-NODE_VERSION = "2.13"
+NODE_VERSION = "2.14"
 GITHUB_RAW = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main"
 VERSION_MANIFEST_URL = GITHUB_RAW + "/version.json"
 NODE_FILES = ["byte_node_v2.py", "byte_node_gui.py", "setup_tools.py",
