@@ -35,7 +35,7 @@ import requests
 from mcp.server.fastmcp import FastMCP
 
 parser = argparse.ArgumentParser(description="Byte Transcode MCP Server")
-parser.add_argument("--server", default=os.environ.get("BYTE_SERVER_URL", "http://192.168.3.13:5800"))
+parser.add_argument("--server", default=os.environ.get("BYTE_SERVER_URL", "http://localhost:5800"))
 parser.add_argument("--api-key", default=os.environ.get("BYTE_API_KEY", ""))
 args, _ = parser.parse_known_args()
 

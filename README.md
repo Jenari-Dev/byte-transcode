@@ -77,7 +77,21 @@ on first run). Works with any MCP client, not just Claude.
 
 **File flow:** NAS media → read over network → GPU transcode to local SSD → copy result back to NAS → replace original (if accepted)
 
-For DoVi files, the pipeline extracts the raw HEVC bitstream and Dolby Vision RPU metadata to the local SSD, transcodes with NVENC, re-injects the RPU, converts Profile 7 to Profile 8 for maximum compatibility, then remuxes with all original audio/subtitle tracks.
+For DoVi files, the pipeline extracts the raw HEVC bitstream and Dolby Vision RPU metadata to the local SSD, transcodes with NVENC, re-injects the RPU, converts to Profile 8 for maximum compatibility, then remuxes with all original audio/subtitle tracks.
+
+### The five pipelines
+
+| Pipeline | What it does | Re-encodes video? |
+|---|---|---|
+| **Transcode** | NVENC compression with full DoVi/HDR10/HDR10+/SDR handling | Yes |
+| **DV → P8** | Converts ANY Dolby Vision profile to Profile 8. P7: metadata-only, seconds per file. P5 (the profile that plays purple/green on unsupported devices): rebuilds a genuine HDR10 base layer so the file plays correctly on DV **and** non-DV devices | P7: No · P5: Yes |
+| **Audio/Track Cleanup** | Strips audio + subtitle tracks not in your keep-list (configurable, default English + Japanese) and cleans messy track names | No |
+| **Compatibility** | Scans for playback-risk files (bad codecs, Hi10P, 10-bit HEVC SDR, interlaced, non-MKV containers, subtitle overload), notifies you, and fixes them. Every job wears a badge: **CONTAINER-ONLY REWRAP** (media untouched) or **VIDEO RE-ENCODE** | Depends — badge tells you |
+| **AI Subtitles** | Ensures English + target-language subtitles exist on every file: extracts or Whisper-transcribes English, translates via your choice of AI provider (Gemini / Claude / OpenAI / any local OpenAI-compatible endpoint), embeds or writes sidecar .srt | No |
+
+Each pipeline has its own scan, queue, and start/pause switch. Worker nodes can be
+toggled ON/OFF from the dashboard and carry per-node config (temp drive, path
+mapping, worker counts) so machines with different setups share one server.
 
 ---
 
@@ -92,9 +106,11 @@ For DoVi files, the pipeline extracts the raw HEVC bitstream and Dolby Vision RP
 - Windows 10 or 11
 - Python 3.10+ ([python.org](https://www.python.org/downloads/) or Microsoft Store)
 - NVIDIA GPU with NVENC support (GTX 1650+ / RTX series)
-- Latest [NVIDIA drivers](https://www.nvidia.com/Download/index.aspx)
+- Latest [NVIDIA drivers](https://www.nvidia.com/Download/index.aspx) (Vulkan support required for DV Profile 5 conversion — any current driver has it)
+- ffmpeg build with libplacebo + Vulkan (the BtbN/jellyfin-ffmpeg builds that `setup_tools.py` downloads include it)
 - NAS media accessible via mapped network drive (e.g. `Z:\`)
 - Local SSD recommended for temp directory (dramatically faster than NAS for temp files)
+- Run `py setup_tools.py` once — it downloads ffmpeg/ffprobe, dovi_tool, and the MKVToolNix trio (mkvmerge, mkvpropedit, mkvextract) into `tools\`
 
 ### Network
 - NAS and GPU machine on the same network
@@ -287,13 +303,16 @@ py byte_node_gui.py
 | Max Workers | 4 | Server-side cap on concurrent processing jobs |
 | Min File Size | 10 GB | Skip files smaller than this |
 | Container | MKV | Output container format (MKV or MP4) |
-| DoVi P7→P8 | Enabled | Convert Dolby Vision Profile 7 to Profile 8 |
+| DoVi → P8 | Enabled | Convert any Dolby Vision profile to Profile 8 during transcode |
+| DV5 Mode | reencode | Profile 5 conversion: `reencode` builds a true HDR10 base layer (correct everywhere); `relabel` is metadata-only (fast, but non-DV playback stays wrong) |
+| Keep Languages | eng,jpn | Audio/subtitle languages kept by Cleanup + Compatibility filtering (comma-separated ISO codes; untagged tracks always kept) |
+| Compatibility Target | H.264 | Codec for Compatibility re-encodes (H.264 = plays everywhere, HEVC = smaller) |
 | Replace Original | Enabled | Replace source file after transcode |
 | Auto-Accept | Disabled | Automatically accept completed transcodes |
 | Skip Transcoded | Enabled | Skip files already encoded with NVENC |
-| Max DoVi Concurrent | 2 | Limit heavy DoVi pipeline jobs (remaining workers get HDR10/SDR) |
-| Processing Mode | Transcode | "Transcode" (compress) or "Remux only" (container conversion) |
-| Staged File Limit | 10 | How many files to stage for processing at once |
+| Staged File Limit | 100 | Assignment gate: 0 pauses all job hand-out |
+| Node Temp Path / Path Mapping | — | Global defaults; override per node from its worker card |
+| AI / Subtitles | Gemini 2.5 Flash | Translation provider + API key, Whisper model, embed-or-external behavior — set your API key here before running AI Subtitles |
 
 ---
 
@@ -316,6 +335,21 @@ Click the **Errored** tab → **Requeue All Errors**. Or click individual files 
 
 ### Changing Worker Counts
 Use the +/- buttons on the worker card in the Dashboard. **Restart the node GUI** after changing for the new counts to take effect.
+
+### Turning a Node On/Off
+Every worker card has an **ON/OFF** switch. A disabled node stays connected
+(heartbeats keep flowing) but is never assigned new jobs — flip it back ON any
+time without touching the machine. Per-node overrides (temp drive, path
+mapping, worker counts) live in the same card and apply within ~60 seconds,
+no restart needed.
+
+### Container-Only vs Re-Encode
+In the **Compatibility** view, every flagged file shows a badge before you
+start the pipeline: green **CONTAINER-ONLY REWRAP — media untouched** means
+only the container changes (lossless, seconds per file); orange
+**VIDEO RE-ENCODE** means the video stream itself gets re-encoded to your
+Compatibility Target codec. Files with no issues are listed as skipped — hit
+**Requeue** on any of them to force-convert it anyway.
 
 ---
 
