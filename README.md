@@ -353,6 +353,36 @@ Compatibility Target codec. Files with no issues are listed as skipped — hit
 
 ---
 
+## Updating
+
+Byte Transcode checks GitHub for new versions and shows a **bell** in the
+sidebar when an update is available (server or node). Updating is one command
+per machine — your database, settings, media paths, and tools are left
+untouched.
+
+**Server (NAS):** from your server build dir (the folder with `byte_server.py`
+and `docker-compose.yml`):
+```bash
+bash update.sh
+```
+It backs up the current code, downloads the latest from GitHub, and rebuilds
+the container.
+
+**Node (Windows):** close the node first, then from your `ByteNode` folder:
+```bat
+update_node.bat
+```
+It backs up and downloads the latest node code. Run `py setup_tools.py`
+afterward if the release added new tools, then restart the node.
+
+> Both scripts are included in the repo (`server/update.sh`, `node/update_node.bat`)
+> and ship with a normal setup, so an existing install already has them.
+> For a major release that changes `docker-compose.yml` or the `Dockerfile`,
+> the release notes will say so — those rare structural changes are applied by
+> re-copying the file manually.
+
+---
+
 ## Troubleshooting
 
 | Problem | Solution |

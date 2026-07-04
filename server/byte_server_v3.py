@@ -29,7 +29,10 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 from flask import Flask, request, jsonify, send_from_directory, Response, session, redirect
 
-SERVER_VERSION = "3.13"
+SERVER_VERSION = "3.14"
+NODE_VERSION = "2.10"   # latest node version this server ships/expects
+# Where the update checker looks for the newest published versions.
+UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main/version.json"
 DEFAULT_PORT = 5800
 DB_PATH = os.environ.get("BYTE_DB_PATH", "/config/byte_transcode.db")
 LOG_DIR = os.environ.get("BYTE_LOG_DIR", "/config/logs")
@@ -2257,6 +2260,55 @@ def api_set_schedule(wid):
     return jsonify({"ok": True})
 
 # Feature 22: Server overview with OS stats
+# ── v3.14 — update checker ───────────────────────────────────────────────────
+_update_cache = {"at": 0, "data": None}
+_update_lock = threading.Lock()
+
+def _vtuple(v):
+    """'3.13' -> (3, 13) for comparison; non-numeric parts sort as 0."""
+    out = []
+    for p in str(v or "0").split("."):
+        try: out.append(int(p))
+        except ValueError: out.append(0)
+    return tuple(out)
+
+@app.route("/api/updates/check")
+def api_updates_check():
+    """Compare running server/node versions against the published manifest on
+    GitHub. Cached 30 min (or force with ?force=1) so the bell can poll freely.
+    Never fails the UI — returns update_available:false if GitHub is
+    unreachable."""
+    force = request.args.get("force") == "1"
+    now = time.time()
+    with _update_lock:
+        if not force and _update_cache["data"] and now - _update_cache["at"] < 1800:
+            return jsonify(_update_cache["data"])
+    latest_server, latest_node, notes, err = SERVER_VERSION, NODE_VERSION, "", None
+    try:
+        import urllib.request
+        req = urllib.request.Request(UPDATE_MANIFEST_URL, headers={"User-Agent": "ByteTranscode"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            m = json.loads(r.read().decode("utf-8"))
+        latest_server = str(m.get("server", SERVER_VERSION))
+        latest_node = str(m.get("node", NODE_VERSION))
+        notes = m.get("notes", "")
+    except Exception as e:
+        err = str(e)[:120]
+    data = {
+        "current_server": SERVER_VERSION, "latest_server": latest_server,
+        "current_node": NODE_VERSION, "latest_node": latest_node,
+        "server_update": _vtuple(latest_server) > _vtuple(SERVER_VERSION),
+        "node_update": _vtuple(latest_node) > _vtuple(NODE_VERSION),
+        "notes": notes,
+        "update_docs": "https://github.com/Jenari-Dev/byte-transcode#updating",
+        "checked_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "error": err,
+    }
+    data["update_available"] = data["server_update"] or data["node_update"]
+    with _update_lock:
+        _update_cache["at"] = now; _update_cache["data"] = data
+    return jsonify(data)
+
 @app.route("/api/server/overview")
 def api_server_overview():
     info = {"version": SERVER_VERSION, "uptime_seconds": 0}
