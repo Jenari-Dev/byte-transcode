@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 from flask import Flask, request, jsonify, send_from_directory, Response, session, redirect
 
-SERVER_VERSION = "3.15"
+SERVER_VERSION = "3.16"
 NODE_VERSION = "2.10"   # latest node version this server ships/expects
 # Where the update checker looks for the newest published versions.
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main/version.json"
@@ -2661,10 +2661,19 @@ def main():
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--debug", action="store_true")
-    parser.add_argument("--reset-password", action="store_true", help="Reset admin password")
+    parser.add_argument("--reset-password", action="store_true", help="Reset admin password (interactive prompt)")
+    parser.add_argument("--set-password", metavar="PW", help="Set admin password non-interactively (for docker exec)")
+    parser.add_argument("--reset-user", metavar="NAME", help="Also set the admin username")
     args = parser.parse_args()
 
     init_db()
+
+    if args.set_password is not None:
+        if args.reset_user:
+            set_setting("auth_user", args.reset_user)
+        set_setting("auth_hash", hash_password(args.set_password))
+        print(f"Password set for user '{get_setting('auth_user') or 'admin'}'. You can log in now.")
+        return
 
     if args.reset_password:
         import getpass
