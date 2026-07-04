@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 from flask import Flask, request, jsonify, send_from_directory, Response, session, redirect
 
-SERVER_VERSION = "3.22"
+SERVER_VERSION = "3.23"
 NODE_VERSION = "2.10"   # latest node version this server ships/expects
 # Where the update checker looks for the newest published versions.
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main/version.json"
@@ -2690,6 +2690,27 @@ def api_heartbeat():
 # Jobs
 MAX_REQUEUE_ATTEMPTS = 5   # v3.19 — park a poison job in Errored after this many auto-requeues
 
+ALL_JOB_TYPES = ("transcode", "subgen", "remuxclean", "dv78only", "compatfix")
+
+def _tool_priority_order():
+    """v3.23 — the drag-sorted pipeline priority from the sidebar, validated
+    against the known job types and completed with any missing ones."""
+    order = []
+    raw = get_setting("tool_priority_order")
+    if raw:
+        try:
+            order = [t for t in json.loads(raw) if t in ALL_JOB_TYPES]
+        except Exception:
+            order = []
+    return order + [t for t in ALL_JOB_TYPES if t not in order]
+
+def _tool_rank_case():
+    """Build a safe SQL CASE mapping job_type -> its priority rank (0 = first).
+    Values are from the validated whitelist above, so inlining is injection-safe."""
+    order = _tool_priority_order()
+    whens = " ".join(f"WHEN '{t}' THEN {i}" for i, t in enumerate(order))
+    return f"CASE COALESCE(NULLIF(job_type,''),'transcode') {whens} ELSE 99 END"
+
 def _effective_worker_cap(db):
     """
     v3.19 — total concurrent-job capacity = sum of each ONLINE node's transcode
@@ -2760,9 +2781,13 @@ def api_next_job():
         # Build IN clause
         placeholders = ",".join("?" * len(allowed_types))
         lib_sql, lib_params = active_lib_conditions()   # v3.15 per-tool library scope
+        # v3.23 — tool priority order (drag-sorted in the sidebar): jobs from a
+        # higher-ranked pipeline are claimed first. Ranks come from a validated
+        # whitelist, so the CASE is safe to inline.
+        rank_case = _tool_rank_case()
         query = (f"SELECT * FROM queue WHERE status='queued' AND health_status='healthy' "
                  f"AND COALESCE(NULLIF(job_type,''),'transcode') IN ({placeholders}){lib_sql} "
-                 f"ORDER BY priority ASC, id ASC LIMIT 1")
+                 f"ORDER BY {rank_case} ASC, priority ASC, id ASC LIMIT 1")
         job = db.execute(query, (*allowed_types, *lib_params)).fetchone()
         if not job:
             disabled = [jt for jt in all_types if jt not in allowed_types]

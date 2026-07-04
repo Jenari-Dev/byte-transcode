@@ -45,6 +45,10 @@ function useApi(ep,ms){const[d,setD]=useState(null);const f=useCallback(()=>{fet
 const post=(ep,body)=>fetch('/api'+ep,{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify(body||{})}).then(r=>r.json()).catch(()=>null);
 const put=(ep,body)=>fetch('/api'+ep,{method:'PUT',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify(body||{})}).then(r=>r.json()).catch(()=>null);
 const del=(ep)=>fetch('/api'+ep,{method:'DELETE',credentials:'include'}).then(r=>r.json()).catch(()=>null);
+// v3.23 — Tools sidebar: [label, icon, theme-color-key]. Order is user-draggable
+// and drives job priority (higher = claimed first).
+const TOOL_DEFS={transcode:['Transcoder','zap','ac'],subgen:['AI Subtitles','log','ok'],remuxclean:['Audio Cleanup','check','in'],dv78only:['DV → P8','play','a2'],compatfix:['Compatibility','alert','wn']};
+const TOOL_KEYS=Object.keys(TOOL_DEFS);
 
 /*═══ TOAST ═══*/
 const TC=createContext();
@@ -89,7 +93,7 @@ function Login({onAuth,setup}){
     return <div style={{minHeight:'100vh',background:T.bg,display:'flex',alignItems:'center',justifyContent:'center'}}>
         <div style={{background:T.sb,borderRadius:14,padding:'44px 40px',border:`1px solid ${T.bd}`,width:380,textAlign:'center'}}>
             <div style={{fontSize:36,fontWeight:800,color:T.ac,letterSpacing:'-1px',lineHeight:1,marginBottom:4}}>BYTE</div>
-            <div style={{fontSize:11,color:T.t2,letterSpacing:'3px',fontWeight:600,marginBottom:36}}>TRANSCODE v3.22</div>
+            <div style={{fontSize:11,color:T.t2,letterSpacing:'3px',fontWeight:600,marginBottom:36}}>TRANSCODE v3.23</div>
             {setup&&<div style={{fontSize:13,color:T.ac,marginBottom:16,padding:'10px 14px',background:`${T.ac}15`,borderRadius:8}}>First time — create your admin account</div>}
             {e&&<div style={{fontSize:13,color:T.er,marginBottom:14}}>{e}</div>}
             <input value={u} onChange={ev=>setU(ev.target.value)} placeholder="Username" style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'12px 16px',color:T.tx,fontSize:14,marginBottom:12}}/>
@@ -242,6 +246,10 @@ function App(){
     const{data:allW,refresh:rW}=useApi('/workers',3000);
     const{data:libs,refresh:rL}=useApi('/libraries',5000);
     const{data:settings,refresh:rS}=useApi('/settings',10000);
+    // v3.23 — draggable Tools priority order
+    const[toolOrder,setToolOrder]=useState(TOOL_KEYS);const[dragTool,setDragTool]=useState(null);
+    useEffect(()=>{if(settings?.tool_priority_order){try{const o=JSON.parse(settings.tool_priority_order);if(Array.isArray(o)){const v=o.filter(t=>TOOL_KEYS.includes(t));setToolOrder([...v,...TOOL_KEYS.filter(t=>!v.includes(t))]);}}catch(e){}}},[settings]);
+    const reorderTools=(target)=>{if(!dragTool||dragTool===target){setDragTool(null);return;}const no=toolOrder.filter(t=>t!==dragTool);no.splice(no.indexOf(target),0,dragTool);setToolOrder(no);setDragTool(null);put('/settings',{tool_priority_order:JSON.stringify(no)}).then(()=>rS());toast('Tool priority updated','success');};
     const{data:logs,refresh:rLg}=useApi('/logs?limit=300',5000);
     const{data:stats}=useApi('/stats',8000);
     useEffect(()=>{if(settings&&!lSettings)setLS({...settings})},[settings]);
@@ -297,7 +305,7 @@ function App(){
         <nav style={{width:218,background:T.sb,borderRight:`1px solid ${T.bd}`,display:'flex',flexDirection:'column',position:'sticky',top:0,height:'100vh',flexShrink:0}}>
             <div style={{padding:'22px 18px',borderBottom:`1px solid ${T.bd}`}}>
                 <div style={{fontSize:24,fontWeight:800,color:T.ac,letterSpacing:'-0.5px',lineHeight:1}}>BYTE</div>
-                <div style={{fontSize:10,color:T.t2,letterSpacing:'2.5px',fontWeight:600,marginTop:4}}>TRANSCODE v3.22</div>
+                <div style={{fontSize:10,color:T.t2,letterSpacing:'2.5px',fontWeight:600,marginTop:4}}>TRANSCODE v3.23</div>
             </div>
             <div style={{padding:10,flex:1,overflowY:'auto'}}>
                 {/* Main */}
@@ -308,19 +316,24 @@ function App(){
                         {id==='overview'&&proc>0&&<span className="mono" style={{marginLeft:'auto',fontSize:10,fontWeight:700,background:`${c}20`,color:c,padding:'2px 8px',borderRadius:10}}>{proc} live</span>}
                     </button>;
                 })}
-                {/* Tools section header */}
-                <div style={{fontSize:9,color:T.t2,fontWeight:700,letterSpacing:'1.5px',padding:'14px 14px 6px',marginTop:6}}>TOOLS</div>
-                {[
-                    ['tool-transcode','Transcoder','zap',T.ac,'transcode'],
-                    ['tool-subgen','AI Subtitles','log',T.ok,'subgen'],
-                    ['tool-cleanup','Audio Cleanup','check',T.in,'remuxclean'],
-                    ['tool-dv78','DV → P8','play',T.a2,'dv78only'],
-                    ['tool-compat','Compatibility','alert',T.wn,'compatfix'],
-                ].map(([id,label,icon,c,jt])=>{
+                {/* Tools section header — drag to set job priority (v3.23) */}
+                <div style={{display:'flex',alignItems:'center',gap:6,padding:'14px 14px 6px',marginTop:6}}>
+                    <span style={{fontSize:9,color:T.t2,fontWeight:700,letterSpacing:'1.5px'}}>TOOLS</span>
+                    <span style={{fontSize:8,color:T.t2,opacity:0.7}}>· drag to prioritize</span>
+                </div>
+                {toolOrder.map((jt,idx)=>{const def=TOOL_DEFS[jt];if(!def)return null;const[label,icon,ck]=def;const c=T[ck]||T.ac;
                     const procCount=(s.processing||[]).filter(p=>(p.job_type||'transcode')===jt).length;
                     const queueCount=gcType(jt,'queued')+gcType(jt,'pending');
-                    const active=tab==='dashboard'&&qTypeT===jt;
-                    return <button key={id} onClick={()=>{setTab('dashboard');setQTypeT(jt);setQTab('queued');}} style={{display:'flex',alignItems:'center',gap:9,width:'100%',padding:'11px 14px',margin:'2px 0',border:'none',cursor:'pointer',background:active?`${c}18`:'transparent',color:active?c:T.t3,fontSize:13,fontWeight:active?600:400,borderRadius:6,position:'relative'}}>
+                    const active=tab==='dashboard'&&qTypeT===jt;const isDrag=dragTool===jt;
+                    return <button key={jt} draggable
+                        onDragStart={e=>{setDragTool(jt);e.dataTransfer.effectAllowed='move';}}
+                        onDragOver={e=>{e.preventDefault();e.dataTransfer.dropEffect='move';}}
+                        onDrop={e=>{e.preventDefault();reorderTools(jt);}}
+                        onDragEnd={()=>setDragTool(null)}
+                        onClick={()=>{setTab('dashboard');setQTypeT(jt);setQTab('queued');}}
+                        title="Drag to change job priority"
+                        style={{display:'flex',alignItems:'center',gap:9,width:'100%',padding:'11px 14px',margin:'2px 0',border:dragTool&&!isDrag?`1px dashed ${T.bd}`:'1px solid transparent',cursor:'grab',background:active?`${c}18`:isDrag?`${c}10`:'transparent',color:active?c:T.t3,fontSize:13,fontWeight:active?600:400,borderRadius:6,position:'relative',opacity:isDrag?0.5:1}}>
+                        <span style={{color:T.t2,opacity:0.5,marginLeft:-4,fontSize:11,letterSpacing:'-1px'}}>⋮⋮</span>
                         <I n={icon} s={16}/> {label}
                         {procCount>0&&<span style={{width:7,height:7,borderRadius:4,background:c,animation:'pulse 1.5s infinite',marginLeft:4}}/>}
                         {queueCount>0&&<span className="mono" style={{marginLeft:'auto',fontSize:10,fontWeight:700,background:`${c}20`,color:c,padding:'2px 8px',borderRadius:10}}>{queueCount}</span>}
@@ -492,7 +505,7 @@ function App(){
                     </div>
                     <div style={{background:T.bg,borderRadius:8,padding:'10px 14px',border:`1px solid ${T.bd}`}}>
                         <div style={{fontSize:10,color:T.t2,fontWeight:600}}>VERSION</div>
-                        <div className="mono" style={{fontSize:15,fontWeight:700,color:T.t1,marginTop:2}}>3.22</div>
+                        <div className="mono" style={{fontSize:15,fontWeight:700,color:T.t1,marginTop:2}}>3.23</div>
                     </div>
                     <div style={{background:T.bg,borderRadius:8,padding:'10px 14px',border:`1px solid ${T.bd}`}}>
                         <div style={{fontSize:10,color:T.t2,fontWeight:600}}>STATUS</div>
