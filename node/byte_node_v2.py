@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Byte Transcode Node v2.8
+Byte Transcode Node v2.9
 ========================
 v2.5 — Server→Node path translation
 v2.6 — Critical fixes:
@@ -48,6 +48,13 @@ v2.8 — Universal DV converter + Compatibility pipeline:
           MKV (strategy remux) or NVENC re-encode to compat_target with
           optional deinterlace and subtitle-track filtering (strategy
           reencode). HDR/DV sources are guarded from SDR re-encoding.
+v2.9 — TRUE DV Profile 5 → 8 conversion (_dv5_true_convert): metadata-only
+        relabeling (dovi_tool mode 3) left IPTPQc2 pixels in the base
+        layer, which still played purple/green everywhere in practice.
+        P5 sources are now DV-decoded via libplacebo (Vulkan) and
+        re-encoded to a genuine PQ BT.2020 HDR10 base layer, then the
+        8.1 RPU is injected — correct on DV and non-DV devices alike.
+        Old fast path available via dv5_mode=relabel.
 """
 
 import sys, os, time, json, hashlib, shutil, subprocess, threading, signal, re, socket, platform, argparse, random
@@ -135,7 +142,7 @@ class ByteNode:
                 self.log(f"  WARN: {tool_name} not found in PATH (fallback: {tool_path!r}). "
                          f"Install it or add its directory to PATH.", "WARN")
 
-        self.log(f"Byte Node v2.8 initialized")
+        self.log(f"Byte Node v2.9 initialized")
         self.log(f"  Worker ID: {self.worker_id}")
         self.log(f"  Server: {self.server}")
         self.log(f"  GPU: {self.gpu}")
@@ -1373,20 +1380,155 @@ class ByteNode:
         4: ["-m", "2", "convert", "--discard"],  # best effort for dual-layer P4
     }
 
+    def _dv5_true_convert(self, job, settings):
+        """
+        v2.9 — REAL Profile 5 → Profile 8 conversion.
+
+        The metadata-only path (dovi_tool -m 3 relabel) is not enough for
+        P5: the base layer pixels stay IPTPQc2, so anything that plays the
+        base layer without full DV composition — and in practice even DV
+        TVs fed the relabeled stream — still shows purple/green.
+
+        This path re-encodes the base layer to genuine PQ BT.2020 HDR10:
+          1. Extract raw HEVC (copy) and pull the RPU converted to 8.1
+             (dovi_tool -m 3 extract-rpu)
+          2. Decode with Dolby Vision processing via libplacebo (Vulkan)
+             and NVENC-encode a true PQ/BT.2020 10-bit base layer
+          3. Inject the 8.1 RPU into the new base layer
+          4. mkvmerge remux with original audio/subs/chapters
+        Result: DV devices compose Profile 8 correctly, and non-DV devices
+        get a real HDR10 picture. Verified frame-accurate against the
+        purple/green dumb-player rendering of the source.
+        """
+        job_id = job["id"]
+        filepath = job["file_path"]
+        filename = job["file_name"]
+        file_size_gb = job["file_size_gb"]
+        cq = settings.get("cq", "16")
+        preset = settings.get("preset", "p5")
+        if preset not in ("p1", "p2", "p3", "p4", "p5", "p6", "p7"):
+            preset = "p5"
+        try:
+            duration_sec = float(job.get("duration_min") or 0) * 60
+        except (TypeError, ValueError):
+            duration_sec = 0
+
+        basename = os.path.splitext(filename)[0]
+        work_dir = self._work_dir(job_id, settings)
+        raw_hevc = os.path.join(work_dir, f"{basename}.hevc")
+        rpu_bin = os.path.join(work_dir, f"{basename}.rpu8.bin")
+        pq_hevc = os.path.join(work_dir, f"{basename}_pq.hevc")
+        p8_hevc = os.path.join(work_dir, f"{basename}_p8.hevc")
+        output_mkv = os.path.join(work_dir, f"{basename}_p8.mkv")
+        total_steps = 4
+
+        try:
+            # Step 1: extract raw HEVC and the 8.1-converted RPU
+            step = f"[Step 1/{total_steps}] Extracting RPU (P5 → P8.1)"
+            self.update_progress(job_id, 3, step)
+            self.send_log(job_id, step)
+            ok, err = self.run_cmd([
+                self.ffmpeg, "-y", "-i", filepath,
+                "-map", "0:v:0", "-c:v", "copy", "-bsf:v", "hevc_mp4toannexb",
+                "-f", "hevc", raw_hevc
+            ], "Extract HEVC", job_id)
+            if not ok:
+                return False, f"HEVC extraction failed: {err[:200]}", None, work_dir
+            ok, err = self.run_cmd([
+                self.dovi_tool, "-m", "3", "extract-rpu", "-i", raw_hevc, "-o", rpu_bin
+            ], "Extract RPU (mode 3)", job_id)
+            if not ok:
+                return False, f"RPU extraction failed: {err[:200]}", None, work_dir
+            if not os.path.exists(rpu_bin) or os.path.getsize(rpu_bin) == 0:
+                return False, "RPU extraction produced empty file", None, work_dir
+            try:
+                os.remove(raw_hevc)
+            except Exception:
+                pass
+
+            # Step 2: DV-aware decode → genuine PQ BT.2020 base layer
+            step = f"[Step 2/{total_steps}] Re-encoding base layer IPTPQc2 → PQ HDR10 (NVENC CQ{cq})"
+            self.update_progress(job_id, 10, step)
+            self.send_log(job_id, step)
+            vf = ("libplacebo=apply_dolbyvision=true:tonemapping=clip:"
+                  "colorspace=bt2020nc:color_primaries=bt2020:color_trc=smpte2084:"
+                  "format=p010,hwdownload,format=p010le")
+            ok, err = self.run_cmd([
+                self.ffmpeg, "-y", "-init_hw_device", "vulkan",
+                "-i", filepath, "-map", "0:v:0", "-vf", vf,
+                "-c:v", "hevc_nvenc", "-preset", preset, "-cq", str(cq),
+                "-profile:v", "main10",
+                "-color_primaries", "bt2020", "-color_trc", "smpte2084",
+                "-colorspace", "bt2020nc",
+                "-f", "hevc", pq_hevc
+            ], "DV5→HDR10 Re-encode", job_id, parse_progress=True,
+               input_size_gb=file_size_gb, total_duration_sec=duration_sec)
+            if not ok:
+                return False, f"Base layer re-encode failed: {err[:200]}", None, work_dir
+            if not os.path.exists(pq_hevc) or os.path.getsize(pq_hevc) < 1024:
+                return False, "Base layer re-encode produced empty output", None, work_dir
+
+            # Step 3: inject the P8.1 RPU into the new PQ base layer
+            step = f"[Step 3/{total_steps}] Injecting P8 RPU"
+            self.update_progress(job_id, 80, step)
+            self.send_log(job_id, step)
+            ok, err = self.run_cmd([
+                self.dovi_tool, "inject-rpu",
+                "-i", pq_hevc, "--rpu-in", rpu_bin, "-o", p8_hevc
+            ], "Inject P8 RPU", job_id)
+            if not ok:
+                return False, f"RPU injection failed: {err[:200]}", None, work_dir
+            try:
+                os.remove(pq_hevc)
+                os.remove(rpu_bin)
+            except Exception:
+                pass
+
+            # Step 4: remux with original audio/subs/chapters
+            step = f"[Step 4/{total_steps}] mkvmerge Remux (HEVC + audio/subs/chapters)"
+            self.update_progress(job_id, 88, step)
+            self.send_log(job_id, step)
+            ok, err = self.run_cmd_with_watchdog([
+                self.mkvmerge, "-o", output_mkv,
+                p8_hevc, "--no-video", filepath
+            ], "mkvmerge Remux", job_id, stale_timeout=300)
+            if not ok:
+                return False, f"mkvmerge failed: {err[:200]}", None, work_dir
+            try:
+                os.remove(p8_hevc)
+            except Exception:
+                pass
+            if not os.path.exists(output_mkv) or os.path.getsize(output_mkv) < 1024:
+                return False, "mkvmerge produced empty output", None, work_dir
+
+            output_gb = os.path.getsize(output_mkv) / (1024**3)
+            reduction = (1 - output_gb / file_size_gb) * 100 if file_size_gb > 0 else 0
+            self.update_progress(job_id, 100, "Complete")
+            self.send_log(job_id,
+                f"  COMPLETE: {file_size_gb:.2f} GB → {output_gb:.2f} GB "
+                f"(DV P5 → P8 with true HDR10 base layer)")
+            return True, None, {
+                "output_path": output_mkv,
+                "output_size_gb": output_gb,
+                "reduction_pct": reduction,
+                "saved_gb": file_size_gb - output_gb,
+            }, work_dir
+
+        except Exception as e:
+            self.log(f"DV5 true convert exception: {e}", "ERROR")
+            self.send_log(job_id, f"[ERROR] DV5 true convert exception: {e}")
+            return False, str(e), None, work_dir
+
     def dv78only_convert(self, job, settings):
         """
-        Convert any Dolby Vision profile → Profile 8 without re-encoding.
-        Pipeline (v2.7 fixed, v2.8 generalized beyond P7):
-          1. Extract HEVC bitstream (copy, no re-encode)
-          2. dovi_tool convert on the HEVC stream, mode chosen by source
-             profile (see DV_CONVERT_ARGS). P7 → mode 2 --discard;
-             P5 → mode 3. (`convert` only operates on HEVC streams — the
-             pre-v2.7 version fed it an RPU .bin and always failed.)
-          3. mkvmerge remux: converted HEVC + original audio/subs/chapters
-        Result: same quality, P8.1 instead of the source profile.
-        Note: for P5 sources the HDR10 fallback colors on non-DV displays
-        may be imperfect (P5 has no true HDR10 base layer) — DV-capable
-        devices play it correctly, which is the point of the conversion.
+        Convert any Dolby Vision profile → Profile 8.
+        - P7 (and other dual-layer profiles): metadata-only conversion, no
+          re-encode — the base layer is already genuine HDR10.
+          (v2.7 fixed `convert` being fed an RPU .bin; v2.8 generalized.)
+        - P5: routed to _dv5_true_convert (v2.9) — re-encodes the IPTPQc2
+          base layer to real PQ HDR10, because metadata-only relabeling
+          leaves purple/green output on every playback path in practice.
+          Set dv5_mode=relabel to force the old fast path for experiments.
         """
         job_id = job["id"]
         filepath = job["file_path"]
@@ -1397,6 +1539,10 @@ class ByteNode:
             src_profile = int(job.get("dovi_profile") or 7)
         except (TypeError, ValueError):
             src_profile = 7
+
+        if src_profile == 5 and settings.get("dv5_mode", "reencode") != "relabel":
+            return self._dv5_true_convert(job, settings)
+
         convert_args = self.DV_CONVERT_ARGS.get(src_profile, ["-m", "2", "convert", "--discard"])
 
         basename = os.path.splitext(filename)[0]

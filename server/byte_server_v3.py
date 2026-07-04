@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 from flask import Flask, request, jsonify, send_from_directory, Response, session, redirect
 
-SERVER_VERSION = "3.8"
+SERVER_VERSION = "3.9"
 DEFAULT_PORT = 5800
 DB_PATH = os.environ.get("BYTE_DB_PATH", "/config/byte_transcode.db")
 LOG_DIR = os.environ.get("BYTE_LOG_DIR", "/config/logs")
@@ -189,6 +189,15 @@ def init_db():
             "whisper_compute": "auto",
             "subgen_target_lang": "jpn",
             "subgen_translate_chunk": "40",
+            # v3.9 — provider-agnostic translation. Users pick any AI service and
+            # supply their own key. 'openai_compatible' + translate_base_url covers
+            # local Ollama/LM Studio/vLLM and OpenRouter/Together/DeepSeek/etc.
+            # Empty translate_* falls back to the legacy claude_api_key/claude_model.
+            "translate_provider": "anthropic",   # anthropic | openai | gemini | openai_compatible
+            "translate_api_key": "",
+            "translate_model": "",               # blank = provider default / legacy claude_model
+            "translate_base_url": "",            # required for openai_compatible; optional override otherwise
+            "translate_glossary": "",            # optional recurring names/terms/context for consistency
             # v3.4 — Per-job-type processing toggles. Each defaults to "true";
             # the master `processing_enabled` is the gatekeeper (must be "true"
             # for ANY job to process). When master is on, only job types with
@@ -199,6 +208,12 @@ def init_db():
             "processing_enabled_dv78only": "true",
             # v3.8 — Compatibility pipeline (flag + fix playback-risk files)
             "processing_enabled_compatfix": "true",
+            # v3.9 — DV Profile 5 conversion mode: 'reencode' re-encodes the
+            # IPTPQc2 base layer to real PQ HDR10 (correct on all devices);
+            # 'relabel' is the old metadata-only pass (fast but leaves
+            # purple/green output on non-DV playback paths — and in
+            # practice on DV TVs too)
+            "dv5_mode": "reencode",
             # Target codec for compat re-encodes: h264 = plays on everything,
             # hevc = smaller files, plays on most modern devices
             "compat_target": "h264",
