@@ -1,7 +1,7 @@
 {
-  "server": "3.27",
-  "node": "2.19",
+  "server": "3.28",
+  "node": "2.20",
   "released": "2026-07-05",
-  "notes": "Code-audit fixes: worker cards show the job category each node is running; completing one job no longer blanks a multi-threaded node's other running jobs; health-check no longer un-parks poison jobs; Compatibility pipeline pause now shows correctly; 'Scan (Fresh)' actually clears first; compat rewrap no longer errors on 2-letter subtitle language codes. Node v2.19 + server v3.27.",
+  "notes": "Node v2.20 hides the console windows that flashed every ~15s under the GUI (all child processes now run hidden on Windows). The Active Workers On/Off toggle now actually works — it pauses/enables the node running that job. Plus the v3.27 code-audit fixes and per-node job-category tags.",
   "update_docs": "https://github.com/Jenari-Dev/byte-transcode#updating"
 }

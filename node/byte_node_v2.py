@@ -60,6 +60,20 @@ v2.9 — TRUE DV Profile 5 → 8 conversion (_dv5_true_convert): metadata-only
 import sys, os, time, json, hashlib, shutil, subprocess, threading, signal, re, socket, platform, argparse, random
 from datetime import datetime
 
+# v2.20 — when the node runs under pythonw (the GUI has no console), Windows pops
+# a brief console window for EVERY child process — nvidia-smi every 15s (the
+# heartbeat), plus ffmpeg/ffprobe/mkvmerge/dovi_tool/pip — which flashes on screen
+# and steals focus. subprocess.run() and check_call() both funnel through
+# subprocess.Popen, so wrapping Popen once hides them all.
+if os.name == "nt":
+    _CREATE_NO_WINDOW = 0x08000000
+    _orig_popen = subprocess.Popen
+    class _HiddenPopen(_orig_popen):
+        def __init__(self, *args, **kwargs):
+            kwargs["creationflags"] = kwargs.get("creationflags", 0) | _CREATE_NO_WINDOW
+            super().__init__(*args, **kwargs)
+    subprocess.Popen = _HiddenPopen
+
 
 def _pip(*args):
     return subprocess.call([sys.executable, "-m", "pip", *args],
@@ -144,7 +158,7 @@ except Exception:
 # ─── Self-update (v2.11) ─────────────────────────────────────────────────────
 # The node checks the same published manifest the web UI uses and can pull its
 # own new files from GitHub, then relaunch — matching the website's update flow.
-NODE_VERSION = "2.19"
+NODE_VERSION = "2.20"
 GITHUB_RAW = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main"
 VERSION_MANIFEST_URL = GITHUB_RAW + "/version.json"
 NODE_FILES = ["byte_node_v2.py", "byte_node_gui.py", "setup_tools.py",

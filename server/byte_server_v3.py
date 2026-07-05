@@ -29,8 +29,8 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 from flask import Flask, request, jsonify, send_from_directory, Response, session, redirect
 
-SERVER_VERSION = "3.27"
-NODE_VERSION = "2.19"   # fallback only; the update bell uses each connected node's reported version
+SERVER_VERSION = "3.28"
+NODE_VERSION = "2.20"   # fallback only; the update bell uses each connected node's reported version
 # Where the update checker looks for the newest published versions.
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main/version.json"
 DEFAULT_PORT = 5800
