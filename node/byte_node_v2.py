@@ -158,7 +158,7 @@ except Exception:
 # ─── Self-update (v2.11) ─────────────────────────────────────────────────────
 # The node checks the same published manifest the web UI uses and can pull its
 # own new files from GitHub, then relaunch — matching the website's update flow.
-NODE_VERSION = "2.20"
+NODE_VERSION = "2.21"
 GITHUB_RAW = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main"
 VERSION_MANIFEST_URL = GITHUB_RAW + "/version.json"
 NODE_FILES = ["byte_node_v2.py", "byte_node_gui.py", "setup_tools.py",
@@ -777,6 +777,30 @@ class ByteNode:
             except Exception as e:
                 self.log(f"Cleanup failed: {e}", "WARN")
 
+    def _ensure_temp_space(self, work_dir, filepath, job_id, multiplier=2.2):
+        """
+        v2.20 — fail fast with a CLEAR message when the temp drive can't hold the
+        working files, instead of running for 20+ minutes and then dying on the
+        cryptic 'No space left on device' mid-extract. DV/transcode jobs copy the
+        source bitstream to temp and write the output there too, so they need
+        roughly 2x the source size free.
+        """
+        try:
+            src = os.path.getsize(filepath)
+            free = shutil.disk_usage(work_dir).free
+        except Exception:
+            return True, None  # can't check — let it try
+        need = int(src * multiplier)
+        if free < need:
+            gb = 1024 ** 3
+            drive = os.path.splitdrive(os.path.abspath(work_dir))[0] or work_dir
+            msg = (f"Not enough temp space on {drive}: need ~{need/gb:.0f} GB "
+                   f"(~{multiplier:g}x the {src/gb:.0f} GB source), only {free/gb:.0f} GB free. "
+                   f"Point the node temp dir to a bigger drive, or free space.")
+            self.send_log(job_id, f"  [ERROR] {msg}")
+            return False, msg
+        return True, None
+
     def transcode_dovi(self, job, settings):
         """Full Dolby Vision preserving transcode pipeline."""
         job_id = job["id"]
@@ -788,6 +812,9 @@ class ByteNode:
 
         basename = os.path.splitext(filename)[0]
         work_dir = self._work_dir(job_id, settings)
+        ok, err = self._ensure_temp_space(work_dir, filepath, job_id)
+        if not ok:
+            return False, err, None, work_dir
 
         raw_hevc = os.path.join(work_dir, f"{basename}.hevc")
         rpu_bin = os.path.join(work_dir, f"{basename}.rpu.bin")
@@ -947,6 +974,9 @@ class ByteNode:
 
         basename = os.path.splitext(filename)[0]
         work_dir = self._work_dir(job_id, settings)
+        ok, err = self._ensure_temp_space(work_dir, filepath, job_id, multiplier=1.6)
+        if not ok:
+            return False, err, None, work_dir
         output_mkv = os.path.join(work_dir, f"{basename}_byte.mkv")
         duration_sec = float(job.get("duration_min", 0)) * 60
 
@@ -1633,6 +1663,9 @@ class ByteNode:
 
         basename = os.path.splitext(filename)[0]
         work_dir = self._work_dir(job_id, settings)
+        ok, err = self._ensure_temp_space(work_dir, filepath, job_id)
+        if not ok:
+            return False, err, None, work_dir
         raw_hevc = os.path.join(work_dir, f"{basename}.hevc")
         rpu_bin = os.path.join(work_dir, f"{basename}.rpu8.bin")
         pq_hevc = os.path.join(work_dir, f"{basename}_pq.hevc")
@@ -1765,6 +1798,9 @@ class ByteNode:
 
         basename = os.path.splitext(filename)[0]
         work_dir = self._work_dir(job_id, settings)
+        ok, err = self._ensure_temp_space(work_dir, filepath, job_id)
+        if not ok:
+            return False, err, None, work_dir
 
         raw_hevc = os.path.join(work_dir, f"{basename}.hevc")
         p8_hevc = os.path.join(work_dir, f"{basename}_p8.hevc")
@@ -1884,6 +1920,9 @@ class ByteNode:
 
         basename = os.path.splitext(filename)[0]
         work_dir = self._work_dir(job_id, settings)
+        ok, err = self._ensure_temp_space(work_dir, filepath, job_id, multiplier=1.5)
+        if not ok:
+            return False, err, None, work_dir
         output_mkv = os.path.join(work_dir, f"{basename}_compat.mkv")
 
         if reasons:

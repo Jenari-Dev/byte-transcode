@@ -29,8 +29,8 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 from flask import Flask, request, jsonify, send_from_directory, Response, session, redirect
 
-SERVER_VERSION = "3.28"
-NODE_VERSION = "2.20"   # fallback only; the update bell uses each connected node's reported version
+SERVER_VERSION = "3.29"
+NODE_VERSION = "2.21"   # fallback only; the update bell uses each connected node's reported version
 # Where the update checker looks for the newest published versions.
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main/version.json"
 DEFAULT_PORT = 5800
@@ -2696,6 +2696,15 @@ def api_register_worker():
             db.execute("""DELETE FROM workers WHERE name=? AND id<>?
                 AND (last_heartbeat IS NULL OR last_heartbeat < datetime('now','localtime','-120 seconds'))""",
                 (name, wid))
+        # v3.28 — a re-registering worker is a FRESH start (it was just
+        # (re)launched — e.g. after an update). Any job still marked 'processing'
+        # under its id is orphaned from the killed process, so release it back to
+        # the queue instead of letting it sit stuck forever (the update black-hole).
+        released = db.execute("""UPDATE queue SET status='queued', worker_id=NULL, started_at=NULL,
+            current_step='Requeued (node restarted)'
+            WHERE status='processing' AND worker_id=?""", (wid,))
+        if released.rowcount:
+            add_log(f"Released {released.rowcount} orphaned job(s) from restarted node {name}")
     add_log(f"Worker registered: {name} ({d.get('gpu','')})")
     return jsonify({"ok": True})
 
@@ -2995,7 +3004,12 @@ def api_dashboard():
         saved = db.execute("SELECT COALESCE(SUM(file_size_gb-COALESCE(output_size_gb,file_size_gb)),0) as s FROM queue WHERE status='complete'").fetchone()
         processing = db.execute("SELECT * FROM queue WHERE status='processing' ORDER BY priority").fetchall()
         recent_complete = db.execute("SELECT * FROM queue WHERE status='complete' ORDER BY completed_at DESC LIMIT 10").fetchall()
-        settings = {r["key"]: r["value"] for r in db.execute("SELECT * FROM settings").fetchall()}
+        # v3.28 SECURITY — /api/dashboard is public (no login); never leak secrets
+        # here. Mask any key that looks like a credential; the authed /api/settings
+        # still returns real values for the settings page.
+        _SECRET = ("api_key", "password", "hash", "token", "secret")
+        settings = {r["key"]: ("***" if r["value"] and any(s in r["key"].lower() for s in _SECRET) else r["value"])
+                    for r in db.execute("SELECT * FROM settings").fetchall()}
         # v3.19 — map worker_id -> node name so every running job shows which
         # machine (and, with job_type, which pipeline) is doing it. All threads
         # on one node share a worker_id, so the workers table alone can't show
