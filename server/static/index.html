@@ -93,7 +93,7 @@ function Login({onAuth,setup}){
     return <div style={{minHeight:'100vh',background:T.bg,display:'flex',alignItems:'center',justifyContent:'center'}}>
         <div style={{background:T.sb,borderRadius:14,padding:'44px 40px',border:`1px solid ${T.bd}`,width:380,textAlign:'center'}}>
             <div style={{fontSize:36,fontWeight:800,color:T.ac,letterSpacing:'-1px',lineHeight:1,marginBottom:4}}>BYTE</div>
-            <div style={{fontSize:11,color:T.t2,letterSpacing:'3px',fontWeight:600,marginBottom:36}}>TRANSCODE v3.33</div>
+            <div style={{fontSize:11,color:T.t2,letterSpacing:'3px',fontWeight:600,marginBottom:36}}>TRANSCODE v3.34</div>
             {setup&&<div style={{fontSize:13,color:T.ac,marginBottom:16,padding:'10px 14px',background:`${T.ac}15`,borderRadius:8}}>First time — create your admin account</div>}
             {e&&<div style={{fontSize:13,color:T.er,marginBottom:14}}>{e}</div>}
             <input value={u} onChange={ev=>setU(ev.target.value)} placeholder="Username" style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'12px 16px',color:T.tx,fontSize:14,marginBottom:12}}/>
@@ -139,7 +139,7 @@ function StepLog({logs=[],T}){
             {open[i]&&<div className="mono" style={{background:'#08090c',padding:10,fontSize:11,lineHeight:'17px',maxHeight:300,overflowY:'auto',borderBottom:`1px solid ${T.bd}`}}>
                 {st.logs.map((l,j)=><div key={j} style={{display:'flex',gap:8,marginBottom:1}}>
                     <span style={{color:T.t2,opacity:0.4,minWidth:24,textAlign:'right'}}>{j+1}</span>
-                    <span style={{color:T.t2,opacity:0.5,minWidth:70}}>{(l.timestamp||'').slice(11)}</span>
+                    <span style={{color:T.t2,opacity:0.5,minWidth:108}}>{(l.timestamp||'').slice(5,19)}</span>
                     <span style={{color:l.level==='ERROR'?T.er:l.level==='WARN'?T.wn:T.in,fontWeight:600,minWidth:42}}>[{l.level}]</span>
                     <span style={{color:l.level==='ERROR'?T.er:T.t2}}>{l.message}</span>
                 </div>)}
@@ -153,12 +153,15 @@ function StepLog({logs=[],T}){
 function FileModal({item,T,onClose,onAct}){
     const[tab,setTab]=useState(item._tab||'info');
     const[logs,setLogs]=useState([]);
+    const[live,setLive]=useState(false);
     const iv=useRef();const toast=useContext(TC);
     const getLogs=useCallback(()=>{fetch(`/api/logs?job_id=${item.id}&limit=300`,{credentials:'include'}).then(r=>r.ok?r.json():[]).then(d=>setLogs(Array.isArray(d)?d.reverse():[])).catch(()=>{});},[item.id]);
-    useEffect(()=>{getLogs();if(item.status==='processing')iv.current=setInterval(getLogs,3000);return()=>clearInterval(iv.current);},[item.status,getLogs]);
+    // v3.34 — poll while processing (auto) OR while the Live toggle is on, so a
+    // completed/errored job's log can be watched live too.
+    useEffect(()=>{getLogs();const poll=live||item.status==='processing';if(poll)iv.current=setInterval(getLogs,live?2000:3000);return()=>clearInterval(iv.current);},[item.status,getLogs,live]);
 
     const hdr=HDR_C[item.hdr_type]||HDR_C.SDR;
-    const act=async(a)=>{await onAct(item.id,a);toast(a==='cancel'?'Cancelled':a==='accept'?'Accepted':a==='requeue'?'Requeued':'Done',a==='cancel'?'error':'success');};
+    const act=async(a)=>{await onAct(item.id,a);toast(a==='cancel'?'Cancelled':a==='accept'?'Accepted':a==='decline'?'Declined — original kept':a==='requeue'?'Requeued':'Done',(a==='cancel'||a==='decline')?'error':'success');};
 
     return <div onClick={onClose} style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.65)',zIndex:500,display:'flex',alignItems:'center',justifyContent:'center',padding:20,animation:'fadeIn 0.15s'}}>
         <div onClick={e=>e.stopPropagation()} style={{background:T.cs,border:`1px solid ${T.bd}`,borderRadius:14,width:'100%',maxWidth:920,maxHeight:'88vh',overflow:'hidden',display:'flex',flexDirection:'column',boxShadow:'0 30px 80px rgba(0,0,0,0.5)'}}>
@@ -199,13 +202,16 @@ function FileModal({item,T,onClose,onAct}){
                             <button onClick={()=>act('bump-top')} style={{background:`${T.in}15`,border:`1px solid ${T.in}44`,borderRadius:8,padding:'8px 16px',cursor:'pointer',color:T.in,fontSize:12,fontWeight:600,display:'flex',alignItems:'center',gap:5}}><I n="up" s={13}/> Bump to Top</button>
                             <button onClick={()=>act('skip')} style={{background:`${T.wn}15`,border:`1px solid ${T.wn}44`,borderRadius:8,padding:'8px 16px',cursor:'pointer',color:T.wn,fontSize:12,fontWeight:600,display:'flex',alignItems:'center',gap:5}}><I n="skip" s={13}/> Ignore</button></>}
                         {['queued','processing','pending'].includes(item.status)&&<button onClick={()=>act('cancel')} style={{background:`${T.er}15`,border:`1px solid ${T.er}44`,borderRadius:8,padding:'8px 16px',cursor:'pointer',color:T.er,fontSize:12,fontWeight:600,display:'flex',alignItems:'center',gap:5}}><I n="stop" s={13}/> Cancel</button>}
-                        {item.status==='complete'&&!item.accepted&&<button onClick={()=>act('accept')} style={{background:`${T.ok}15`,border:`1px solid ${T.ok}44`,borderRadius:8,padding:'8px 16px',cursor:'pointer',color:T.ok,fontSize:12,fontWeight:600,display:'flex',alignItems:'center',gap:5}}><I n="check" s={13}/> Accept</button>}
+                        {item.status==='complete'&&item.finalized===0&&!item.accepted&&<>
+                            <button onClick={()=>act('accept')} title="Accept — the new file replaces the original" style={{background:`${T.ok}15`,border:`1px solid ${T.ok}44`,borderRadius:8,padding:'8px 16px',cursor:'pointer',color:T.ok,fontSize:12,fontWeight:600,display:'flex',alignItems:'center',gap:5}}><I n="check" s={13}/> Accept</button>
+                            <button onClick={()=>act('decline')} title="Decline — keep the original untouched, discard the new file" style={{background:`${T.er}15`,border:`1px solid ${T.er}44`,borderRadius:8,padding:'8px 16px',cursor:'pointer',color:T.er,fontSize:12,fontWeight:600,display:'flex',alignItems:'center',gap:5}}><I n="x" s={13}/> Decline</button></>}
                         {['error','skipped','cancelled'].includes(item.status)&&<button onClick={()=>act('requeue')} style={{background:`${T.in}15`,border:`1px solid ${T.in}44`,borderRadius:8,padding:'8px 16px',cursor:'pointer',color:T.in,fontSize:12,fontWeight:600,display:'flex',alignItems:'center',gap:5}}><I n="refresh" s={13}/> Requeue</button>}
                     </div>
                 </>}
                 {tab==='log'&&<>
                     <div style={{display:'flex',gap:8,marginBottom:12}}>
                         <button onClick={getLogs} style={{background:T.card,border:`1px solid ${T.bd}`,borderRadius:6,padding:'6px 14px',cursor:'pointer',color:T.t3,fontSize:12,fontWeight:600,display:'flex',alignItems:'center',gap:4}}><I n="refresh" s={12}/> Refresh</button>
+                        <button onClick={()=>setLive(v=>!v)} title="Auto-refresh the log every 2s" style={{background:live?`${T.ac}22`:T.card,border:`1px solid ${live?T.ac+'88':T.bd}`,borderRadius:6,padding:'6px 14px',cursor:'pointer',color:live?T.ac:T.t3,fontSize:12,fontWeight:600,display:'flex',alignItems:'center',gap:5}}><span style={{width:7,height:7,borderRadius:'50%',background:live?T.ac:T.t3,boxShadow:live?`0 0 6px ${T.ac}`:'none'}}/> {live?'Live':'Go Live'}</button>
                         <button onClick={()=>{copyText(logs.map(l=>'['+l.timestamp+'] ['+l.level+'] '+l.message).join('\n'));toast('Copied','success')}} style={{background:T.card,border:`1px solid ${T.bd}`,borderRadius:6,padding:'6px 14px',cursor:'pointer',color:T.t3,fontSize:12,fontWeight:600,display:'flex',alignItems:'center',gap:4}}><I n="copy" s={12}/> Copy</button>
                         <button onClick={()=>{const b=new Blob([logs.map(l=>`[${l.timestamp}] [${l.level}] ${l.message}`).join('\n')],{type:'text/plain'});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=`job-${item.id}.log`;a.click();}} style={{background:T.card,border:`1px solid ${T.bd}`,borderRadius:6,padding:'6px 14px',cursor:'pointer',color:T.t3,fontSize:12,fontWeight:600,display:'flex',alignItems:'center',gap:4}}><I n="download" s={12}/> Download</button>
                     </div>
@@ -290,6 +296,7 @@ function App(){
         if(action==='cancel')await post('/queue/'+id+'/cancel');
         else if(action==='skip')await post('/queue/'+id+'/skip',{reason:'Not needed'});
         else if(action==='accept')await post('/queue/'+id+'/accept');
+        else if(action==='decline')await post('/queue/'+id+'/decline');
         else if(action==='requeue')await post('/queue/'+id+'/requeue');
         else if(action==='bump-top')await post('/queue/'+id+'/bump-top');
         else if(action==='bump-up')await post('/queue/'+id+'/bump',{direction:'up'});
@@ -305,7 +312,7 @@ function App(){
         <nav style={{width:218,background:T.sb,borderRight:`1px solid ${T.bd}`,display:'flex',flexDirection:'column',position:'sticky',top:0,height:'100vh',flexShrink:0}}>
             <div style={{padding:'22px 18px',borderBottom:`1px solid ${T.bd}`}}>
                 <div style={{fontSize:24,fontWeight:800,color:T.ac,letterSpacing:'-0.5px',lineHeight:1}}>BYTE</div>
-                <div style={{fontSize:10,color:T.t2,letterSpacing:'2.5px',fontWeight:600,marginTop:4}}>TRANSCODE v3.33</div>
+                <div style={{fontSize:10,color:T.t2,letterSpacing:'2.5px',fontWeight:600,marginTop:4}}>TRANSCODE v3.34</div>
             </div>
             <div style={{padding:10,flex:1,overflowY:'auto'}}>
                 {/* Main */}
@@ -513,7 +520,7 @@ function App(){
                     </div>
                     <div style={{background:T.bg,borderRadius:8,padding:'10px 14px',border:`1px solid ${T.bd}`}}>
                         <div style={{fontSize:10,color:T.t2,fontWeight:600}}>VERSION</div>
-                        <div className="mono" style={{fontSize:15,fontWeight:700,color:T.t1,marginTop:2}}>3.33</div>
+                        <div className="mono" style={{fontSize:15,fontWeight:700,color:T.t1,marginTop:2}}>3.34</div>
                     </div>
                     <div style={{background:T.bg,borderRadius:8,padding:'10px 14px',border:`1px solid ${T.bd}`}}>
                         <div style={{fontSize:10,color:T.t2,fontWeight:600}}>STATUS</div>
@@ -790,8 +797,13 @@ function App(){
                                     <span className="mono" style={{color:T.ok,fontSize:10}}>{(c.output_size_gb||0).toFixed(1)} GB</span>
                                     <span className="mono" style={{color:T.ok,fontSize:10,fontWeight:700}}>{saved.toFixed(1)}</span>
                                     <span className="mono" style={{color:T.ac,fontSize:10,fontWeight:700}}>{ratio.toFixed(0)}%</span>
-                                    {!c.accepted?<button title="Accept this result — the new file will replace the original (original deleted)" onClick={async()=>{await post('/queue/'+c.id+'/accept');rD();toast('Accepted — node is replacing the original now','success')}} style={{background:T.ok+'15',border:'none',borderRadius:4,padding:'2px 6px',cursor:'pointer',color:T.ok,fontSize:9,fontWeight:700}}>Accept</button>
-                                     :(c.finalized===0?<span title="Accepted — node is swapping the file in" style={{color:T.wn,fontSize:9,fontWeight:700}}>Replacing…</span>:<span style={{color:T.ok,fontSize:9}}>&#10003;</span>)}
+                                    {(c.finalized===0&&!c.accepted)?<div style={{display:'flex',flexDirection:'column',gap:2}}>
+                                        <button title="Accept — the new file replaces the original (original removed)" onClick={async()=>{await post('/queue/'+c.id+'/accept');rD();toast('Accepted — node is replacing the original now','success')}} style={{background:T.ok+'15',border:'none',borderRadius:4,padding:'2px 6px',cursor:'pointer',color:T.ok,fontSize:9,fontWeight:700}}>Accept</button>
+                                        <button title="Decline — keep the original untouched, discard the new file" onClick={async()=>{await post('/queue/'+c.id+'/decline');rD();toast('Declined — original kept','error')}} style={{background:T.er+'15',border:'none',borderRadius:4,padding:'2px 6px',cursor:'pointer',color:T.er,fontSize:9,fontWeight:700}}>Decline</button>
+                                      </div>
+                                     :(c.accepted&&c.finalized===0)?<span title="Accepted — node is swapping the file in" style={{color:T.wn,fontSize:9,fontWeight:700}}>Replacing…</span>
+                                     :(!c.accepted&&(c.current_step||'').indexOf('Declined')===0)?<span title="Declined — original kept, new file discarded" style={{color:T.er,fontSize:9,fontWeight:700}}>Declined</span>
+                                     :<span style={{color:T.ok,fontSize:9}}>&#10003;</span>}
                                 </div>;})}
                             {myComplete.length===0&&<div style={{padding:20,textAlign:'center',color:T.t2,fontSize:11}}>No completed jobs yet</div>}
                         </div>
@@ -1027,7 +1039,7 @@ function App(){
                             <span className="mono" style={{color:T.t2,fontSize:10}}>{(page-1)*perPage+idx+1}</span>
                             <span style={{fontSize:10,color:T.t2}}>{item.has_dovi?'Transcode':'Health'}</span>
                             <span style={{fontSize:10,color:T.t2,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{item.library_name||'--'}</span>
-                            <span className="mono" style={{fontSize:9,color:T.t2}}>{(item.created_at||'').slice(5,16)}</span>
+                            <span className="mono" style={{fontSize:9,color:T.t2}}>{((item.status==='processing'?item.started_at:['complete','cancelled','error'].includes(item.status)?item.completed_at:item.created_at)||item.created_at||'').slice(5,16)}</span>
                             <span style={{color:T.t1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',fontWeight:500}}>{showPaths?item.file_path:item.file_name}</span>
                             <span style={{color:stC,fontWeight:600,fontSize:10}}>{(item.status||'').replace(/_/g,' ')}</span>
                             <span style={{fontSize:10,color:T.t2}}>{item.worker_id||'--'}</span>
@@ -1042,7 +1054,7 @@ function App(){
                     return <div key={item.id} onClick={()=>setSelFile(item)} style={{display:'grid',gridTemplateColumns:'36px 70px 80px 1fr 60px 60px 80px 50px 50px 36px 80px',gap:4,padding:'9px 10px',alignItems:'center',borderBottom:`1px solid ${T.bd}`,cursor:'pointer',background:idx%2===0?'transparent':T.card,fontSize:12}} onMouseEnter={e=>e.currentTarget.style.background=T.ac+'08'} onMouseLeave={e=>e.currentTarget.style.background=idx%2===0?'transparent':T.card}>
                         <span className="mono" style={{color:T.t2,fontSize:10}}>{(page-1)*perPage+idx+1}</span>
                         <span style={{fontSize:10,color:T.t2,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{item.library_name||'--'}</span>
-                        <span className="mono" style={{fontSize:9,color:T.t2}}>{(item.created_at||'').slice(5,16)}</span>
+                        <span className="mono" style={{fontSize:9,color:T.t2}}>{((item.status==='processing'?item.started_at:['complete','cancelled','error'].includes(item.status)?item.completed_at:item.created_at)||item.created_at||'').slice(5,16)}</span>
                         <div style={{minWidth:0}}>
                             <div style={{display:'flex',alignItems:'center',gap:5}}>
                                 <span style={{fontWeight:500,color:T.t1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{showPaths?item.file_path:item.file_name}</span>
@@ -1089,7 +1101,7 @@ function App(){
                             <button onClick={()=>setSelFile({...item,_tab:'log'})} style={{background:T.in+'08',border:'none',borderRadius:4,padding:'3px',cursor:'pointer',color:T.in}}><I n="log" s={12}/></button>
                         </div>
                         <div style={{display:'flex',gap:2}} onClick={e=>e.stopPropagation()}>
-                            {item.status==='complete'&&!item.accepted&&<button onClick={async()=>{await post('/queue/'+item.id+'/accept');rQ();rD();toast('Accepted','success')}} style={{background:T.ok+'12',border:'none',borderRadius:3,padding:'2px 6px',cursor:'pointer',color:T.ok,fontSize:10,fontWeight:600}}>Accept</button>}
+                            {item.status==='complete'&&item.finalized===0&&!item.accepted&&<button onClick={async()=>{await post('/queue/'+item.id+'/accept');rQ();rD();toast('Accepted','success')}} style={{background:T.ok+'12',border:'none',borderRadius:3,padding:'2px 6px',cursor:'pointer',color:T.ok,fontSize:10,fontWeight:600}}>Accept</button>}
                             {['error','skipped','cancelled'].includes(item.status)&&<button onClick={async()=>{await post('/queue/'+item.id+'/requeue');rQ();rD();toast('Requeued','success')}} style={{background:T.in+'12',border:'none',borderRadius:3,padding:'2px 6px',cursor:'pointer',color:T.in,fontSize:10,fontWeight:600}}>Requeue</button>}
                             {['complete','error','skipped','cancelled'].includes(item.status)&&<button onClick={async()=>{await del('/queue/'+item.id);rQ();rD();}} style={{background:'none',border:'none',cursor:'pointer',color:T.t2,padding:2}}><I n="x" s={12}/></button>}
                         </div>

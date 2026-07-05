@@ -158,7 +158,7 @@ except Exception:
 # ─── Self-update (v2.11) ─────────────────────────────────────────────────────
 # The node checks the same published manifest the web UI uses and can pull its
 # own new files from GitHub, then relaunch — matching the website's update flow.
-NODE_VERSION = "2.26"
+NODE_VERSION = "2.27"
 GITHUB_RAW = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main"
 VERSION_MANIFEST_URL = GITHUB_RAW + "/version.json"
 NODE_FILES = ["byte_node_v2.py", "byte_node_gui.py", "setup_tools.py",
@@ -620,8 +620,47 @@ class ByteNode:
             return True
         return False
 
+    @staticmethod
+    def _fmt_eta(secs):
+        """Format seconds as '1h 3m' / '4m 12s' / '38s'."""
+        secs = int(max(0, secs))
+        if secs > 3600:
+            return f"{secs // 3600}h {(secs % 3600) // 60}m"
+        if secs > 60:
+            return f"{secs // 60}m {secs % 60}s"
+        return f"{secs}s"
+
+    def _tw_count(self, settings):
+        """v2.27 — total transcode workers = GPU count + CPU count, summed
+        (the same way health-check workers already sum CPU+GPU). The Transcode
+        CPU box used to be read nowhere — a dead control. Now each unit, CPU or
+        GPU, adds one concurrent job slot on this node, so 4 GPU + 4 CPU = 8
+        concurrent jobs. (All slots currently encode via the GPU/NVENC path, so
+        treat CPU as extra concurrency and keep a weaker card's total modest.)"""
+        def _i(k):
+            try:
+                return max(0, int(settings.get(k, "0") or "0"))
+            except (TypeError, ValueError):
+                return 0
+        return max(1, _i("transcode_gpu_count") + _i("transcode_cpu_count"))
+
     def update_progress(self, job_id, progress, step, eta="", fps=0, compression=0):
         """Send progress update to server."""
+        # v2.27 — steps without frame-based progress (RPU extract, dovi_tool
+        # convert/inject, mkvmerge remux, and the tail of every job) used to
+        # send eta="" so the UI showed a blank ETA that "turned off early".
+        # Fall back to a wall-clock estimate from overall progress so the ETA
+        # counts down smoothly to 100%.
+        if not eta and 0 < progress < 100:
+            try:
+                st = self._jobs.get(job_id)
+                t0 = st.get("started") if st else None
+                if t0:
+                    elapsed = time.time() - t0
+                    if elapsed > 2:
+                        eta = self._fmt_eta(elapsed * (100 - progress) / progress)
+            except Exception:
+                pass
         self.api("POST", f"/api/jobs/{job_id}/progress", {
             "progress": progress,
             "step": step,
@@ -3312,6 +3351,7 @@ class ByteNode:
         st = self._job_entry(job_id)
         if st is not None:
             st["file"] = filename
+            st["started"] = time.time()  # v2.27 — wall-clock start for ETA fallback
 
         self.log(f"Processing job #{job_id} [{job_type}]: {filename}")
         self.send_log(job_id, f"Job #{job_id} started: {filename}")
@@ -3532,18 +3572,13 @@ class ByteNode:
         settings = self.api("GET", "/api/settings") or {}
         settings.update(self._node_overrides(force=True))
         self._sweep_stale_temp(settings)   # v2.22 — clear leftover temp from prior runs
-        try:
-            n_tw = int(settings.get("transcode_gpu_count", "1") or "1")
-        except (TypeError, ValueError):
-            n_tw = 1
-        if n_tw < 1:
-            n_tw = 1
+        n_tw = self._tw_count(settings)
         try:
             n_hc = int(settings.get("healthcheck_gpu_count", "0") or "0")
         except (TypeError, ValueError):
             n_hc = 0
 
-        self.log(f"Worker counts: {n_tw} transcode GPU, {n_hc} health check GPU")
+        self.log(f"Worker counts: {n_tw} transcode (GPU+CPU summed), {n_hc} health check GPU")
         self.log(f"Temp path: {settings.get('node_temp_path') or settings.get('temp_path') or '(auto)'}")
         self.log(f"Path mapping: {settings.get('node_path_remote_prefix', '/media/')} -> "
                  f"{settings.get('node_path_local_prefix', '(none)')}")
@@ -3619,10 +3654,7 @@ class ByteNode:
             try:
                 settings = self.api("GET", "/api/settings") or {}
                 settings.update(self._node_overrides(force=True))
-                try:
-                    target = max(1, int(settings.get("transcode_gpu_count", "1") or "1"))
-                except (TypeError, ValueError):
-                    continue
+                target = self._tw_count(settings)
                 if target == self._tw_target:
                     continue
                 old = self._tw_target
@@ -3712,15 +3744,27 @@ class ByteNode:
         pw = (settings.get("node_smb_pass") or "").strip()
         self.log(f"MEDIA DRIVE {letter} dead — attempting re-map to {unc}", "WARN")
         try:
-            subprocess.run(["net", "use", letter, "/delete", "/y"],
-                           capture_output=True, timeout=30)
-            cmd = ["net", "use", letter, unc]
+            def _net(*a):
+                return subprocess.run(["net", "use", *a], capture_output=True,
+                                      text=True, errors="replace", timeout=60)
+            # v2.27 — robust re-map. 'System error 85 (device name already in
+            # use)' and '1219 (multiple connections … different credentials)'
+            # come from a stale/persistent connection racing the re-map. Clear
+            # BOTH the letter and any deviceless session to the share, then
+            # authenticate deviceless (so attaching the letter can't fail on
+            # credentials), then attach the letter. Retry once on error 85.
+            _net(letter, "/delete", "/y")
+            _net(unc, "/delete", "/y")
+            dev = ["net", "use", unc]
             if pw:
-                cmd.append(pw)
+                dev.append(pw)
             if user:
-                cmd.append(f"/user:{user}")
-            cmd.append("/persistent:yes")
-            r = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=60)
+                dev.append(f"/user:{user}")
+            subprocess.run(dev, capture_output=True, text=True, errors="replace", timeout=60)
+            r = _net(letter, unc, "/persistent:yes")
+            if r.returncode != 0 and "85" in ((r.stderr or "") + (r.stdout or "")):
+                _net(letter, "/delete", "/y")
+                r = _net(letter, unc, "/persistent:yes")
             if r.returncode == 0:
                 self.log(f"MEDIA DRIVE {letter} re-mapped to {unc} OK")
                 return True

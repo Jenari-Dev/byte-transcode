@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 from flask import Flask, request, jsonify, send_from_directory, Response, session, redirect
 
-SERVER_VERSION = "3.33"
+SERVER_VERSION = "3.34"
 NODE_VERSION = "2.25"   # fallback only; the update bell uses each connected node's reported version
 # Where the update checker looks for the newest published versions.
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main/version.json"
@@ -2153,6 +2153,22 @@ def api_accept(jid):
         db.execute("UPDATE queue SET accepted=1 WHERE id=?", (jid,))
     return jsonify({"ok": True})
 
+@app.route("/api/queue/<int:jid>/decline", methods=["POST"])
+@login_required
+def api_decline(jid):
+    """v3.34 — reject a held transcode (auto-accept OFF, user didn't like the
+    result). The original is never touched; the new file is discarded. Setting
+    finalized=1 removes the job from BOTH the accept/replace list and
+    awaiting-finalize?all=1, so the node's temp sweep reclaims the held output
+    on its next pass — no node action needed."""
+    with get_db() as db:
+        db.execute("""UPDATE queue SET accepted=0, finalized=1,
+            current_step='Declined — original kept' WHERE id=? AND status='complete'""", (jid,))
+        changed = db.execute("SELECT changes()").fetchone()[0]
+    if changed:
+        add_log(f"Job #{jid} declined — original kept, new file discarded", job_id=jid)
+    return jsonify({"ok": True})
+
 @app.route("/api/queue/<int:jid>", methods=["DELETE"])
 @login_required
 def api_del_job(jid):
@@ -2897,6 +2913,11 @@ def api_next_job():
             (wid, job["id"]))
         if result.rowcount == 0:
             return jsonify({"job": None, "reason": "Race — another worker claimed it"})
+        # v3.34 — fresh run: wipe this job's prior-attempt logs so a requeued or
+        # restarted job shows only the current run, not stale lines from a failed
+        # earlier attempt. This is the one point every requeue path funnels
+        # through (manual requeue, auto-requeue, never-started backstop).
+        db.execute("DELETE FROM logs WHERE job_id=?", (job["id"],))
         db.execute("UPDATE workers SET status='active', current_job_id=? WHERE id=?", (job["id"], wid))
         settings = {r["key"]: r["value"] for r in db.execute("SELECT * FROM settings").fetchall()}
         jd = dict(job)
