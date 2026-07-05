@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 from flask import Flask, request, jsonify, send_from_directory, Response, session, redirect
 
-SERVER_VERSION = "3.25"
+SERVER_VERSION = "3.26"
 NODE_VERSION = "2.18"   # fallback only; the update bell uses each connected node's reported version
 # Where the update checker looks for the newest published versions.
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main/version.json"
@@ -1806,11 +1806,16 @@ def start_health_check_loop():
                     # endpoint, created an endless requeue loop. Now: if the
                     # worker is alive and still on this job, leave it alone
                     # regardless of reported progress.
-                    # v3.24 — only requeue a job whose worker has been silent for
-                    # 10+ min (was 3). Long SubGen/Whisper runs plus brief machine
-                    # or network hiccups were tripping the 3-min rule and restarting
-                    # 30-60 min jobs from zero, so they never finished. A live node
-                    # heartbeats every 15s, so a 10-min gap really is a dead node.
+                    # v3.26 — a job is a ghost ONLY when its worker's heartbeat is
+                    # stale (node genuinely gone). The old rule also required
+                    # w.current_job_id = q.id, but a node runs several worker
+                    # THREADS that share one worker_id, and workers.current_job_id
+                    # only holds the last-claimed job — so every OTHER concurrent job
+                    # (e.g. a 20-min DV extract) looked like a ghost and got requeued
+                    # every 5 min while actively processing, until poison-parked.
+                    # Now: if the node is heartbeating (<10 min), all its in-flight
+                    # jobs are considered alive. (Genuinely hung jobs are still caught
+                    # by the separate 2-hour no-progress check below.)
                     ghost_jobs = db.execute("""SELECT q.id, q.worker_id, q.file_name,
                             COALESCE(q.attempts,0) AS attempts FROM queue q
                         WHERE q.status='processing'
@@ -1818,7 +1823,6 @@ def start_health_check_loop():
                           AND NOT EXISTS (
                               SELECT 1 FROM workers w
                               WHERE w.id = q.worker_id
-                                AND w.current_job_id = q.id
                                 AND w.last_heartbeat > datetime('now','localtime', '-600 seconds'))""").fetchall()
                     for sj in ghost_jobs:
                         att = (sj["attempts"] or 0) + 1

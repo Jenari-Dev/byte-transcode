@@ -1,7 +1,7 @@
 {
-  "server": "3.25",
+  "server": "3.26",
   "node": "2.18",
   "released": "2026-07-05",
-  "notes": "Concurrency fix: the fleet now runs as many jobs as your nodes' combined worker counts (2 nodes x3 = 6) instead of a flat cap of 4. Poison-job protection parks a file in Errored after 5 auto-requeues instead of looping forever. Each running job now reports which node is doing it. Node v2.12: Whisper cuBLAS/cuDNN fix + GUI startup diagnostics.",
+  "notes": "DV/transcode jobs no longer wrongly requeue: a job counts as 'worker offline' only when the node's heartbeat is actually stale, not when a multi-threaded node's shared worker id moved to another job (this was killing 20-min DV extracts every 5 min). Node v2.18: run_node.bat opens the GUI (update bell), accurate per-node update status, and Gemini multi-key rotation + pacing.",
   "update_docs": "https://github.com/Jenari-Dev/byte-transcode#updating"
 }
