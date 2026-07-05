@@ -1,7 +1,0 @@
-{
-  "server": "3.34",
-  "node": "2.27",
-  "released": "2026-07-06",
-  "notes": "One consolidated node update (2.27) + live server/UI update (3.34). Node 2.27: the Transcode CPU box now works — transcode workers = GPU + CPU counts summed (4+4 = 8 concurrent jobs/node), matching how health-check already sums them; ETA no longer goes blank on the non-encode steps (wall-clock fallback counts down to 100%); drive re-map is now error-85/1219-proof (clears the letter AND any deviceless session, authenticates deviceless, retries). Also carries 2.26's 10s timeout on the source-size stat that used to black-hole a worker at 0%. Server/UI 3.34: Decline button in Completed (keep original, discard new file — node's temp sweep reclaims it); a job's stale logs are wiped when it starts a fresh run; log timestamps show the date; per-job log Live toggle; queue rows show the relevant time (start/finish) instead of the original queued time.",
-  "update_docs": "https://github.com/Jenari-Dev/byte-transcode#updating"
-}

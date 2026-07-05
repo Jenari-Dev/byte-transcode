@@ -1,7 +1,7 @@
 {
-  "server": "3.33",
-  "node": "2.26",
+  "server": "3.34",
+  "node": "2.27",
   "released": "2026-07-06",
-  "notes": "Kills the last black-hole: a worker could wedge BEFORE reporting Step 1 (a zombie SMB file-stat with no timeout) and sit at 'Starting…' 0% GPU forever while heartbeats kept the server trusting it. Node now times out the source-size stat (10s) and errors+re-maps instead of hanging; server now requeues any job stuck at 0% for 20+ min with a live worker (the ghost check skipped it because the node was heartbeating, and the 2h stuck check skipped it because progress was 0). Both GPUs stay busy without babysitting.",
+  "notes": "One consolidated node update (2.27) + live server/UI update (3.34). Node 2.27: the Transcode CPU box now works — transcode workers = GPU + CPU counts summed (4+4 = 8 concurrent jobs/node), matching how health-check already sums them; ETA no longer goes blank on the non-encode steps (wall-clock fallback counts down to 100%); drive re-map is now error-85/1219-proof (clears the letter AND any deviceless session, authenticates deviceless, retries). Also carries 2.26's 10s timeout on the source-size stat that used to black-hole a worker at 0%. Server/UI 3.34: Decline button in Completed (keep original, discard new file — node's temp sweep reclaims it); a job's stale logs are wiped when it starts a fresh run; log timestamps show the date; per-job log Live toggle; queue rows show the relevant time (start/finish) instead of the original queued time.",
   "update_docs": "https://github.com/Jenari-Dev/byte-transcode#updating"
 }
