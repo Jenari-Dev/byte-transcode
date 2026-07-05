@@ -93,7 +93,7 @@ function Login({onAuth,setup}){
     return <div style={{minHeight:'100vh',background:T.bg,display:'flex',alignItems:'center',justifyContent:'center'}}>
         <div style={{background:T.sb,borderRadius:14,padding:'44px 40px',border:`1px solid ${T.bd}`,width:380,textAlign:'center'}}>
             <div style={{fontSize:36,fontWeight:800,color:T.ac,letterSpacing:'-1px',lineHeight:1,marginBottom:4}}>BYTE</div>
-            <div style={{fontSize:11,color:T.t2,letterSpacing:'3px',fontWeight:600,marginBottom:36}}>TRANSCODE v3.31</div>
+            <div style={{fontSize:11,color:T.t2,letterSpacing:'3px',fontWeight:600,marginBottom:36}}>TRANSCODE v3.32</div>
             {setup&&<div style={{fontSize:13,color:T.ac,marginBottom:16,padding:'10px 14px',background:`${T.ac}15`,borderRadius:8}}>First time — create your admin account</div>}
             {e&&<div style={{fontSize:13,color:T.er,marginBottom:14}}>{e}</div>}
             <input value={u} onChange={ev=>setU(ev.target.value)} placeholder="Username" style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'12px 16px',color:T.tx,fontSize:14,marginBottom:12}}/>
@@ -305,7 +305,7 @@ function App(){
         <nav style={{width:218,background:T.sb,borderRight:`1px solid ${T.bd}`,display:'flex',flexDirection:'column',position:'sticky',top:0,height:'100vh',flexShrink:0}}>
             <div style={{padding:'22px 18px',borderBottom:`1px solid ${T.bd}`}}>
                 <div style={{fontSize:24,fontWeight:800,color:T.ac,letterSpacing:'-0.5px',lineHeight:1}}>BYTE</div>
-                <div style={{fontSize:10,color:T.t2,letterSpacing:'2.5px',fontWeight:600,marginTop:4}}>TRANSCODE v3.31</div>
+                <div style={{fontSize:10,color:T.t2,letterSpacing:'2.5px',fontWeight:600,marginTop:4}}>TRANSCODE v3.32</div>
             </div>
             <div style={{padding:10,flex:1,overflowY:'auto'}}>
                 {/* Main */}
@@ -432,6 +432,7 @@ function App(){
                             <span style={{width:8,height:8,borderRadius:4,background:w._on?T.ok:T.t2,flexShrink:0}}/>
                             <span style={{fontSize:13,fontWeight:700,color:T.t1}}>{w.name}</span>
                             <span style={{fontSize:10,color:T.t2}}>{w.gpu}</span>
+                            {w.media_ok===0&&<span title="Media drive (Z:) not responding — node won't claim jobs; it re-maps automatically" className="mono" style={{fontSize:9,fontWeight:700,padding:'2px 7px',borderRadius:4,background:`${T.er}25`,color:T.er,border:`1px solid ${T.er}66`}}>⚠ DRIVE OFFLINE</span>}
                             <span className="mono" style={{marginLeft:'auto',fontSize:10,color:w._on?T.ok:T.t2}}>{w._on?'online':(w._stale?'stale':'offline')}</span>
                         </div>
                         {wCats.length>0&&<div style={{display:'flex',gap:5,flexWrap:'wrap',marginBottom:12}}>{wCats.map(c=><span key={c} className="mono" style={{fontSize:9,fontWeight:700,padding:'2px 7px',borderRadius:4,background:`${pipeColor[c]||T.ac}22`,color:pipeColor[c]||T.ac}}>{pipeLabel[c]||c}</span>)}</div>}
@@ -512,7 +513,7 @@ function App(){
                     </div>
                     <div style={{background:T.bg,borderRadius:8,padding:'10px 14px',border:`1px solid ${T.bd}`}}>
                         <div style={{fontSize:10,color:T.t2,fontWeight:600}}>VERSION</div>
-                        <div className="mono" style={{fontSize:15,fontWeight:700,color:T.t1,marginTop:2}}>3.31</div>
+                        <div className="mono" style={{fontSize:15,fontWeight:700,color:T.t1,marginTop:2}}>3.32</div>
                     </div>
                     <div style={{background:T.bg,borderRadius:8,padding:'10px 14px',border:`1px solid ${T.bd}`}}>
                         <div style={{fontSize:10,color:T.t2,fontWeight:600}}>STATUS</div>
@@ -592,6 +593,7 @@ function App(){
                             {/* v3.27 — job-category tags: what pipeline(s) this node is running right now */}
                             {cats.map(c=><span key={c} className="mono" style={{fontSize:10,fontWeight:700,padding:'3px 8px',borderRadius:5,background:`${CATCOL[c]||T.ac}22`,color:CATCOL[c]||T.ac,border:`1px solid ${CATCOL[c]||T.ac}44`}}>{CATLBL[c]||c}{nodeJobs.filter(p=>(p.job_type||'transcode')===c).length>1?' ×'+nodeJobs.filter(p=>(p.job_type||'transcode')===c).length:''}</span>)}
                             <div style={{flex:1}}/>
+                            {w.media_ok===0&&<span title="This node's media drive (Z:) is not responding — it won't claim jobs until it's back. The node re-maps the drive automatically and resumes on its own." className="mono" style={{fontSize:11,fontWeight:700,padding:'3px 10px',borderRadius:5,background:`${T.er}25`,color:T.er,border:`1px solid ${T.er}66`,animation:'pulse 1.5s infinite'}}>⚠ MEDIA DRIVE OFFLINE</span>}
                             {nodeOn[w.id]===false&&<span className="mono" style={{fontSize:11,fontWeight:700,padding:'3px 10px',borderRadius:5,background:`${T.er}15`,color:T.er}}>DISABLED</span>}
                             <span className="mono" style={{fontSize:11,fontWeight:700,padding:'3px 10px',borderRadius:5,background:`${sc}15`,color:sc}}>{active?'ACTIVE':on?'IDLE':stale?'STALE':'OFFLINE'}</span>
                             {/* v3.10 — per-node ON/OFF: disabled nodes are never assigned jobs */}

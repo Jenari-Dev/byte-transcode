@@ -1,7 +1,7 @@
 {
-  "server": "3.31",
-  "node": "2.24",
+  "server": "3.32",
+  "node": "2.25",
   "released": "2026-07-05",
-  "notes": "tdarr-style accept flow: with auto-accept OFF, completed jobs hold their output for review and 'Accept' swaps the new file in (original replaced); auto-accept ON replaces immediately. Active jobs now show a node tag so you can see which GPU runs each job. Media-drive guard: a node whose Z: drive is hung/unmapped refuses to claim jobs and says why (ends the 'stuck at Starting' black-hole). Plus v2.23 live worker scaling + temp auto-spill.",
+  "notes": "Self-healing media drive: when a node's Z: mapping dies (Windows drops mapped drives on idle), the node now re-maps it automatically and resumes claiming jobs on its own — and the dashboard shows a red 'MEDIA DRIVE OFFLINE' badge on that node while it's down, so an idle node is never a mystery again. Plus v2.24's replace-on-accept flow, node tags on active jobs, and live worker scaling.",
   "update_docs": "https://github.com/Jenari-Dev/byte-transcode#updating"
 }

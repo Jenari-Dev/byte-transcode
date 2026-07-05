@@ -158,7 +158,7 @@ except Exception:
 # ─── Self-update (v2.11) ─────────────────────────────────────────────────────
 # The node checks the same published manifest the web UI uses and can pull its
 # own new files from GitHub, then relaunch — matching the website's update flow.
-NODE_VERSION = "2.24"
+NODE_VERSION = "2.25"
 GITHUB_RAW = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main"
 VERSION_MANIFEST_URL = GITHUB_RAW + "/version.json"
 NODE_FILES = ["byte_node_v2.py", "byte_node_gui.py", "setup_tools.py",
@@ -596,6 +596,9 @@ class ByteNode:
             "gpu_usage": gpu,
             "vram": vram,
             "version": NODE_VERSION,
+            # v2.25 — media-drive health so the dashboard can show a red
+            # 'MEDIA DRIVE OFFLINE' badge instead of a silently idle node
+            "media_ok": 1 if getattr(self, "_media_ok_val", True) else 0,
         })
 
     def check_cancel(self, job_id):
@@ -3648,6 +3651,53 @@ class ByteNode:
         t.start(); t.join(timeout)
         return result.get("v") if "v" in result else None
 
+    def _remount_media(self, prefix):
+        """
+        v2.25 — SELF-HEAL a dead Windows drive mapping. Mapped drives are
+        per-session and Windows silently drops them (idle autodisconnect,
+        expired cached creds) — which left one node idle while the other kept
+        working. Re-map the letter to the share and re-check. UNC comes from
+        the node_smb_unc setting, else \\\\<server-host>\\storage derived from
+        the server URL. Rate-limited to once per 3 minutes.
+        """
+        if os.name != "nt":
+            return False
+        now = time.time()
+        if now - getattr(self, "_last_remount_at", 0) < 180:
+            return False
+        self._last_remount_at = now
+        letter = os.path.splitdrive(prefix)[0]           # 'Z:'
+        if not letter:
+            return False
+        settings = self.api("GET", "/api/settings") or {}
+        settings.update(self._node_overrides())
+        unc = (settings.get("node_smb_unc") or "").strip()
+        if not unc:
+            m = re.match(r"https?://([^:/]+)", self.server)
+            if not m:
+                return False
+            unc = "\\\\" + m.group(1) + "\\storage"
+        user = (settings.get("node_smb_user") or "").strip()
+        pw = (settings.get("node_smb_pass") or "").strip()
+        self.log(f"MEDIA DRIVE {letter} dead — attempting re-map to {unc}", "WARN")
+        try:
+            subprocess.run(["net", "use", letter, "/delete", "/y"],
+                           capture_output=True, timeout=30)
+            cmd = ["net", "use", letter, unc]
+            if pw:
+                cmd.append(pw)
+            if user:
+                cmd.append(f"/user:{user}")
+            cmd.append("/persistent:yes")
+            r = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=60)
+            if r.returncode == 0:
+                self.log(f"MEDIA DRIVE {letter} re-mapped to {unc} OK")
+                return True
+            self.log(f"Re-map failed (rc {r.returncode}): {(r.stderr or r.stdout or '').strip()[:150]}", "ERROR")
+        except Exception as e:
+            self.log(f"Re-map error: {e}", "ERROR")
+        return False
+
     def _media_ok(self, force=False):
         """
         v2.24 — MEDIA-DRIVE GUARD. Before claiming any job, verify the media
@@ -3655,6 +3705,7 @@ class ByteNode:
         a hung/unmapped drive used to claim jobs and sit at 'Starting…' forever
         (the black-hole) because exists() blocked on dead SMB while heartbeats
         kept the server trusting it. Result cached 30s.
+        v2.25 — on failure it re-maps the drive itself and re-checks.
         """
         now = time.time()
         if not force and now - getattr(self, "_media_ok_at", 0) < 30:
@@ -3665,6 +3716,8 @@ class ByteNode:
         if prefix:
             r = self._path_exists_timeout(prefix, timeout=8.0)
             ok = bool(r)
+            if not ok and self._remount_media(prefix):
+                ok = bool(self._path_exists_timeout(prefix, timeout=8.0))
             if not ok:
                 why = "not responding (hung mount?)" if r is None else "not found (drive not mapped?)"
                 self.log(f"MEDIA DRIVE {prefix} {why} — NOT claiming jobs until it's back", "ERROR")

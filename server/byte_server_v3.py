@@ -29,8 +29,8 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 from flask import Flask, request, jsonify, send_from_directory, Response, session, redirect
 
-SERVER_VERSION = "3.31"
-NODE_VERSION = "2.24"   # fallback only; the update bell uses each connected node's reported version
+SERVER_VERSION = "3.32"
+NODE_VERSION = "2.25"   # fallback only; the update bell uses each connected node's reported version
 # Where the update checker looks for the newest published versions.
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main/version.json"
 DEFAULT_PORT = 5800
@@ -296,8 +296,12 @@ def init_db():
                 if 'version' not in worker_cols:
                     db.execute("ALTER TABLE workers ADD COLUMN version TEXT DEFAULT ''")
                     log.info("Migration: added workers.version")
+                # v3.32 — media-drive health reported by the node heartbeat
+                if 'media_ok' not in worker_cols:
+                    db.execute("ALTER TABLE workers ADD COLUMN media_ok INTEGER DEFAULT 1")
+                    log.info("Migration: added workers.media_ok")
             except Exception as _e:
-                log.warning(f"workers.version migration skipped: {_e}")
+                log.warning(f"workers migration skipped: {_e}")
 
             # v3.1 migration: file_path UNIQUE → (file_path, job_type) UNIQUE
             # so the same file can be queued for both transcode and remuxclean.
@@ -2740,9 +2744,10 @@ def api_heartbeat():
     d = request.json
     with get_db() as db:
         db.execute("""UPDATE workers SET last_heartbeat=datetime('now','localtime'), cpu_usage=?, ram_usage=?,
-            gpu_usage=?, vram_usage=?, version=COALESCE(NULLIF(?,''),version) WHERE id=?""",
+            gpu_usage=?, vram_usage=?, version=COALESCE(NULLIF(?,''),version),
+            media_ok=COALESCE(?, media_ok) WHERE id=?""",
                    (d.get("cpu", 0), d.get("ram", 0), d.get("gpu_usage", 0), d.get("vram", 0),
-                    d.get("version", ""), d.get("id", "")))
+                    d.get("version", ""), d.get("media_ok"), d.get("id", "")))
     return jsonify({"ok": True})
 
 # Jobs
