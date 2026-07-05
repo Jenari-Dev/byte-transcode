@@ -144,7 +144,7 @@ except Exception:
 # ─── Self-update (v2.11) ─────────────────────────────────────────────────────
 # The node checks the same published manifest the web UI uses and can pull its
 # own new files from GitHub, then relaunch — matching the website's update flow.
-NODE_VERSION = "2.16"
+NODE_VERSION = "2.17"
 GITHUB_RAW = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main"
 VERSION_MANIFEST_URL = GITHUB_RAW + "/version.json"
 NODE_FILES = ["byte_node_v2.py", "byte_node_gui.py", "setup_tools.py",
@@ -254,6 +254,7 @@ class ByteNode:
         self.registered = False
         self.is_running = False
         self.is_connected = False  # alias
+        self.rate_limited_until = 0  # v2.17 — set when a translation provider 429s hard
 
         # Find tools — try a list of common names per tool. shutil.which
         # handles .exe extensions on Windows automatically.
@@ -2200,22 +2201,71 @@ class ByteNode:
         )
         return system_prompt, user_prompt
 
+    def _retry_after_seconds(self, r):
+        """Seconds to wait from a 429/503, from the Retry-After header or (Gemini)
+        the error.details[].retryDelay field. None if unspecified."""
+        ra = r.headers.get("Retry-After")
+        if ra:
+            try:
+                return int(float(ra))
+            except Exception:
+                pass
+        try:
+            for d in (r.json().get("error", {}).get("details") or []):
+                m = re.match(r"(\d+)", str(d.get("retryDelay") or ""))
+                if m:
+                    return int(m.group(1))
+        except Exception:
+            pass
+        return None
+
+    def _http_post_retry(self, url, headers, body, job_id, label, timeout=180, max_retries=5):
+        """
+        v2.17 — POST with backoff on rate-limit (429) and transient (500/503)
+        errors, honoring Retry-After / Gemini retryDelay. Free tiers (e.g. Gemini
+        ~15 req/min) 429 constantly while translating a movie; retrying paces the
+        calls so the job finishes instead of dying. Returns a 200 Response, or
+        None. On a 429 it couldn't clear, sets self.rate_limited_until so the
+        pipeline can pause rather than burn every remaining job.
+        """
+        delay = 6
+        for attempt in range(max_retries + 1):
+            if self.cancelled:
+                return None
+            try:
+                r = requests.post(url, headers=headers, json=body, timeout=timeout)
+            except Exception as e:
+                if attempt < max_retries:
+                    self.send_log(job_id, f"  [{label}] request error ({e}); retry in {delay}s")
+                    time.sleep(delay); delay = min(delay * 2, 60); continue
+                self.send_log(job_id, f"  [{label}] request failed: {e}")
+                return None
+            if r.status_code == 200:
+                return r
+            if r.status_code in (429, 500, 503) and attempt < max_retries:
+                wait = self._retry_after_seconds(r) or delay
+                wait = min(max(wait, 3), 90)
+                self.send_log(job_id, f"  [{label}] {r.status_code} (rate/transient) — waiting {wait}s "
+                                      f"(retry {attempt+1}/{max_retries})")
+                time.sleep(wait); delay = min(delay * 2, 60); continue
+            if r.status_code == 429:
+                self.rate_limited_until = time.time() + 120
+                self.send_log(job_id, f"  [{label}] 429 quota exhausted — try a higher-limit provider "
+                                      f"or a local model (Ollama). Response: {r.text[:200]}")
+            else:
+                self.send_log(job_id, f"  [{label}] API {r.status_code}: {r.text[:300]}")
+            return None
+        return None
+
     def _call_anthropic(self, cfg, system_prompt, user_prompt, job_id):
         base = cfg["base_url"] or "https://api.anthropic.com"
-        try:
-            r = requests.post(
-                f"{base}/v1/messages",
-                headers={"x-api-key": cfg["api_key"], "anthropic-version": "2023-06-01",
-                         "content-type": "application/json"},
-                json={"model": cfg["model"], "max_tokens": 8192, "system": system_prompt,
-                      "messages": [{"role": "user", "content": user_prompt}]},
-                timeout=180,
-            )
-        except Exception as e:
-            self.send_log(job_id, f"  [ERROR] Anthropic request failed: {e}")
-            return None
-        if r.status_code != 200:
-            self.send_log(job_id, f"  [ERROR] Anthropic API {r.status_code}: {r.text[:300]}")
+        r = self._http_post_retry(
+            f"{base}/v1/messages",
+            {"x-api-key": cfg["api_key"], "anthropic-version": "2023-06-01", "content-type": "application/json"},
+            {"model": cfg["model"], "max_tokens": 8192, "system": system_prompt,
+             "messages": [{"role": "user", "content": user_prompt}]},
+            job_id, "Anthropic", timeout=180)
+        if r is None:
             return None
         try:
             data = r.json()
@@ -2232,20 +2282,13 @@ class ByteNode:
         headers = {"content-type": "application/json"}
         if cfg["api_key"]:
             headers["Authorization"] = f"Bearer {cfg['api_key']}"
-        try:
-            r = requests.post(
-                f"{base}/chat/completions",
-                headers=headers,
-                json={"model": cfg["model"], "temperature": 0.3, "max_tokens": 8192,
-                      "messages": [{"role": "system", "content": system_prompt},
-                                   {"role": "user", "content": user_prompt}]},
-                timeout=300,
-            )
-        except Exception as e:
-            self.send_log(job_id, f"  [ERROR] OpenAI-compatible request failed: {e}")
-            return None
-        if r.status_code != 200:
-            self.send_log(job_id, f"  [ERROR] OpenAI-compatible API {r.status_code}: {r.text[:300]}")
+        r = self._http_post_retry(
+            f"{base}/chat/completions", headers,
+            {"model": cfg["model"], "temperature": 0.3, "max_tokens": 8192,
+             "messages": [{"role": "system", "content": system_prompt},
+                          {"role": "user", "content": user_prompt}]},
+            job_id, "OpenAI-compatible", timeout=300)
+        if r is None:
             return None
         try:
             return (r.json()["choices"][0]["message"]["content"] or "").strip()
@@ -2256,20 +2299,14 @@ class ByteNode:
     def _call_gemini(self, cfg, system_prompt, user_prompt, job_id):
         base = cfg["base_url"] or "https://generativelanguage.googleapis.com"
         url = f"{base}/v1beta/models/{cfg['model']}:generateContent?key={cfg['api_key']}"
-        try:
-            r = requests.post(
-                url, headers={"content-type": "application/json"},
-                json={"systemInstruction": {"parts": [{"text": system_prompt}]},
-                      "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
-                      "generationConfig": {"temperature": 0.3, "maxOutputTokens": 8192,
-                                           "responseMimeType": "application/json"}},
-                timeout=180,
-            )
-        except Exception as e:
-            self.send_log(job_id, f"  [ERROR] Gemini request failed: {e}")
-            return None
-        if r.status_code != 200:
-            self.send_log(job_id, f"  [ERROR] Gemini API {r.status_code}: {r.text[:300]}")
+        r = self._http_post_retry(
+            url, {"content-type": "application/json"},
+            {"systemInstruction": {"parts": [{"text": system_prompt}]},
+             "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
+             "generationConfig": {"temperature": 0.3, "maxOutputTokens": 8192,
+                                  "responseMimeType": "application/json"}},
+            job_id, "Gemini", timeout=180)
+        if r is None:
             return None
         try:
             cand = (r.json().get("candidates") or [{}])[0]
