@@ -93,7 +93,7 @@ function Login({onAuth,setup}){
     return <div style={{minHeight:'100vh',background:T.bg,display:'flex',alignItems:'center',justifyContent:'center'}}>
         <div style={{background:T.sb,borderRadius:14,padding:'44px 40px',border:`1px solid ${T.bd}`,width:380,textAlign:'center'}}>
             <div style={{fontSize:36,fontWeight:800,color:T.ac,letterSpacing:'-1px',lineHeight:1,marginBottom:4}}>BYTE</div>
-            <div style={{fontSize:11,color:T.t2,letterSpacing:'3px',fontWeight:600,marginBottom:36}}>TRANSCODE v3.26</div>
+            <div style={{fontSize:11,color:T.t2,letterSpacing:'3px',fontWeight:600,marginBottom:36}}>TRANSCODE v3.27</div>
             {setup&&<div style={{fontSize:13,color:T.ac,marginBottom:16,padding:'10px 14px',background:`${T.ac}15`,borderRadius:8}}>First time — create your admin account</div>}
             {e&&<div style={{fontSize:13,color:T.er,marginBottom:14}}>{e}</div>}
             <input value={u} onChange={ev=>setU(ev.target.value)} placeholder="Username" style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'12px 16px',color:T.tx,fontSize:14,marginBottom:12}}/>
@@ -305,7 +305,7 @@ function App(){
         <nav style={{width:218,background:T.sb,borderRight:`1px solid ${T.bd}`,display:'flex',flexDirection:'column',position:'sticky',top:0,height:'100vh',flexShrink:0}}>
             <div style={{padding:'22px 18px',borderBottom:`1px solid ${T.bd}`}}>
                 <div style={{fontSize:24,fontWeight:800,color:T.ac,letterSpacing:'-0.5px',lineHeight:1}}>BYTE</div>
-                <div style={{fontSize:10,color:T.t2,letterSpacing:'2.5px',fontWeight:600,marginTop:4}}>TRANSCODE v3.26</div>
+                <div style={{fontSize:10,color:T.t2,letterSpacing:'2.5px',fontWeight:600,marginTop:4}}>TRANSCODE v3.27</div>
             </div>
             <div style={{padding:10,flex:1,overflowY:'auto'}}>
                 {/* Main */}
@@ -426,17 +426,19 @@ function App(){
                             <div style={{fontSize:11,color:T.t2,margin:'9px 0 3px'}}>Memory<span className="mono" style={{float:'right',color:T.t1}}>{srv.mem_used_gb}/{srv.mem_total_gb} GB</span></div>{bar(srv.mem_pct,T.in)}
                         </>:<div style={{fontSize:12,color:T.t2}}>No metrics available</div>}
                     </div>
-                    {workers.map(w=><div key={w.id} style={{background:T.card,borderRadius:10,padding:'16px 18px',border:`1px solid ${w._on?T.bd:T.er+'44'}`}}>
-                        <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:12}}>
+                    {workers.map(w=>{const wCats=[...new Set(proc.filter(p=>p.worker_id===w.id).map(p=>p.job_type||'transcode'))];
+                      return <div key={w.id} style={{background:T.card,borderRadius:10,padding:'16px 18px',border:`1px solid ${w._on?T.bd:T.er+'44'}`}}>
+                        <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:wCats.length?6:12,flexWrap:'wrap'}}>
                             <span style={{width:8,height:8,borderRadius:4,background:w._on?T.ok:T.t2,flexShrink:0}}/>
                             <span style={{fontSize:13,fontWeight:700,color:T.t1}}>{w.name}</span>
                             <span style={{fontSize:10,color:T.t2}}>{w.gpu}</span>
                             <span className="mono" style={{marginLeft:'auto',fontSize:10,color:w._on?T.ok:T.t2}}>{w._on?'online':(w._stale?'stale':'offline')}</span>
                         </div>
+                        {wCats.length>0&&<div style={{display:'flex',gap:5,flexWrap:'wrap',marginBottom:12}}>{wCats.map(c=><span key={c} className="mono" style={{fontSize:9,fontWeight:700,padding:'2px 7px',borderRadius:4,background:`${pipeColor[c]||T.ac}22`,color:pipeColor[c]||T.ac}}>{pipeLabel[c]||c}</span>)}</div>}
                         <div style={{fontSize:11,color:T.t2,marginBottom:3}}>CPU<span className="mono" style={{float:'right',color:T.t1}}>{Math.round(w.cpu_usage||0)}%</span></div>{bar(w.cpu_usage,T.ac)}
                         <div style={{fontSize:11,color:T.t2,margin:'9px 0 3px'}}>GPU<span className="mono" style={{float:'right',color:T.t1}}>{Math.round(w.gpu_usage||0)}%</span></div>{bar(w.gpu_usage,T.a2)}
                         <div style={{fontSize:11,color:T.t2,margin:'9px 0 3px'}}>VRAM<span className="mono" style={{float:'right',color:T.t1}}>{Math.round(w.vram_usage||0)}%</span></div>{bar(w.vram_usage,T.wn)}
-                    </div>)}
+                    </div>;})}
                 </div>
                 <div style={{fontSize:15,fontWeight:700,color:T.t1,marginBottom:10}}>Active Jobs <span className="mono" style={{fontSize:12,color:T.t2,fontWeight:400}}>({proc.length} running)</span></div>
                 <div style={{background:T.card,borderRadius:10,border:`1px solid ${T.bd}`,marginBottom:20,overflow:'hidden'}}>
@@ -510,7 +512,7 @@ function App(){
                     </div>
                     <div style={{background:T.bg,borderRadius:8,padding:'10px 14px',border:`1px solid ${T.bd}`}}>
                         <div style={{fontSize:10,color:T.t2,fontWeight:600}}>VERSION</div>
-                        <div className="mono" style={{fontSize:15,fontWeight:700,color:T.t1,marginTop:2}}>3.26</div>
+                        <div className="mono" style={{fontSize:15,fontWeight:700,color:T.t1,marginTop:2}}>3.27</div>
                     </div>
                     <div style={{background:T.bg,borderRadius:8,padding:'10px 14px',border:`1px solid ${T.bd}`}}>
                         <div style={{fontSize:10,color:T.t2,fontWeight:600}}>STATUS</div>
@@ -576,13 +578,19 @@ function App(){
             {/* WORKERS */}
             <h2 style={{fontSize:13,fontWeight:600,color:T.t3,textTransform:'uppercase',letterSpacing:'0.5px',marginBottom:10}}>Workers / Nodes</h2>
             {workers.map(w=>{const active=w.status==='active';const on=w._on;const stale=w._stale;const sc=active?T.ac:on?T.ok:stale?T.wn:T.t2;
+                const CATLBL={transcode:'Transcode',subgen:'AI Subtitles',remuxclean:'Cleanup',dv78only:'DV → P8',compatfix:'Compat'};
+                const CATCOL={transcode:T.ac,subgen:T.ok,remuxclean:T.in,dv78only:T.a2,compatfix:T.wn};
+                const nodeJobs=(s.processing||[]).filter(p=>p.worker_id===w.id);
+                const cats=[...new Set(nodeJobs.map(p=>p.job_type||'transcode'))];
                 return <div key={w.id} style={{background:T.card,borderRadius:10,marginBottom:8,border:`1px solid ${active?T.ac+'44':T.bd}`,overflow:'hidden'}}>
                     <div onClick={()=>setXWorker(xWorker===w.id?null:w.id)} style={{padding:'14px 18px',cursor:'pointer'}}>
-                        <div style={{display:'flex',alignItems:'center',gap:10}}>
+                        <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
                             <div style={{width:10,height:10,borderRadius:5,background:sc,boxShadow:on?`0 0 8px ${sc}`:''}}/>
                             <I n="cpu" s={16} c={active?T.ac:T.t2}/>
                             <span style={{fontSize:15,fontWeight:600,color:T.t1}}>{w.name}</span>
                             <span style={{fontSize:12,color:T.t2}}>{w.gpu}</span>
+                            {/* v3.27 — job-category tags: what pipeline(s) this node is running right now */}
+                            {cats.map(c=><span key={c} className="mono" style={{fontSize:10,fontWeight:700,padding:'3px 8px',borderRadius:5,background:`${CATCOL[c]||T.ac}22`,color:CATCOL[c]||T.ac,border:`1px solid ${CATCOL[c]||T.ac}44`}}>{CATLBL[c]||c}{nodeJobs.filter(p=>(p.job_type||'transcode')===c).length>1?' ×'+nodeJobs.filter(p=>(p.job_type||'transcode')===c).length:''}</span>)}
                             <div style={{flex:1}}/>
                             {nodeOn[w.id]===false&&<span className="mono" style={{fontSize:11,fontWeight:700,padding:'3px 10px',borderRadius:5,background:`${T.er}15`,color:T.er}}>DISABLED</span>}
                             <span className="mono" style={{fontSize:11,fontWeight:700,padding:'3px 10px',borderRadius:5,background:`${sc}15`,color:sc}}>{active?'ACTIVE':on?'IDLE':stale?'STALE':'OFFLINE'}</span>
@@ -1242,7 +1250,7 @@ function App(){
                                 {/* Library Processing Options */}
                                 <div style={{display:'flex',gap:6,marginTop:10,flexWrap:'wrap'}}>
                                     <button onClick={()=>doAct('/libraries/'+lib.id+'/scan')} disabled={scanning} style={{background:`${T.ok}12`,border:`1px solid ${T.ok}33`,borderRadius:6,padding:'6px 12px',cursor:scanning?'default':'pointer',color:T.ok,fontSize:11,fontWeight:600,opacity:scanning?0.5:1,display:'flex',alignItems:'center',gap:4}}><I n="refresh" s={12}/> Scan (Find New)</button>
-                                    <button onClick={async()=>{await del('/queue?library_id='+lib.id);await doAct('/libraries/'+lib.id+'/scan');toast('Fresh scan started','info')}} disabled={scanning} style={{background:`${T.ac}12`,border:`1px solid ${T.ac}33`,borderRadius:6,padding:'6px 12px',cursor:'pointer',color:T.ac,fontSize:11,fontWeight:600,display:'flex',alignItems:'center',gap:4}}><I n="refresh" s={12}/> Scan (Fresh)</button>
+                                    <button onClick={async()=>{await post('/queue/clear-library',{library_id:lib.id});await doAct('/libraries/'+lib.id+'/scan');toast('Fresh scan started','info')}} disabled={scanning} style={{background:`${T.ac}12`,border:`1px solid ${T.ac}33`,borderRadius:6,padding:'6px 12px',cursor:'pointer',color:T.ac,fontSize:11,fontWeight:600,display:'flex',alignItems:'center',gap:4}}><I n="refresh" s={12}/> Scan (Fresh)</button>
                                     <button onClick={async()=>{await post('/libraries/'+lib.id+'/scan-remuxclean');toast('Cleanup scan started','info');rL();rD();}} disabled={scanningRC} style={{background:`${T.in}12`,border:`1px solid ${T.in}33`,borderRadius:6,padding:'6px 12px',cursor:scanningRC?'default':'pointer',color:T.in,fontSize:11,fontWeight:600,opacity:scanningRC?0.5:1,display:'flex',alignItems:'center',gap:4}}><I n="search" s={12}/> Scan for Cleanup</button>
                                     <button onClick={async()=>{await post('/libraries/'+lib.id+'/scan-dv78only');toast('DV → P8 scan started','info');rL();rD();}} disabled={scanningDV} style={{background:`${T.a2}12`,border:`1px solid ${T.a2}33`,borderRadius:6,padding:'6px 12px',cursor:scanningDV?'default':'pointer',color:T.a2,fontSize:11,fontWeight:600,opacity:scanningDV?0.5:1,display:'flex',alignItems:'center',gap:4}}><I n="search" s={12}/> Scan for DV → P8</button>
                                     <button onClick={async()=>{await post('/libraries/'+lib.id+'/scan-compat');toast('Compatibility scan started','info');rL();rD();}} disabled={scanningCF} style={{background:`${T.wn}12`,border:`1px solid ${T.wn}33`,borderRadius:6,padding:'6px 12px',cursor:scanningCF?'default':'pointer',color:T.wn,fontSize:11,fontWeight:600,opacity:scanningCF?0.5:1,display:'flex',alignItems:'center',gap:4}}><I n="alert" s={12}/> Scan for Playback Issues</button>

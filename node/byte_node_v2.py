@@ -144,7 +144,7 @@ except Exception:
 # ─── Self-update (v2.11) ─────────────────────────────────────────────────────
 # The node checks the same published manifest the web UI uses and can pull its
 # own new files from GitHub, then relaunch — matching the website's update flow.
-NODE_VERSION = "2.18"
+NODE_VERSION = "2.19"
 GITHUB_RAW = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main"
 VERSION_MANIFEST_URL = GITHUB_RAW + "/version.json"
 NODE_FILES = ["byte_node_v2.py", "byte_node_gui.py", "setup_tools.py",
@@ -1876,16 +1876,25 @@ class ByteNode:
             self.send_log(job_id, "  Flagged: " + "; ".join(reasons))
         self.send_log(job_id, f"  Strategy: {strategy}")
 
-        # v2.10 — subtitle filtering honors the configurable keep_langs setting
-        keep = sorted(l for l in self._keep_langs(settings) if l)
+        # v2.10 — subtitle filtering honors the configurable keep_langs setting.
+        # v2.19 — mkvmerge --subtitle-tracks takes NUMERIC track IDs or ISO 639-2
+        # (3-letter) language codes; 2-letter codes like 'en'/'ja' make it error
+        # ("not a valid ... language code"). Normalize to 3-letter, and if nothing
+        # valid remains, keep all subs rather than failing the whole rewrap.
+        _ISO1_3 = {"en": "eng", "ja": "jpn", "es": "spa", "fr": "fre", "de": "ger",
+                   "it": "ita", "pt": "por", "ru": "rus", "zh": "chi", "ko": "kor",
+                   "nl": "dut", "ar": "ara", "hi": "hin", "sv": "swe", "pl": "pol"}
+        keep = sorted({(_ISO1_3.get(l, l)) for l in self._keep_langs(settings)
+                       if l and len(_ISO1_3.get(l, l)) == 3})
 
         try:
             if strategy == "remux":
-                step = "[Step 1/1] mkvmerge rewrap to MKV" + (f" ({'/'.join(keep)} subs only)" if filter_subs else "")
+                do_filter = filter_subs and bool(keep)
+                step = "[Step 1/1] mkvmerge rewrap to MKV" + (f" ({'/'.join(keep)} subs only)" if do_filter else "")
                 self.update_progress(job_id, 20, step)
                 self.send_log(job_id, step)
                 cmd = [self.mkvmerge, "-o", output_mkv]
-                if filter_subs:
+                if do_filter:
                     cmd += ["--subtitle-tracks", ",".join(keep)]
                 cmd += [filepath]
                 ok, err = self.run_cmd_with_watchdog(cmd, "mkvmerge Rewrap", job_id, stale_timeout=300)

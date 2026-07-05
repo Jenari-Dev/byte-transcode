@@ -29,8 +29,8 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 from flask import Flask, request, jsonify, send_from_directory, Response, session, redirect
 
-SERVER_VERSION = "3.26"
-NODE_VERSION = "2.18"   # fallback only; the update bell uses each connected node's reported version
+SERVER_VERSION = "3.27"
+NODE_VERSION = "2.19"   # fallback only; the update bell uses each connected node's reported version
 # Where the update checker looks for the newest published versions.
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main/version.json"
 DEFAULT_PORT = 5800
@@ -1720,8 +1720,12 @@ def health_check_task():
         limit = max(0, conc - active_hc)
         if limit == 0:
             return
+        # v3.27 — only health-check jobs that are actually waiting. Without the
+        # status guard, a poison-parked (status='error') row whose health_status
+        # was left 'pending' got re-checked and silently un-parked back to 'queued'.
         pending = db.execute(
-            f"SELECT * FROM queue WHERE health_status = 'pending'{lib_sql} ORDER BY priority LIMIT ?",
+            f"SELECT * FROM queue WHERE health_status = 'pending' "
+            f"AND status IN ('pending','queued'){lib_sql} ORDER BY priority LIMIT ?",
             (*lib_params, limit)).fetchall()
     if not pending:
         return
@@ -2883,8 +2887,13 @@ def api_complete(jid):
         with get_db() as db:
             db.execute("UPDATE queue SET status='complete', progress=100, current_step='Done', output_path=?, output_size_gb=?, reduction_pct=?, completed_at=datetime('now','localtime'), accepted=? WHERE id=?",
                        (d.get("output_path",""), d.get("output_size_gb",0), d.get("reduction_pct",0), int(auto), jid))
-            db.execute("UPDATE workers SET status='idle', current_job_id=NULL, jobs_completed=jobs_completed+1, total_saved_gb=total_saved_gb+? WHERE id=?",
+            # v3.27 — count the completion, but only flip the node to idle / clear
+            # the pointer if THIS job was the one displayed. On a multi-threaded
+            # node another thread's job may be the current one — don't blank it.
+            db.execute("UPDATE workers SET jobs_completed=jobs_completed+1, total_saved_gb=total_saved_gb+? WHERE id=?",
                        (d.get("saved_gb",0), wid))
+            db.execute("UPDATE workers SET status='idle', current_job_id=NULL WHERE id=? AND current_job_id=?",
+                       (wid, jid))
     db_write_retry(_w)
     add_log(f"Job #{jid} complete: {d.get('reduction_pct',0):.0f}% reduction", job_id=jid)
     if get_setting("ntfy_on_complete") == "true":
@@ -2916,7 +2925,9 @@ def api_error(jid):
             else:
                 db.execute("UPDATE queue SET status='error', progress=0, current_step='Failed', error_message=?, completed_at=datetime('now','localtime') WHERE id=?",
                            (err, jid))
-            db.execute("UPDATE workers SET status='idle', current_job_id=NULL WHERE id=?", (wid,))
+            # v3.27 — only clear the pointer if this job was the displayed one
+            # (a multi-threaded node keeps other jobs running).
+            db.execute("UPDATE workers SET status='idle', current_job_id=NULL WHERE id=? AND current_job_id=?", (wid, jid))
     db_write_retry(_w)
     if is_cancel:
         add_log(f"Job #{jid} cancelled (node confirmed)", job_id=jid)
@@ -3030,7 +3041,7 @@ def api_dashboard():
         # individual Start/Pause buttons on each job-type tab
         "processing_enabled_by_type": {
             jt: settings.get(f"processing_enabled_{jt}", "true") == "true"
-            for jt in ("transcode", "subgen", "remuxclean", "dv78only")
+            for jt in ("transcode", "subgen", "remuxclean", "dv78only", "compatfix")
         },
         "scan_progress": dict(scan_progress),
     })

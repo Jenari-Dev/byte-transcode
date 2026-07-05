@@ -1,7 +1,7 @@
 {
-  "server": "3.26",
-  "node": "2.18",
+  "server": "3.27",
+  "node": "2.19",
   "released": "2026-07-05",
-  "notes": "DV/transcode jobs no longer wrongly requeue: a job counts as 'worker offline' only when the node's heartbeat is actually stale, not when a multi-threaded node's shared worker id moved to another job (this was killing 20-min DV extracts every 5 min). Node v2.18: run_node.bat opens the GUI (update bell), accurate per-node update status, and Gemini multi-key rotation + pacing.",
+  "notes": "Code-audit fixes: worker cards show the job category each node is running; completing one job no longer blanks a multi-threaded node's other running jobs; health-check no longer un-parks poison jobs; Compatibility pipeline pause now shows correctly; 'Scan (Fresh)' actually clears first; compat rewrap no longer errors on 2-letter subtitle language codes. Node v2.19 + server v3.27.",
   "update_docs": "https://github.com/Jenari-Dev/byte-transcode#updating"
 }
