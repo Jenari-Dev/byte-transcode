@@ -158,7 +158,7 @@ except Exception:
 # ─── Self-update (v2.11) ─────────────────────────────────────────────────────
 # The node checks the same published manifest the web UI uses and can pull its
 # own new files from GitHub, then relaunch — matching the website's update flow.
-NODE_VERSION = "2.21"
+NODE_VERSION = "2.22"
 GITHUB_RAW = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main"
 VERSION_MANIFEST_URL = GITHUB_RAW + "/version.json"
 NODE_FILES = ["byte_node_v2.py", "byte_node_gui.py", "setup_tools.py",
@@ -319,27 +319,103 @@ class ByteNode:
         # check below will WARN about it so the user knows.
         return name
 
-    def _work_dir(self, job_id, settings):
-        """
-        Get the OS-appropriate temp work directory for a job. Honors
-        node_temp_path setting; falls back to legacy temp_path; auto-detects
-        if both are empty. Creates the directory if needed.
+    def _free(self, path):
+        try:
+            return shutil.disk_usage(path).free
+        except Exception:
+            return 0
 
-        v2.6: previously hardcoded /temp/byte_work which doesn't exist on
-        Windows — every job's temp output silently failed to write.
+    def _list_temp_drives(self):
+        """Fixed local drives usable for temp, as base mount paths (Windows 'D:\\')."""
+        drives = []
+        try:
+            import psutil
+            for p in psutil.disk_partitions(all=False):
+                opts = (p.opts or "").lower()
+                if "cdrom" in opts or "removable" in opts or not p.fstype:
+                    continue
+                drives.append(p.mountpoint)
+        except Exception:
+            if os.name == "nt":
+                for l in "CDEFGHIJKLMNOPQRSTUVWXYZ":
+                    d = f"{l}:\\"
+                    if os.path.exists(d):
+                        drives.append(d)
+            else:
+                drives.append("/")
+        return drives
+
+    def _need_bytes(self, filepath, file_size_gb, mult):
+        try:
+            sz = os.path.getsize(filepath)
+        except Exception:
+            sz = int((file_size_gb or 0) * (1024 ** 3))
+        return int(sz * mult)
+
+    def _best_temp_base(self, configured, need_bytes, job_id):
+        """
+        v2.22 — pick a temp base with room. Prefer the configured drive; if it
+        can't fit this job (need_bytes), spill to the LOCAL DRIVE WITH THE MOST
+        FREE SPACE that can (e.g. F: full -> D:). Returns a base dir; if nothing
+        fits, returns the configured base and the pre-flight check reports it.
+        """
+        if os.name != "nt":
+            return configured
+        cfg_letter = os.path.splitdrive(os.path.abspath(configured))[0]  # 'F:'
+        cfg_root = cfg_letter + os.sep if cfg_letter else configured
+        if not need_bytes or self._free(cfg_root) >= need_bytes:
+            return configured
+        cands = []
+        for d in self._list_temp_drives():
+            if os.path.splitdrive(d)[0].lower() == cfg_letter.lower():
+                continue
+            f = self._free(d)
+            if f >= need_bytes:
+                cands.append((f, d))
+        if cands:
+            cands.sort(reverse=True)   # roomiest first
+            drive = cands[0][1]
+            newbase = os.path.join(drive, "Byte_Engine_temp")
+            self.send_log(job_id, f"  [temp] {cfg_root} low on space — spilling this job to "
+                                  f"{drive} ({cands[0][0]/(1024**3):.0f} GB free)")
+            return newbase
+        return configured
+
+    def _work_dir(self, job_id, settings, need_bytes=0):
+        """
+        Temp work dir for a job. Honors node_temp_path (else temp_path, else
+        auto by OS). v2.22 — when need_bytes is given and the configured drive
+        can't fit it, auto-spill to the roomiest local drive (e.g. F: -> D:).
         """
         base = (settings.get("node_temp_path") or "").strip()
         if not base:
             base = (settings.get("temp_path") or "").strip()
         if not base:
-            # Last-resort auto-detect by OS
-            if os.name == "nt":
-                base = "C:\\Byte_Engine_temp"
-            else:
-                base = "/tmp/byte_work"
+            base = "C:\\Byte_Engine_temp" if os.name == "nt" else "/tmp/byte_work"
+        base = self._best_temp_base(base, need_bytes, job_id)
         work_dir = os.path.join(base, f"job_{job_id}")
         os.makedirs(work_dir, exist_ok=True)
         return work_dir
+
+    def _sweep_stale_temp(self, settings):
+        """v2.22 — on startup, delete leftover job_* temp dirs from previous runs
+        (crashes/kills orphan them and they eat disk). Only runs when idle."""
+        base = (settings.get("node_temp_path") or settings.get("temp_path") or "").strip()
+        if not base or not os.path.isdir(base):
+            return
+        removed = 0
+        try:
+            for name in os.listdir(base):
+                if name.startswith("job_"):
+                    try:
+                        shutil.rmtree(os.path.join(base, name), ignore_errors=True)
+                        removed += 1
+                    except Exception:
+                        pass
+        except Exception:
+            return
+        if removed:
+            self.log(f"Swept {removed} stale temp job dir(s) from {base}")
 
     # ── v2.7 per-job state plumbing ──────────────────────────────────────────
     def _job_entry(self, job_id=None):
@@ -777,29 +853,43 @@ class ByteNode:
             except Exception as e:
                 self.log(f"Cleanup failed: {e}", "WARN")
 
-    def _ensure_temp_space(self, work_dir, filepath, job_id, multiplier=2.2):
+    def _ensure_temp_space(self, work_dir, filepath, job_id, settings, multiplier=2.2):
         """
-        v2.20 — fail fast with a CLEAR message when the temp drive can't hold the
-        working files, instead of running for 20+ minutes and then dying on the
-        cryptic 'No space left on device' mid-extract. DV/transcode jobs copy the
-        source bitstream to temp and write the output there too, so they need
-        roughly 2x the source size free.
+        v2.22 — make sure the temp dir can hold this job's working files (source
+        copied in + output written out ≈ multiplier x source). If the current
+        drive is too full, SPILL to the roomiest OTHER local drive (e.g. F: full
+        -> D:) by moving the empty job dir there, so big files still process.
+        Only if NO drive fits does it fail — with a clear message instead of the
+        cryptic 'No space left on device' 20 minutes into an extract.
+        Returns (ok, err, work_dir) — work_dir may change if it spilled.
         """
         try:
-            src = os.path.getsize(filepath)
-            free = shutil.disk_usage(work_dir).free
+            need = int(os.path.getsize(filepath) * multiplier)
         except Exception:
-            return True, None  # can't check — let it try
-        need = int(src * multiplier)
-        if free < need:
-            gb = 1024 ** 3
-            drive = os.path.splitdrive(os.path.abspath(work_dir))[0] or work_dir
-            msg = (f"Not enough temp space on {drive}: need ~{need/gb:.0f} GB "
-                   f"(~{multiplier:g}x the {src/gb:.0f} GB source), only {free/gb:.0f} GB free. "
-                   f"Point the node temp dir to a bigger drive, or free space.")
-            self.send_log(job_id, f"  [ERROR] {msg}")
-            return False, msg
-        return True, None
+            return True, None, work_dir  # can't size it — let it try
+        if self._free(work_dir) >= need:
+            return True, None, work_dir
+        # current drive too full — try to spill to a roomier drive
+        base = os.path.dirname(work_dir)
+        newbase = self._best_temp_base(base, need, job_id)
+        if os.path.normcase(os.path.abspath(newbase)) != os.path.normcase(os.path.abspath(base)):
+            try:
+                newdir = os.path.join(newbase, os.path.basename(work_dir))
+                os.makedirs(newdir, exist_ok=True)
+                try:
+                    os.rmdir(work_dir)   # drop the now-unused (empty) original job dir
+                except Exception:
+                    pass
+                return True, None, newdir
+            except Exception as e:
+                self.send_log(job_id, f"  [temp] spill failed: {e}")
+        gb = 1024 ** 3
+        drive = os.path.splitdrive(os.path.abspath(work_dir))[0] or work_dir
+        msg = (f"Not enough temp space on any drive: need ~{need/gb:.0f} GB "
+               f"(~{multiplier:g}x the source), {drive} has {self._free(work_dir)/gb:.0f} GB free. "
+               f"Free space or add a bigger drive.")
+        self.send_log(job_id, f"  [ERROR] {msg}")
+        return False, msg, work_dir
 
     def transcode_dovi(self, job, settings):
         """Full Dolby Vision preserving transcode pipeline."""
@@ -812,7 +902,7 @@ class ByteNode:
 
         basename = os.path.splitext(filename)[0]
         work_dir = self._work_dir(job_id, settings)
-        ok, err = self._ensure_temp_space(work_dir, filepath, job_id)
+        ok, err, work_dir = self._ensure_temp_space(work_dir, filepath, job_id, settings)
         if not ok:
             return False, err, None, work_dir
 
@@ -974,7 +1064,7 @@ class ByteNode:
 
         basename = os.path.splitext(filename)[0]
         work_dir = self._work_dir(job_id, settings)
-        ok, err = self._ensure_temp_space(work_dir, filepath, job_id, multiplier=1.6)
+        ok, err, work_dir = self._ensure_temp_space(work_dir, filepath, job_id, settings, multiplier=1.6)
         if not ok:
             return False, err, None, work_dir
         output_mkv = os.path.join(work_dir, f"{basename}_byte.mkv")
@@ -1663,7 +1753,7 @@ class ByteNode:
 
         basename = os.path.splitext(filename)[0]
         work_dir = self._work_dir(job_id, settings)
-        ok, err = self._ensure_temp_space(work_dir, filepath, job_id)
+        ok, err, work_dir = self._ensure_temp_space(work_dir, filepath, job_id, settings)
         if not ok:
             return False, err, None, work_dir
         raw_hevc = os.path.join(work_dir, f"{basename}.hevc")
@@ -1798,7 +1888,7 @@ class ByteNode:
 
         basename = os.path.splitext(filename)[0]
         work_dir = self._work_dir(job_id, settings)
-        ok, err = self._ensure_temp_space(work_dir, filepath, job_id)
+        ok, err, work_dir = self._ensure_temp_space(work_dir, filepath, job_id, settings)
         if not ok:
             return False, err, None, work_dir
 
@@ -1920,7 +2010,7 @@ class ByteNode:
 
         basename = os.path.splitext(filename)[0]
         work_dir = self._work_dir(job_id, settings)
-        ok, err = self._ensure_temp_space(work_dir, filepath, job_id, multiplier=1.5)
+        ok, err, work_dir = self._ensure_temp_space(work_dir, filepath, job_id, settings, multiplier=1.5)
         if not ok:
             return False, err, None, work_dir
         output_mkv = os.path.join(work_dir, f"{basename}_compat.mkv")
@@ -3392,6 +3482,7 @@ class ByteNode:
         # Read worker counts: global server settings + per-node overrides
         settings = self.api("GET", "/api/settings") or {}
         settings.update(self._node_overrides(force=True))
+        self._sweep_stale_temp(settings)   # v2.22 — clear leftover temp from prior runs
         try:
             n_tw = int(settings.get("transcode_gpu_count", "1") or "1")
         except (TypeError, ValueError):

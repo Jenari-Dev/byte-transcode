@@ -1,6 +1,6 @@
 {
   "server": "3.29",
-  "node": "2.21",
+  "node": "2.22",
   "released": "2026-07-05",
   "notes": "Disk-space: transcode/DV/compat jobs now check the temp drive up front and fail instantly with a clear 'not enough temp space' message instead of running 20 min then dying on 'No space left on device'. Restarting a node (e.g. after an update) now auto-releases its in-progress jobs instead of stranding them. Security: the public dashboard endpoint no longer exposes API keys/passwords. Node v2.21 + server v3.29.",
   "update_docs": "https://github.com/Jenari-Dev/byte-transcode#updating"
