@@ -1,7 +1,7 @@
 {
-  "server": "3.32",
-  "node": "2.25",
-  "released": "2026-07-05",
-  "notes": "Self-healing media drive: when a node's Z: mapping dies (Windows drops mapped drives on idle), the node now re-maps it automatically and resumes claiming jobs on its own — and the dashboard shows a red 'MEDIA DRIVE OFFLINE' badge on that node while it's down, so an idle node is never a mystery again. Plus v2.24's replace-on-accept flow, node tags on active jobs, and live worker scaling.",
+  "server": "3.33",
+  "node": "2.26",
+  "released": "2026-07-06",
+  "notes": "Kills the last black-hole: a worker could wedge BEFORE reporting Step 1 (a zombie SMB file-stat with no timeout) and sit at 'Starting…' 0% GPU forever while heartbeats kept the server trusting it. Node now times out the source-size stat (10s) and errors+re-maps instead of hanging; server now requeues any job stuck at 0% for 20+ min with a live worker (the ghost check skipped it because the node was heartbeating, and the 2h stuck check skipped it because progress was 0). Both GPUs stay busy without babysitting.",
   "update_docs": "https://github.com/Jenari-Dev/byte-transcode#updating"
 }

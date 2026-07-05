@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 from flask import Flask, request, jsonify, send_from_directory, Response, session, redirect
 
-SERVER_VERSION = "3.32"
+SERVER_VERSION = "3.33"
 NODE_VERSION = "2.25"   # fallback only; the update bell uses each connected node's reported version
 # Where the update checker looks for the newest published versions.
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main/version.json"
@@ -1855,6 +1855,37 @@ def start_health_check_loop():
                                 attempts=?, current_step='Requeued (worker went offline)' WHERE id=?""",
                                 (att, sj["id"]))
                             deferred_logs.append((f"Auto-requeued job #{sj['id']} (worker offline, attempt {att}/{MAX_REQUEUE_ATTEMPTS}): {sj['file_name']}", "WARN", sj["id"]))
+                        if sj["worker_id"]:
+                            db.execute("UPDATE workers SET status='idle', current_job_id=NULL WHERE id=? AND current_job_id=?",
+                                       (sj["worker_id"], sj["id"]))
+
+                    # v3.33 — NEVER-STARTED black-hole guard. A worker can wedge
+                    # BEFORE reporting Step 1 (e.g. a zombie SMB stat with no
+                    # timeout) and sit at progress=0 'Starting…' forever. The
+                    # ghost check above skips it (node still heartbeats) and the
+                    # 2-hour stuck check below skips it (progress=0), so it used
+                    # to black-hole indefinitely — one worker slot lost until a
+                    # manual requeue. Real jobs report progress within seconds of
+                    # Step 1, so 0% for 20+ min means the worker never got going:
+                    # requeue it (let a healthy worker retry) and free the slot.
+                    never_started = db.execute("""SELECT id, worker_id, file_name,
+                            COALESCE(attempts,0) AS attempts FROM queue
+                        WHERE status='processing'
+                          AND started_at < datetime('now','localtime', '-1200 seconds')
+                          AND COALESCE(progress,0) = 0""").fetchall()
+                    for sj in never_started:
+                        att = (sj["attempts"] or 0) + 1
+                        if att >= MAX_REQUEUE_ATTEMPTS:
+                            db.execute("""UPDATE queue SET status='error', worker_id=NULL, started_at=NULL,
+                                attempts=?, current_step='Failed', completed_at=datetime('now','localtime'),
+                                error_message=? WHERE id=?""",
+                                (att, f"Auto-failed after {att} stalled starts (worker wedged before Step 1 — check the node's media drive)", sj["id"]))
+                            deferred_logs.append((f"Parked never-started job #{sj['id']} after {att} stalls: {sj['file_name']}", "WARN", sj["id"]))
+                        else:
+                            db.execute("""UPDATE queue SET status='queued', worker_id=NULL, started_at=NULL,
+                                attempts=?, current_step='Requeued (worker stalled before starting)' WHERE id=?""",
+                                (att, sj["id"]))
+                            deferred_logs.append((f"Auto-requeued never-started job #{sj['id']} (worker wedged at 0%, attempt {att}/{MAX_REQUEUE_ATTEMPTS}): {sj['file_name']}", "WARN", sj["id"]))
                         if sj["worker_id"]:
                             db.execute("UPDATE workers SET status='idle', current_job_id=NULL WHERE id=? AND current_job_id=?",
                                        (sj["worker_id"], sj["id"]))

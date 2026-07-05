@@ -158,7 +158,7 @@ except Exception:
 # ─── Self-update (v2.11) ─────────────────────────────────────────────────────
 # The node checks the same published manifest the web UI uses and can pull its
 # own new files from GitHub, then relaunch — matching the website's update flow.
-NODE_VERSION = "2.25"
+NODE_VERSION = "2.26"
 GITHUB_RAW = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main"
 VERSION_MANIFEST_URL = GITHUB_RAW + "/version.json"
 NODE_FILES = ["byte_node_v2.py", "byte_node_gui.py", "setup_tools.py",
@@ -876,10 +876,25 @@ class ByteNode:
         cryptic 'No space left on device' 20 minutes into an extract.
         Returns (ok, err, work_dir) — work_dir may change if it spilled.
         """
-        try:
-            need = int(os.path.getsize(filepath) * multiplier)
-        except Exception:
+        # v2.26 — size the source with a TIMEOUT. os.path.getsize on a zombie
+        # SMB mount (root/exists cached-OK but fresh file stat hangs) used to
+        # block this worker thread forever, before Step 1 even reports — the
+        # node sat at 'Starting…' 0% GPU indefinitely while heartbeats kept the
+        # server trusting it. Now: if the stat can't complete in 10s, treat the
+        # drive as down — error the job fast, stop claiming, and trigger a
+        # re-map — instead of black-holing.
+        sz = self._getsize_timeout(filepath, timeout=10.0)
+        if sz is None:
+            self._media_ok_val = False
+            self._media_ok_at = time.time()  # stop claiming until Z: is back
+            drv = os.path.splitdrive(filepath)[0] or "media drive"
+            msg = (f"Media drive not responding when sizing source ({drv}) — "
+                   f"mount looks hung; will re-map and retry")
+            self.send_log(job_id, f"  [ERROR] {msg}")
+            return False, msg, work_dir
+        if sz <= 0:
             return True, None, work_dir  # can't size it — let it try
+        need = int(sz * multiplier)
         if self._free(work_dir) >= need:
             return True, None, work_dir
         # current drive too full — try to spill to a roomier drive
@@ -3647,6 +3662,22 @@ class ByteNode:
                 result["v"] = os.path.exists(path)
             except Exception:
                 result["v"] = False
+        t = threading.Thread(target=probe, daemon=True)
+        t.start(); t.join(timeout)
+        return result.get("v") if "v" in result else None
+
+    def _getsize_timeout(self, path, timeout=10.0):
+        """os.path.getsize that can't hang forever. A zombie SMB session can
+        pass the cached exists()/root check yet block indefinitely on a fresh
+        file stat — which used to wedge a worker at 'Starting…' 0% forever
+        (the black-hole) because getsize() has no timeout. Run it in a helper
+        thread. Returns the size in bytes, or None on timeout (drive hung)."""
+        result = {}
+        def probe():
+            try:
+                result["v"] = os.path.getsize(path)
+            except Exception:
+                result["v"] = -1  # exists-but-unreadable / gone: distinct from hung
         t = threading.Thread(target=probe, daemon=True)
         t.start(); t.join(timeout)
         return result.get("v") if "v" in result else None
