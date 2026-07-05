@@ -266,8 +266,18 @@ class NodeEngine(threading.Thread):
 
 # ─── GUI Application ────────────────────────────────────────────────────────
 class ByteNodeGUI:
-    def __init__(self):
+    def __init__(self, cli_overrides=None):
         self.config = load_config()
+        # v2.18 — run_node.bat passes the machine's settings so the GUI matches
+        # the console launcher; persist them so the config stays the source of truth.
+        if cli_overrides:
+            changed = {k: v for k, v in cli_overrides.items() if v and self.config.get(k) != v}
+            if changed:
+                self.config.update(changed)
+                try:
+                    save_config(self.config)
+                except Exception:
+                    pass
         self.log_queue = queue.Queue()
         self.engine = None
 
@@ -720,11 +730,26 @@ class ByteNodeGUI:
 
 # ─── Main ────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    # v2.18 — accept the same flags run_node.bat passes the console node, so the
+    # GUI launches with this machine's settings instead of the defaults.
+    import argparse
+    _p = argparse.ArgumentParser(add_help=False)
+    for _a in ("--server", "--name", "--gpu", "--nas-drive", "--nas-prefix", "--temp-dir", "--workers"):
+        _p.add_argument(_a)
+    _args, _ = _p.parse_known_args()
+    _map = {"server": "server_url", "name": "node_name", "gpu": "gpu",
+            "nas_drive": "path_to", "nas_prefix": "path_from", "temp_dir": "temp_dir"}
+    _cli = {}
+    for _k, _ck in _map.items():
+        _v = getattr(_args, _k, None)
+        if _v:
+            _cli[_ck] = _v
+
     # v2.12 — a double-clicked GUI that crashes on startup shows nothing (the
     # console window closes instantly). Capture any startup exception to a log
     # file next to the script AND a dialog, so failures are diagnosable.
     try:
-        app = ByteNodeGUI()
+        app = ByteNodeGUI(cli_overrides=_cli)
         app.run()
     except Exception:
         import traceback

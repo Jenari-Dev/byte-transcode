@@ -29,8 +29,8 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 from flask import Flask, request, jsonify, send_from_directory, Response, session, redirect
 
-SERVER_VERSION = "3.24"
-NODE_VERSION = "2.10"   # latest node version this server ships/expects
+SERVER_VERSION = "3.25"
+NODE_VERSION = "2.18"   # fallback only; the update bell uses each connected node's reported version
 # Where the update checker looks for the newest published versions.
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main/version.json"
 DEFAULT_PORT = 5800
@@ -284,6 +284,16 @@ def init_db():
                     log.info(f"Migration: added queue.{col}")
                     if col == 'job_type':
                         db.execute("UPDATE queue SET job_type='transcode' WHERE job_type IS NULL OR job_type=''")
+
+            # v3.25 — workers.version so the update bell reflects each node's real
+            # running version instead of a stale hardcoded server constant.
+            try:
+                worker_cols = [r[1] for r in db.execute('PRAGMA table_info(workers)').fetchall()]
+                if 'version' not in worker_cols:
+                    db.execute("ALTER TABLE workers ADD COLUMN version TEXT DEFAULT ''")
+                    log.info("Migration: added workers.version")
+            except Exception as _e:
+                log.warning(f"workers.version migration skipped: {_e}")
 
             # v3.1 migration: file_path UNIQUE → (file_path, job_type) UNIQUE
             # so the same file can be queued for both transcode and remuxclean.
@@ -2352,11 +2362,26 @@ def api_updates_check():
         notes = m.get("notes", "")
     except Exception as e:
         err = str(e)[:120]
+
+    # v3.25 — base the node-update flag on the REAL versions the connected nodes
+    # report, not a stale hardcoded constant. A node is out of date only if it's
+    # online and behind the manifest; nodes that haven't reported a version yet
+    # (pre-3.25) are ignored so we don't nag about phantom updates.
+    with get_db() as db:
+        online = db.execute("""SELECT name, COALESCE(version,'') AS version FROM workers
+            WHERE last_heartbeat > datetime('now','localtime','-300 seconds')""").fetchall()
+    node_versions = [{"name": w["name"], "version": w["version"]} for w in online]
+    reported = [w["version"] for w in online if w["version"]]
+    outdated = [w for w in node_versions if w["version"] and _vtuple(w["version"]) < _vtuple(latest_node)]
+    node_update = len(outdated) > 0
+
     data = {
         "current_server": SERVER_VERSION, "latest_server": latest_server,
-        "current_node": NODE_VERSION, "latest_node": latest_node,
+        "latest_node": latest_node,
+        "node_versions": node_versions,          # per-node running versions
+        "nodes_outdated": [w["name"] for w in outdated],
         "server_update": _vtuple(latest_server) > _vtuple(SERVER_VERSION),
-        "node_update": _vtuple(latest_node) > _vtuple(NODE_VERSION),
+        "node_update": node_update,
         "notes": notes,
         "update_docs": "https://github.com/Jenari-Dev/byte-transcode#updating",
         "checked_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -2653,8 +2678,8 @@ def api_register_worker():
     if not wid: return jsonify({"error": "ID required"}), 400
     name = d.get("name", "")
     with get_db() as db:
-        db.execute("INSERT OR REPLACE INTO workers (id,name,host,gpu,status,last_heartbeat) VALUES (?,?,?,?,'idle',datetime('now','localtime'))",
-                   (wid, name, d.get("host",""), d.get("gpu","")))
+        db.execute("INSERT OR REPLACE INTO workers (id,name,host,gpu,status,last_heartbeat,version) VALUES (?,?,?,?,'idle',datetime('now','localtime'),?)",
+                   (wid, name, d.get("host",""), d.get("gpu",""), d.get("version","")))
         # v3.22 — collapse duplicate rows for the same node name that are no
         # longer heartbeating (e.g. a node relaunched from a different folder,
         # or whose id changed). A genuinely live same-name node keeps a fresh
@@ -2688,8 +2713,10 @@ def api_prune_workers():
 def api_heartbeat():
     d = request.json
     with get_db() as db:
-        db.execute("UPDATE workers SET last_heartbeat=datetime('now','localtime'), cpu_usage=?, ram_usage=?, gpu_usage=?, vram_usage=? WHERE id=?",
-                   (d.get("cpu", 0), d.get("ram", 0), d.get("gpu_usage", 0), d.get("vram", 0), d.get("id", "")))
+        db.execute("""UPDATE workers SET last_heartbeat=datetime('now','localtime'), cpu_usage=?, ram_usage=?,
+            gpu_usage=?, vram_usage=?, version=COALESCE(NULLIF(?,''),version) WHERE id=?""",
+                   (d.get("cpu", 0), d.get("ram", 0), d.get("gpu_usage", 0), d.get("vram", 0),
+                    d.get("version", ""), d.get("id", "")))
     return jsonify({"ok": True})
 
 # Jobs

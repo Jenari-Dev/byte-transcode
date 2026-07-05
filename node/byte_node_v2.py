@@ -144,11 +144,11 @@ except Exception:
 # ─── Self-update (v2.11) ─────────────────────────────────────────────────────
 # The node checks the same published manifest the web UI uses and can pull its
 # own new files from GitHub, then relaunch — matching the website's update flow.
-NODE_VERSION = "2.17"
+NODE_VERSION = "2.18"
 GITHUB_RAW = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main"
 VERSION_MANIFEST_URL = GITHUB_RAW + "/version.json"
 NODE_FILES = ["byte_node_v2.py", "byte_node_gui.py", "setup_tools.py",
-              "run_node.bat", "update_node.bat"]
+              "run_node.bat", "run_node_console.bat", "update_node.bat"]
 
 
 def _vparts(v):
@@ -457,6 +457,7 @@ class ByteNode:
             "name": self.name,
             "host": self.host,
             "gpu": self.gpu,
+            "version": NODE_VERSION,   # v2.18 — so the web update bell knows this node's real version
         })
         if r and r.get("ok"):
             self.log(f"Registered with server as {self.name} ({self.worker_id})")
@@ -494,6 +495,7 @@ class ByteNode:
             "ram": ram,
             "gpu_usage": gpu,
             "vram": vram,
+            "version": NODE_VERSION,
         })
 
     def check_cancel(self, job_id):
@@ -2164,16 +2166,27 @@ class ByteNode:
         """Provider-agnostic translation config. Falls back to the legacy
         claude_api_key / claude_model settings so existing installs keep working."""
         provider = (settings.get("translate_provider") or "anthropic").strip().lower()
+        raw_key = (settings.get("translate_api_key") or "").strip()
         cfg = {
             "provider": provider,
-            "api_key": (settings.get("translate_api_key") or "").strip(),
+            "api_key": raw_key,
             "model": (settings.get("translate_model") or "").strip(),
             "base_url": (settings.get("translate_base_url") or "").strip().rstrip("/"),
             "glossary": (settings.get("translate_glossary") or "").strip(),
         }
         if provider == "anthropic":
-            cfg["api_key"] = cfg["api_key"] or (settings.get("claude_api_key") or "").strip()
+            raw_key = raw_key or (settings.get("claude_api_key") or "").strip()
+            cfg["api_key"] = raw_key
             cfg["model"] = cfg["model"] or (settings.get("claude_model") or "claude-sonnet-4-6").strip()
+        # v2.18 — the key field may hold MULTIPLE keys (newline/comma separated)
+        # for round-robin rotation when one hits its daily quota.
+        cfg["api_keys"] = [k.strip() for k in re.split(r"[\n,]+", raw_key) if k.strip()] or [raw_key]
+        cfg["api_key"] = cfg["api_keys"][0]
+        # pacing: min seconds between translation calls to stay under free-tier RPM
+        try:
+            cfg["min_interval"] = float(settings.get("translate_min_interval") or 0)
+        except (TypeError, ValueError):
+            cfg["min_interval"] = 0.0
         return cfg
 
     def _build_translate_prompts(self, chunk, prev_context, title, target_lang, glossary):
@@ -2316,21 +2329,51 @@ class ByteNode:
             self.send_log(job_id, f"  [ERROR] Could not parse Gemini response: {e}")
             return None
 
+    def _pace_translate(self, cfg):
+        """v2.18 — hold a minimum gap between translation calls to stay under a
+        free tier's requests-per-minute limit (e.g. Gemini free ~15/min → set 4s)."""
+        iv = cfg.get("min_interval", 0) or 0
+        if iv <= 0:
+            return
+        last = getattr(self, "_last_translate_at", 0)
+        wait = iv - (time.time() - last)
+        if wait > 0:
+            time.sleep(min(wait, 30))
+        self._last_translate_at = time.time()
+
     def _translate_chunk(self, cfg, chunk, prev_context, title, target_lang, job_id):
-        """Translate one chunk via the configured provider.
-        Returns list of entries with 'text' replaced (timestamps preserved)."""
+        """Translate one chunk via the configured provider. Rotates across
+        multiple API keys when one hits its quota (429). Returns entries with
+        'text' replaced (timestamps preserved)."""
         system_prompt, user_prompt = self._build_translate_prompts(
             chunk, prev_context, title, target_lang, cfg.get("glossary", ""))
         provider = cfg["provider"]
-        if provider == "anthropic":
-            response_text = self._call_anthropic(cfg, system_prompt, user_prompt, job_id)
-        elif provider == "gemini":
-            response_text = self._call_gemini(cfg, system_prompt, user_prompt, job_id)
-        elif provider in ("openai", "openai_compatible"):
-            response_text = self._call_openai(cfg, system_prompt, user_prompt, job_id)
-        else:
-            self.send_log(job_id, f"  [ERROR] Unknown translate_provider '{provider}'")
-            return None
+        keys = cfg.get("api_keys") or [cfg.get("api_key")]
+        if not hasattr(self, "_key_idx"):
+            self._key_idx = 0
+
+        response_text = None
+        for _try in range(len(keys)):
+            cfg["api_key"] = keys[self._key_idx % len(keys)]
+            self._pace_translate(cfg)
+            self.rate_limited_until = 0
+            if provider == "anthropic":
+                response_text = self._call_anthropic(cfg, system_prompt, user_prompt, job_id)
+            elif provider == "gemini":
+                response_text = self._call_gemini(cfg, system_prompt, user_prompt, job_id)
+            elif provider in ("openai", "openai_compatible"):
+                response_text = self._call_openai(cfg, system_prompt, user_prompt, job_id)
+            else:
+                self.send_log(job_id, f"  [ERROR] Unknown translate_provider '{provider}'")
+                return None
+            if response_text:
+                break
+            # failed — if it was a rate limit and we have another key, rotate & retry
+            if self.rate_limited_until > time.time() and len(keys) > 1 and _try < len(keys) - 1:
+                self._key_idx += 1
+                self.send_log(job_id, f"  Rotating to API key #{(self._key_idx % len(keys)) + 1}/{len(keys)} (previous hit its quota)")
+                continue
+            break
         if not response_text:
             return None
 
