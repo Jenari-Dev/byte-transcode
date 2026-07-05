@@ -29,8 +29,8 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 from flask import Flask, request, jsonify, send_from_directory, Response, session, redirect
 
-SERVER_VERSION = "3.30"
-NODE_VERSION = "2.23"   # fallback only; the update bell uses each connected node's reported version
+SERVER_VERSION = "3.31"
+NODE_VERSION = "2.24"   # fallback only; the update bell uses each connected node's reported version
 # Where the update checker looks for the newest published versions.
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main/version.json"
 DEFAULT_PORT = 5800
@@ -277,7 +277,11 @@ def init_db():
                 # v3.17 — external submissions (Byte Media Manager etc.)
                 'requested_by': 'TEXT', 'ext_issues': 'TEXT', 'ext_note': 'TEXT', 'file_size_bytes': 'INTEGER',
                 # v3.19 — poison-job protection: auto-requeue attempt counter
-                'attempts': 'INTEGER DEFAULT 0'}
+                'attempts': 'INTEGER DEFAULT 0',
+                # v3.31 — accept flow: 1 when the output has replaced the original
+                # (or nothing to do); 0 = output held on the node awaiting Accept.
+                # Default 1 so pre-existing completed rows don't trigger finalize.
+                'finalized': 'INTEGER DEFAULT 1'}
             for col, typedef in queue_needed.items():
                 if col not in queue_cols:
                     db.execute(f'ALTER TABLE queue ADD COLUMN {col} {typedef}')
@@ -348,6 +352,7 @@ def init_db():
                             ext_note TEXT,
                             file_size_bytes INTEGER,
                             attempts INTEGER DEFAULT 0,
+                            finalized INTEGER DEFAULT 1,
                             FOREIGN KEY (library_id) REFERENCES libraries(id),
                             UNIQUE (file_path, job_type)
                         );
@@ -360,7 +365,7 @@ def init_db():
                         'priority','status','health_status','progress','current_step','eta','worker_id',
                         'output_path','output_size_gb','reduction_pct','error_message','started_at',
                         'completed_at','created_at','accepted','skipped_reason','probe_data','job_type',
-                        'requested_by','ext_issues','ext_note','file_size_bytes','attempts'
+                        'requested_by','ext_issues','ext_note','file_size_bytes','attempts','finalized'
                     )]
                     cols_csv = ", ".join(common)
                     db.execute(f"INSERT INTO queue ({cols_csv}) SELECT {cols_csv} FROM _queue_pre_v31")
@@ -2896,10 +2901,18 @@ def api_complete(jid):
     # can't overwrite the final 'Done'/100% state, and use write-retry.
     with _progress_lock:
         _progress_buffer.pop(jid, None)
+    # v3.31 — accept flow: the node says whether it's HOLDING the output for
+    # review (replace-on-accept). Held jobs get finalized=0; when the user
+    # clicks Accept, the node's finalize poller performs the replacement and
+    # calls /finalize-done. Keep-both / already-replaced jobs have nothing
+    # pending, so finalized=1.
+    hold = bool(d.get("hold_for_review", False))
+    step = "Awaiting review" if hold else "Done"
+    replaced = not hold
     def _w():
         with get_db() as db:
-            db.execute("UPDATE queue SET status='complete', progress=100, current_step='Done', output_path=?, output_size_gb=?, reduction_pct=?, completed_at=datetime('now','localtime'), accepted=? WHERE id=?",
-                       (d.get("output_path",""), d.get("output_size_gb",0), d.get("reduction_pct",0), int(auto), jid))
+            db.execute("UPDATE queue SET status='complete', progress=100, current_step=?, output_path=?, output_size_gb=?, reduction_pct=?, completed_at=datetime('now','localtime'), accepted=?, finalized=? WHERE id=?",
+                       (step, d.get("output_path",""), d.get("output_size_gb",0), d.get("reduction_pct",0), int(auto), int(replaced), jid))
             # v3.27 — count the completion, but only flip the node to idle / clear
             # the pointer if THIS job was the one displayed. On a multi-threaded
             # node another thread's job may be the current one — don't blank it.
@@ -2914,6 +2927,42 @@ def api_complete(jid):
             fn = db.execute("SELECT file_name FROM queue WHERE id=?", (jid,)).fetchone()
         send_notification("Transcode Complete",
             f"{fn['file_name'] if fn else 'Job #'+str(jid)} — {d.get('reduction_pct',0):.0f}% reduction, saved {d.get('saved_gb',0):.1f} GB")
+    return jsonify({"ok": True})
+
+@app.route("/api/jobs/awaiting-finalize", methods=["GET"])
+def api_awaiting_finalize():
+    """v3.31 — jobs whose output is held on a node pending Accept.
+    Default: accepted ones ready for the node to replace (finalize poller).
+    ?all=1: every held job for that node (the temp sweep keeps their dirs)."""
+    wid = request.args.get("worker_id", "")
+    everything = request.args.get("all") == "1"
+    q = "SELECT id, file_path, output_path FROM queue WHERE status='complete' AND COALESCE(finalized,1)=0"
+    p = []
+    if not everything:
+        q += " AND accepted=1"
+    if wid:
+        q += " AND worker_id=?"; p.append(wid)
+    with get_db() as db:
+        rows = db.execute(q + " LIMIT 50", p).fetchall()
+    return jsonify({"jobs": [{"job_id": r["id"], "source_path": r["file_path"],
+                              "output_path": r["output_path"]} for r in rows]})
+
+@app.route("/api/jobs/<int:jid>/finalize-done", methods=["POST"])
+def api_finalize_done(jid):
+    """v3.31 — node reports the accepted output has replaced the original."""
+    d = request.json or {}
+    ok = bool(d.get("ok", True))
+    def _w():
+        with get_db() as db:
+            if ok:
+                db.execute("UPDATE queue SET finalized=1, output_path=?, current_step='Done' WHERE id=?",
+                           (d.get("output_path", ""), jid))
+            else:
+                db.execute("UPDATE queue SET finalized=1, current_step='Done (output lost before accept)' WHERE id=?", (jid,))
+    db_write_retry(_w)
+    add_log(f"Job #{jid} finalized: original replaced" if ok
+            else f"Job #{jid} accept failed: {d.get('error','output missing')}", job_id=jid,
+            level="INFO" if ok else "WARN")
     return jsonify({"ok": True})
 
 @app.route("/api/jobs/<int:jid>/error", methods=["POST"])

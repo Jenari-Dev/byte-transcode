@@ -1,7 +1,7 @@
 {
-  "server": "3.30",
-  "node": "2.23",
+  "server": "3.31",
+  "node": "2.24",
   "released": "2026-07-05",
-  "notes": "Live worker scaling: changing worker counts now applies within ~30s, no node restart. Staged Files is now real tdarr-style staging — the next N health-checked jobs on deck, sized by the staged-limit box. New 'Replace originals' toggle in the Options bar (auto-accept only skips review). Node v2.23 also auto-spills temp to the roomiest drive when full. Server v3.30.",
+  "notes": "tdarr-style accept flow: with auto-accept OFF, completed jobs hold their output for review and 'Accept' swaps the new file in (original replaced); auto-accept ON replaces immediately. Active jobs now show a node tag so you can see which GPU runs each job. Media-drive guard: a node whose Z: drive is hung/unmapped refuses to claim jobs and says why (ends the 'stuck at Starting' black-hole). Plus v2.23 live worker scaling + temp auto-spill.",
   "update_docs": "https://github.com/Jenari-Dev/byte-transcode#updating"
 }

@@ -158,7 +158,7 @@ except Exception:
 # ─── Self-update (v2.11) ─────────────────────────────────────────────────────
 # The node checks the same published manifest the web UI uses and can pull its
 # own new files from GitHub, then relaunch — matching the website's update flow.
-NODE_VERSION = "2.23"
+NODE_VERSION = "2.24"
 GITHUB_RAW = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main"
 VERSION_MANIFEST_URL = GITHUB_RAW + "/version.json"
 NODE_FILES = ["byte_node_v2.py", "byte_node_gui.py", "setup_tools.py",
@@ -399,14 +399,23 @@ class ByteNode:
 
     def _sweep_stale_temp(self, settings):
         """v2.22 — on startup, delete leftover job_* temp dirs from previous runs
-        (crashes/kills orphan them and they eat disk). Only runs when idle."""
+        (crashes/kills orphan them and they eat disk).
+        v2.24 — SKIP dirs whose job is complete-but-not-yet-accepted: those hold
+        the output awaiting the user's review/Accept."""
         base = (settings.get("node_temp_path") or settings.get("temp_path") or "").strip()
         if not base or not os.path.isdir(base):
             return
+        keep = set()
+        try:
+            r = self.api("GET", f"/api/jobs/awaiting-finalize?worker_id={self.worker_id}&all=1")
+            for j in (r or {}).get("jobs") or []:
+                keep.add(f"job_{j.get('job_id')}")
+        except Exception:
+            pass
         removed = 0
         try:
             for name in os.listdir(base):
-                if name.startswith("job_"):
+                if name.startswith("job_") and name not in keep:
                     try:
                         shutil.rmtree(os.path.join(base, name), ignore_errors=True)
                         removed += 1
@@ -415,7 +424,8 @@ class ByteNode:
         except Exception:
             return
         if removed:
-            self.log(f"Swept {removed} stale temp job dir(s) from {base}")
+            self.log(f"Swept {removed} stale temp job dir(s) from {base}"
+                     + (f" (kept {len(keep)} awaiting review)" if keep else ""))
 
     # ── v2.7 per-job state plumbing ──────────────────────────────────────────
     def _job_entry(self, job_id=None):
@@ -3295,14 +3305,22 @@ class ByteNode:
             self.send_log(job_id, f"  Path: {filepath}")
         self.send_log(job_id, f"  Size: {job.get('file_size_gb', 0):.2f} GB")
 
-        # Verify file exists
-        if not os.path.exists(filepath):
-            self.send_log(job_id, f"[ERROR] File not found at local path: {filepath}")
+        # Verify file exists — with a timeout so a hung network drive errors the
+        # job in seconds instead of blocking this worker thread forever (v2.24).
+        exists = self._path_exists_timeout(filepath, timeout=10.0)
+        if not exists:
+            if exists is None:
+                self.send_log(job_id, f"[ERROR] Media drive not responding reading: {filepath}")
+                err = f"Media drive not responding ({os.path.splitdrive(filepath)[0]}) — check the network mount"
+                self._media_ok_val = False; self._media_ok_at = time.time()  # stop claiming until it's back
+            else:
+                self.send_log(job_id, f"[ERROR] File not found at local path: {filepath}")
+                err = f"File not found: {filepath}"
             if local_path != server_path:
                 self.send_log(job_id, f"[ERROR] Path was translated from: {server_path}")
                 self.send_log(job_id, f"[HINT] Check Settings → Path Mapping (node_path_local_prefix)")
             self.api("POST", f"/api/jobs/{job_id}/error", {
-                "worker_id": self.worker_id, "error": f"File not found: {filepath}"
+                "worker_id": self.worker_id, "error": err
             })
             self.current_job_id = None
             return
@@ -3387,9 +3405,21 @@ class ByteNode:
             if job_type != "subgen" and result["output_path"].lower().endswith(".mkv"):
                 self._normalize_default_audio(result["output_path"], job_id)
 
-            # Handle file replacement
-            final_path = self.replace_original(job, result, settings, work_dir)
-            result["output_path"] = final_path
+            # v2.24 — tdarr-style accept flow. Replacement happens on ACCEPTANCE:
+            #   auto_accept=true  → accept + replace immediately (below)
+            #   auto_accept=false → hold the output in temp for review; when the
+            #     user clicks Accept, the finalize poller does the replacement.
+            replace_on = (settings.get("replace_original", "true") == "true")
+            auto_acc = (settings.get("auto_accept", "false") == "true")
+            hold_for_review = False
+            if replace_on and auto_acc:
+                final_path = self.replace_original(job, result, settings, work_dir)
+                result["output_path"] = final_path
+            elif replace_on:
+                hold_for_review = True
+                self.send_log(job_id, "  Held for review — will replace the original when you Accept it")
+            else:
+                self.send_log(job_id, f"  Keep both: original preserved, output at {result['output_path']}")
 
             self.send_log(job_id, f"  Total time: {elapsed_str}")
             self.api("POST", f"/api/jobs/{job_id}/complete", {
@@ -3398,6 +3428,7 @@ class ByteNode:
                 "output_size_gb": result["output_size_gb"],
                 "reduction_pct": result["reduction_pct"],
                 "saved_gb": result["saved_gb"],
+                "hold_for_review": hold_for_review,
             })
             self.log(f"Job #{job_id} complete: {result['reduction_pct']:.0f}% reduction in {elapsed_str}")
         else:
@@ -3523,7 +3554,45 @@ class ByteNode:
             self._tw_spawned += 1
             self.log(f"Transcode worker #{i} started")
         threading.Thread(target=self._worker_scaler_loop, daemon=True, name="scaler").start()
+        threading.Thread(target=self._finalize_poller_loop, daemon=True, name="finalize").start()
         return True
+
+    def _finalize_poller_loop(self):
+        """
+        v2.24 — completes the manual-accept flow. Jobs finished with auto-accept
+        OFF hold their output in this node's temp; when the user clicks Accept,
+        the server marks them accepted and this loop performs the replacement
+        (original → new file, temp cleaned) and reports the final path.
+        """
+        while self.running:
+            time.sleep(45)
+            try:
+                r = self.api("GET", f"/api/jobs/awaiting-finalize?worker_id={self.worker_id}")
+                jobs = (r or {}).get("jobs") or []
+                if not jobs:
+                    continue
+                settings = self.api("GET", "/api/settings") or {}
+                settings.update(self._node_overrides())
+                settings["replace_original"] = "true"   # acceptance IS the approval
+                for j in jobs:
+                    jid = j.get("job_id")
+                    out = j.get("output_path") or ""
+                    src_server = j.get("source_path") or ""
+                    local = self._translate_path(src_server, settings)
+                    if not out or not os.path.exists(out):
+                        self.log(f"Finalize #{jid}: output missing ({out}) — telling server", "WARN")
+                        self.api("POST", f"/api/jobs/{jid}/finalize-done",
+                                 {"worker_id": self.worker_id, "output_path": "", "ok": False,
+                                  "error": "output no longer on node (temp cleaned?)"})
+                        continue
+                    self.log(f"Finalize #{jid}: user accepted — replacing original")
+                    job_like = {"id": jid, "file_path": local}
+                    result_like = {"output_path": out}
+                    final = self.replace_original(job_like, result_like, settings, os.path.dirname(out))
+                    self.api("POST", f"/api/jobs/{jid}/finalize-done",
+                             {"worker_id": self.worker_id, "output_path": final, "ok": True})
+            except Exception:
+                pass
 
     def _worker_scaler_loop(self):
         """v2.23 — apply worker-count changes live (no node restart)."""
@@ -3565,6 +3634,44 @@ class ByteNode:
         except KeyboardInterrupt:
             self.running = False
 
+    def _path_exists_timeout(self, path, timeout=8.0):
+        """os.path.exists that can't hang forever: a dead SMB mount blocks the
+        syscall indefinitely, so run it in a helper thread with a timeout.
+        Returns True/False, or None on timeout (drive not responding)."""
+        result = {}
+        def probe():
+            try:
+                result["v"] = os.path.exists(path)
+            except Exception:
+                result["v"] = False
+        t = threading.Thread(target=probe, daemon=True)
+        t.start(); t.join(timeout)
+        return result.get("v") if "v" in result else None
+
+    def _media_ok(self, force=False):
+        """
+        v2.24 — MEDIA-DRIVE GUARD. Before claiming any job, verify the media
+        drive (node_path_local_prefix, e.g. Z:\\) actually responds. A node with
+        a hung/unmapped drive used to claim jobs and sit at 'Starting…' forever
+        (the black-hole) because exists() blocked on dead SMB while heartbeats
+        kept the server trusting it. Result cached 30s.
+        """
+        now = time.time()
+        if not force and now - getattr(self, "_media_ok_at", 0) < 30:
+            return getattr(self, "_media_ok_val", True)
+        prefix = (self._node_overrides().get("node_path_local_prefix")
+                  or self.local_overrides.get("node_path_local_prefix") or "")
+        ok = True
+        if prefix:
+            r = self._path_exists_timeout(prefix, timeout=8.0)
+            ok = bool(r)
+            if not ok:
+                why = "not responding (hung mount?)" if r is None else "not found (drive not mapped?)"
+                self.log(f"MEDIA DRIVE {prefix} {why} — NOT claiming jobs until it's back", "ERROR")
+        self._media_ok_at = now
+        self._media_ok_val = ok
+        return ok
+
     def _tw_worker_loop(self, worker_idx):
         """Single transcode worker poll loop."""
         # Stagger initial poll so 4 workers don't hit the API at the exact same instant
@@ -3577,6 +3684,10 @@ class ByteNode:
                 if self._tw_spawned > worker_idx:
                     self._tw_spawned = worker_idx
                 return
+            # v2.24 — never claim work this node can't do (dead media drive)
+            if not self._media_ok():
+                time.sleep(15)
+                continue
             try:
                 r = self.api("POST", "/api/jobs/next", {"worker_id": self.worker_id}, timeout=90)
                 if r and r.get("job"):
