@@ -144,7 +144,7 @@ except Exception:
 # ─── Self-update (v2.11) ─────────────────────────────────────────────────────
 # The node checks the same published manifest the web UI uses and can pull its
 # own new files from GitHub, then relaunch — matching the website's update flow.
-NODE_VERSION = "2.15"
+NODE_VERSION = "2.16"
 GITHUB_RAW = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main"
 VERSION_MANIFEST_URL = GITHUB_RAW + "/version.json"
 NODE_FILES = ["byte_node_v2.py", "byte_node_gui.py", "setup_tools.py",
@@ -2667,6 +2667,115 @@ class ByteNode:
         except (TypeError, ValueError):
             return 0.0
 
+    # ── OpenSubtitles: fetch official subs instead of a slow Whisper run (v2.16) ──
+    _os_token = None
+    _os_token_at = 0.0
+
+    def _movie_hash(self, path):
+        """OpenSubtitles' 64-bit hash (filesize + first & last 64KB), hex. Lets
+        the search match the exact release for perfectly-synced subs."""
+        try:
+            import struct
+            fmt = "<q"; step = struct.calcsize(fmt); chunk = 65536
+            fsize = os.path.getsize(path)
+            if fsize < chunk * 2:
+                return None
+            h = fsize & 0xFFFFFFFFFFFFFFFF
+            with open(path, "rb") as f:
+                for _ in range(chunk // step):
+                    h = (h + struct.unpack(fmt, f.read(step))[0]) & 0xFFFFFFFFFFFFFFFF
+                f.seek(fsize - chunk, 0)
+                for _ in range(chunk // step):
+                    h = (h + struct.unpack(fmt, f.read(step))[0]) & 0xFFFFFFFFFFFFFFFF
+            return "%016x" % h
+        except Exception:
+            return None
+
+    def _os_login(self, key, settings, job_id):
+        """Bearer token for downloads (cached ~20 min). Returns None if creds
+        are missing (search still works; only downloads need a login)."""
+        user = (settings.get("opensubtitles_username") or "").strip()
+        pw = (settings.get("opensubtitles_password") or "").strip()
+        if not (user and pw):
+            return None
+        if self._os_token and (time.time() - self._os_token_at) < 1200:
+            return self._os_token
+        try:
+            r = requests.post("https://api.opensubtitles.com/api/v1/login",
+                headers={"Api-Key": key, "Content-Type": "application/json",
+                         "User-Agent": "ByteTranscode/1.0"},
+                json={"username": user, "password": pw}, timeout=20)
+            if r.status_code == 200:
+                self._os_token = r.json().get("token"); self._os_token_at = time.time()
+                return self._os_token
+            self.send_log(job_id, f"  [OpenSubtitles] login failed ({r.status_code}) — check username/password")
+        except Exception as e:
+            self.send_log(job_id, f"  [OpenSubtitles] login error: {e}")
+        return None
+
+    def _opensubtitles_fetch(self, filepath, lang, job_id, settings):
+        """Search + download a best-match `lang` subtitle. Returns parsed SRT
+        entries, or None to fall back to Whisper. Never raises."""
+        key = (settings.get("opensubtitles_api_key") or "").strip()
+        if not key:
+            return None
+        ua = {"Api-Key": key, "User-Agent": "ByteTranscode/1.0"}
+        title = re.sub(r"[._]", " ", os.path.splitext(os.path.basename(filepath))[0]).strip()
+        mhash = self._movie_hash(filepath)
+        self.send_log(job_id, f"  [OpenSubtitles] searching {lang} subs for '{title}' (hash={mhash or 'n/a'})")
+        try:
+            params = {"languages": lang, "query": title}
+            if mhash:
+                params["moviehash"] = mhash
+            r = requests.get("https://api.opensubtitles.com/api/v1/subtitles",
+                             headers=ua, params=params, timeout=25)
+            if r.status_code == 401:
+                self.send_log(job_id, "  [OpenSubtitles] 401 — API key rejected")
+                return None
+            if r.status_code != 200:
+                self.send_log(job_id, f"  [OpenSubtitles] search HTTP {r.status_code}")
+                return None
+            data = r.json().get("data", [])
+            if not data:
+                self.send_log(job_id, "  [OpenSubtitles] no matches — will use Whisper")
+                return None
+            def score(it):
+                a = it.get("attributes", {}) or {}
+                return (1 if a.get("moviehash_match") else 0,
+                        1 if a.get("from_trusted") else 0,
+                        a.get("download_count", 0) or 0)
+            data.sort(key=score, reverse=True)
+            best = data[0].get("attributes", {}) or {}
+            files = best.get("files", []) or []
+            if not files or not files[0].get("file_id"):
+                return None
+            token = self._os_login(key, settings, job_id)
+            if not token:
+                self.send_log(job_id, "  [OpenSubtitles] no login token (set username+password) — using Whisper")
+                return None
+            dh = dict(ua); dh["Content-Type"] = "application/json"; dh["Authorization"] = f"Bearer {token}"
+            r = requests.post("https://api.opensubtitles.com/api/v1/download",
+                              headers=dh, json={"file_id": files[0]["file_id"]}, timeout=25)
+            if r.status_code != 200:
+                self.send_log(job_id, f"  [OpenSubtitles] download HTTP {r.status_code} {r.text[:100]}")
+                return None
+            j = r.json(); link = j.get("link")
+            if not link:
+                return None
+            srt = requests.get(link, timeout=40)
+            srt.encoding = srt.apparent_encoding or "utf-8"
+            entries = self._parse_srt(srt.text)
+            if not entries:
+                self.send_log(job_id, "  [OpenSubtitles] downloaded sub empty/unparseable — using Whisper")
+                return None
+            self.send_log(job_id,
+                f"  [OpenSubtitles] got {len(entries)} cues from '{best.get('release','?')}' "
+                f"(hash_match={data[0]['attributes'].get('moviehash_match')}, quota left {j.get('remaining','?')})")
+            return entries
+        except Exception as e:
+            self.send_log(job_id, f"  [OpenSubtitles] error: {e} — using Whisper")
+            return None
+
     def subgen(self, job, settings):
         """
         Subtitle generation. Ensures the file has BOTH an English and a target-language
@@ -2750,36 +2859,46 @@ class ByteNode:
                 eng_entries = self._parse_srt(open(src_srt, encoding="utf-8", errors="replace").read())
                 if not eng_entries:
                     return False, "Extracted English SRT was empty", None, work_dir
-            elif eng_audio is not None or tgt_audio is None:
-                a = eng_audio or (audio_streams[0] if audio_streams else None)
-                if a is None:
-                    return False, "No audio or subtitle source for SubGen", None, work_dir
-                a_idx = a.get("index")
-                wav = os.path.join(work_dir, f"{basename}.audio.wav")
-                self.update_progress(job_id, 18, "Extracting audio for Whisper")
-                if not self._extract_audio_for_whisper(filepath, a_idx, wav, job_id):
-                    return False, "Failed to extract audio", None, work_dir
-                eng_entries = self._whisper_transcribe(
-                    wav, whisper_model, whisper_device, whisper_compute,
-                    language=("en" if eng_audio is not None else None), task="transcribe", job_id=job_id)
-                if eng_entries is None:
-                    return False, "Whisper transcription failed", None, work_dir
-                eng_entries = self._normalize_srt_timing(
-                    eng_entries, self._audio_stream_start_pts(probe, a_idx), job_id)
             else:
-                # No English sub or audio, but target-language audio exists → transcribe it directly.
-                a_idx = tgt_audio.get("index")
-                wav = os.path.join(work_dir, f"{basename}.audio.wav")
-                self.update_progress(job_id, 18, "Extracting audio for Whisper")
-                if not self._extract_audio_for_whisper(filepath, a_idx, wav, job_id):
-                    return False, "Failed to extract audio", None, work_dir
-                tgt_direct = self._whisper_transcribe(
-                    wav, whisper_model, whisper_device, whisper_compute,
-                    language=("ja" if target_lang in ("jpn", "ja") else None), task="transcribe", job_id=job_id)
-                if tgt_direct is None:
-                    return False, "Whisper transcription failed", None, work_dir
-                tgt_direct = self._normalize_srt_timing(
-                    tgt_direct, self._audio_stream_start_pts(probe, a_idx), job_id)
+                # v2.16 — official English subs from OpenSubtitles FIRST: seconds
+                # instead of a 30-60 min Whisper run, and properly synced. Falls
+                # back to Whisper when nothing is found or no key is configured.
+                eng_entries = self._opensubtitles_fetch(filepath, "en", job_id, settings)
+                if eng_entries:
+                    self.update_progress(job_id, 30, f"Fetched official English subtitles ({len(eng_entries)} cues)")
+                elif eng_audio is not None or tgt_audio is None:
+                    a = eng_audio or (audio_streams[0] if audio_streams else None)
+                    if a is None:
+                        return False, "No audio or subtitle source for SubGen", None, work_dir
+                    a_idx = a.get("index")
+                    wav = os.path.join(work_dir, f"{basename}.audio.wav")
+                    self.update_progress(job_id, 18, "Extracting audio for Whisper")
+                    if not self._extract_audio_for_whisper(filepath, a_idx, wav, job_id):
+                        return False, "Failed to extract audio", None, work_dir
+                    eng_entries = self._whisper_transcribe(
+                        wav, whisper_model, whisper_device, whisper_compute,
+                        language=("en" if eng_audio is not None else None), task="transcribe", job_id=job_id)
+                    if eng_entries is None:
+                        return False, "Whisper transcription failed", None, work_dir
+                    eng_entries = self._normalize_srt_timing(
+                        eng_entries, self._audio_stream_start_pts(probe, a_idx), job_id)
+                else:
+                    # No English source; try official target-language subs, else transcribe foreign audio.
+                    tgt_direct = self._opensubtitles_fetch(
+                        filepath, ("ja" if target_lang in ("jpn", "ja") else target_lang), job_id, settings)
+                    if not tgt_direct:
+                        a_idx = tgt_audio.get("index")
+                        wav = os.path.join(work_dir, f"{basename}.audio.wav")
+                        self.update_progress(job_id, 18, "Extracting audio for Whisper")
+                        if not self._extract_audio_for_whisper(filepath, a_idx, wav, job_id):
+                            return False, "Failed to extract audio", None, work_dir
+                        tgt_direct = self._whisper_transcribe(
+                            wav, whisper_model, whisper_device, whisper_compute,
+                            language=("ja" if target_lang in ("jpn", "ja") else None), task="transcribe", job_id=job_id)
+                        if tgt_direct is None:
+                            return False, "Whisper transcription failed", None, work_dir
+                        tgt_direct = self._normalize_srt_timing(
+                            tgt_direct, self._audio_stream_start_pts(probe, a_idx), job_id)
 
             # ── Build the tracks we need to add: list of (lang_code, track_name, entries)
             tracks = []

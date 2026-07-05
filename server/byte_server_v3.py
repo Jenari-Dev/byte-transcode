@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 from flask import Flask, request, jsonify, send_from_directory, Response, session, redirect
 
-SERVER_VERSION = "3.23"
+SERVER_VERSION = "3.24"
 NODE_VERSION = "2.10"   # latest node version this server ships/expects
 # Where the update checker looks for the newest published versions.
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main/version.json"
@@ -1796,6 +1796,11 @@ def start_health_check_loop():
                     # endpoint, created an endless requeue loop. Now: if the
                     # worker is alive and still on this job, leave it alone
                     # regardless of reported progress.
+                    # v3.24 — only requeue a job whose worker has been silent for
+                    # 10+ min (was 3). Long SubGen/Whisper runs plus brief machine
+                    # or network hiccups were tripping the 3-min rule and restarting
+                    # 30-60 min jobs from zero, so they never finished. A live node
+                    # heartbeats every 15s, so a 10-min gap really is a dead node.
                     ghost_jobs = db.execute("""SELECT q.id, q.worker_id, q.file_name,
                             COALESCE(q.attempts,0) AS attempts FROM queue q
                         WHERE q.status='processing'
@@ -1804,7 +1809,7 @@ def start_health_check_loop():
                               SELECT 1 FROM workers w
                               WHERE w.id = q.worker_id
                                 AND w.current_job_id = q.id
-                                AND w.last_heartbeat > datetime('now','localtime', '-180 seconds'))""").fetchall()
+                                AND w.last_heartbeat > datetime('now','localtime', '-600 seconds'))""").fetchall()
                     for sj in ghost_jobs:
                         att = (sj["attempts"] or 0) + 1
                         if att >= MAX_REQUEUE_ATTEMPTS:

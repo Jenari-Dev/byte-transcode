@@ -93,7 +93,7 @@ function Login({onAuth,setup}){
     return <div style={{minHeight:'100vh',background:T.bg,display:'flex',alignItems:'center',justifyContent:'center'}}>
         <div style={{background:T.sb,borderRadius:14,padding:'44px 40px',border:`1px solid ${T.bd}`,width:380,textAlign:'center'}}>
             <div style={{fontSize:36,fontWeight:800,color:T.ac,letterSpacing:'-1px',lineHeight:1,marginBottom:4}}>BYTE</div>
-            <div style={{fontSize:11,color:T.t2,letterSpacing:'3px',fontWeight:600,marginBottom:36}}>TRANSCODE v3.23</div>
+            <div style={{fontSize:11,color:T.t2,letterSpacing:'3px',fontWeight:600,marginBottom:36}}>TRANSCODE v3.24</div>
             {setup&&<div style={{fontSize:13,color:T.ac,marginBottom:16,padding:'10px 14px',background:`${T.ac}15`,borderRadius:8}}>First time — create your admin account</div>}
             {e&&<div style={{fontSize:13,color:T.er,marginBottom:14}}>{e}</div>}
             <input value={u} onChange={ev=>setU(ev.target.value)} placeholder="Username" style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'12px 16px',color:T.tx,fontSize:14,marginBottom:12}}/>
@@ -305,7 +305,7 @@ function App(){
         <nav style={{width:218,background:T.sb,borderRight:`1px solid ${T.bd}`,display:'flex',flexDirection:'column',position:'sticky',top:0,height:'100vh',flexShrink:0}}>
             <div style={{padding:'22px 18px',borderBottom:`1px solid ${T.bd}`}}>
                 <div style={{fontSize:24,fontWeight:800,color:T.ac,letterSpacing:'-0.5px',lineHeight:1}}>BYTE</div>
-                <div style={{fontSize:10,color:T.t2,letterSpacing:'2.5px',fontWeight:600,marginTop:4}}>TRANSCODE v3.23</div>
+                <div style={{fontSize:10,color:T.t2,letterSpacing:'2.5px',fontWeight:600,marginTop:4}}>TRANSCODE v3.24</div>
             </div>
             <div style={{padding:10,flex:1,overflowY:'auto'}}>
                 {/* Main */}
@@ -505,7 +505,7 @@ function App(){
                     </div>
                     <div style={{background:T.bg,borderRadius:8,padding:'10px 14px',border:`1px solid ${T.bd}`}}>
                         <div style={{fontSize:10,color:T.t2,fontWeight:600}}>VERSION</div>
-                        <div className="mono" style={{fontSize:15,fontWeight:700,color:T.t1,marginTop:2}}>3.23</div>
+                        <div className="mono" style={{fontSize:15,fontWeight:700,color:T.t1,marginTop:2}}>3.24</div>
                     </div>
                     <div style={{background:T.bg,borderRadius:8,padding:'10px 14px',border:`1px solid ${T.bd}`}}>
                         <div style={{fontSize:10,color:T.t2,fontWeight:600}}>STATUS</div>
@@ -1368,6 +1368,24 @@ function App(){
                         <span style={{fontSize:12,color:T.t2,marginLeft:'auto'}}>Whisper transcription + multi-provider AI translation</span>
                     </div>
                     {(()=>{const pv=lSettings.translate_provider||'anthropic';const eff=(lSettings.translate_api_key||'')||(pv==='anthropic'?(lSettings.claude_api_key||''):'');return (pv!=='openai_compatible'&&!eff)?<div style={{padding:'10px 14px',background:`${T.wn}15`,border:`1px solid ${T.wn}44`,borderRadius:8,marginBottom:14,fontSize:12,color:T.wn,display:'flex',gap:8,alignItems:'center'}}><I n="search" s={14}/> No API key set for the selected provider ({pv}) — SubGen translation jobs will fail until you add one below.</div>:null;})()}
+                    {/* v3.24 — OpenSubtitles: official English subs first (seconds, synced), Whisper only as fallback */}
+                    <div style={{background:`${T.ok}0c`,border:`1px solid ${T.ok}33`,borderRadius:10,padding:'14px 16px',marginBottom:16}}>
+                        <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:4}}>
+                            <I n="download" s={15} c={T.ok}/><span style={{fontSize:13,fontWeight:700,color:T.t1}}>Official Subtitle Source — OpenSubtitles</span>
+                        </div>
+                        <div style={{fontSize:11.5,color:T.t2,marginBottom:12,lineHeight:1.5}}>When set, SubGen fetches official English subs from opensubtitles.com in seconds (accurate + synced) and only falls back to Whisper if none exist. Get a free key at opensubtitles.com → Consumers, and use your normal login for downloads. Free tier allows a limited number of downloads/day.</div>
+                        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(230px,1fr))',gap:12}}>
+                            <SB T={T} title="OpenSubtitles API Key" desc="opensubtitles.com → account → Consumers → New Consumer.">
+                                <input type="password" value={lSettings.opensubtitles_api_key||''} onChange={e=>setLS(s=>({...s,opensubtitles_api_key:e.target.value}))} placeholder="API key" className="mono" style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'10px 14px',color:T.tx,fontSize:13}}/>
+                            </SB>
+                            <SB T={T} title="OpenSubtitles Username" desc="Your opensubtitles.com login (needed to download).">
+                                <input type="text" value={lSettings.opensubtitles_username||''} onChange={e=>setLS(s=>({...s,opensubtitles_username:e.target.value}))} placeholder="username" className="mono" style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'10px 14px',color:T.tx,fontSize:13}}/>
+                            </SB>
+                            <SB T={T} title="OpenSubtitles Password" desc="Stored to fetch a download token.">
+                                <input type="password" value={lSettings.opensubtitles_password||''} onChange={e=>setLS(s=>({...s,opensubtitles_password:e.target.value}))} placeholder="password" className="mono" style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'10px 14px',color:T.tx,fontSize:13}}/>
+                            </SB>
+                        </div>
+                    </div>
                     <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(300px,1fr))',gap:14}}>
                         <SB T={T} title="Translation Provider" desc="Pick any AI service. 'OpenAI-compatible' + Base URL covers local Ollama/LM Studio and OpenRouter/DeepSeek/etc.">
                             <select value={lSettings.translate_provider||'gemini'} onChange={e=>setLS(s=>({...s,translate_provider:e.target.value}))} style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'10px 14px',color:T.tx,fontSize:14}}>
