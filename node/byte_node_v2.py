@@ -158,7 +158,7 @@ except Exception:
 # ─── Self-update (v2.11) ─────────────────────────────────────────────────────
 # The node checks the same published manifest the web UI uses and can pull its
 # own new files from GitHub, then relaunch — matching the website's update flow.
-NODE_VERSION = "2.22"
+NODE_VERSION = "2.23"
 GITHUB_RAW = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main"
 VERSION_MANIFEST_URL = GITHUB_RAW + "/version.json"
 NODE_FILES = ["byte_node_v2.py", "byte_node_gui.py", "setup_tools.py",
@@ -3509,13 +3509,47 @@ class ByteNode:
                                  daemon=True, name=f"hc-{i}").start()
                 self.log(f"Health check worker #{i} started")
 
-        # Transcode workers — each polls /api/jobs/next independently
+        # Transcode workers — each polls /api/jobs/next independently.
+        # v2.23 — LIVE SCALING: thread count follows the transcode worker
+        # setting while running. A scaler loop re-reads settings every 30s;
+        # raising the count spawns threads immediately, lowering it makes the
+        # extra threads exit after their current job (never killing work).
+        self._tw_target = n_tw
+        self._tw_spawned = 0
         self.log(f"Starting {n_tw} transcode worker(s)...")
         for i in range(n_tw):
             threading.Thread(target=self._tw_worker_loop, args=(i,),
                              daemon=True, name=f"tw-{i}").start()
+            self._tw_spawned += 1
             self.log(f"Transcode worker #{i} started")
+        threading.Thread(target=self._worker_scaler_loop, daemon=True, name="scaler").start()
         return True
+
+    def _worker_scaler_loop(self):
+        """v2.23 — apply worker-count changes live (no node restart)."""
+        while self.running:
+            time.sleep(30)
+            try:
+                settings = self.api("GET", "/api/settings") or {}
+                settings.update(self._node_overrides(force=True))
+                try:
+                    target = max(1, int(settings.get("transcode_gpu_count", "1") or "1"))
+                except (TypeError, ValueError):
+                    continue
+                if target == self._tw_target:
+                    continue
+                old = self._tw_target
+                self._tw_target = target
+                if target > self._tw_spawned:
+                    for i in range(self._tw_spawned, target):
+                        threading.Thread(target=self._tw_worker_loop, args=(i,),
+                                         daemon=True, name=f"tw-{i}").start()
+                        self._tw_spawned += 1
+                    self.log(f"Worker count {old} → {target}: spawned {target - old} new worker(s)")
+                else:
+                    self.log(f"Worker count {old} → {target}: extra workers will stop after their current job")
+            except Exception:
+                pass
 
     def start_all_workers(self):
         """
@@ -3536,6 +3570,13 @@ class ByteNode:
         # Stagger initial poll so 4 workers don't hit the API at the exact same instant
         time.sleep(worker_idx * 0.5)
         while self.running:
+            # v2.23 — live scale-down: if the worker count was lowered below this
+            # thread's index, exit before claiming anything new.
+            if worker_idx >= getattr(self, "_tw_target", worker_idx + 1):
+                self.log(f"TW#{worker_idx}: stopping (worker count lowered)")
+                if self._tw_spawned > worker_idx:
+                    self._tw_spawned = worker_idx
+                return
             try:
                 r = self.api("POST", "/api/jobs/next", {"worker_id": self.worker_id}, timeout=90)
                 if r and r.get("job"):

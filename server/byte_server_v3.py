@@ -29,8 +29,8 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 from flask import Flask, request, jsonify, send_from_directory, Response, session, redirect
 
-SERVER_VERSION = "3.29"
-NODE_VERSION = "2.22"   # fallback only; the update bell uses each connected node's reported version
+SERVER_VERSION = "3.30"
+NODE_VERSION = "2.23"   # fallback only; the update bell uses each connected node's reported version
 # Where the update checker looks for the newest published versions.
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main/version.json"
 DEFAULT_PORT = 5800
@@ -382,11 +382,15 @@ def init_db():
             stuck = db.execute("UPDATE libraries SET status='idle' WHERE status='scanning'")
             if stuck.rowcount > 0:
                 log.warning(f"Reset {stuck.rowcount} stuck library scans on startup")
-            # Reset stuck processing jobs on startup (worker probably died)
-            stuck_jobs = db.execute("UPDATE queue SET status='error', error_message='Server restarted — job was interrupted' WHERE status='processing'")
-            if stuck_jobs.rowcount > 0:
-                log.warning(f"Reset {stuck_jobs.rowcount} stuck processing jobs on startup")
-            db.execute("UPDATE workers SET status='idle', current_job_id=NULL")
+            # v3.30 — a SERVER restart does NOT kill node jobs: the nodes keep
+            # transcoding right through it and report complete/error when done.
+            # The old behavior errored every processing job on each deploy, which
+            # made users re-queue everything after every update. Now leave them
+            # processing; the ghost-recovery loop reclaims any whose node really
+            # is gone (no heartbeat for 10 min).
+            inflight = db.execute("SELECT COUNT(*) AS c FROM queue WHERE status='processing'").fetchone()["c"]
+            if inflight:
+                log.info(f"Server restart: leaving {inflight} in-flight job(s) untouched (nodes keep working)")
     except Exception as e:
         log.error(f"Migration error: {e}")
 
@@ -3004,6 +3008,19 @@ def api_dashboard():
         saved = db.execute("SELECT COALESCE(SUM(file_size_gb-COALESCE(output_size_gb,file_size_gb)),0) as s FROM queue WHERE status='complete'").fetchone()
         processing = db.execute("SELECT * FROM queue WHERE status='processing' ORDER BY priority").fetchall()
         recent_complete = db.execute("SELECT * FROM queue WHERE status='complete' ORDER BY completed_at DESC LIMIT 10").fetchall()
+        # v3.30 — STAGED FILES (tdarr-style): the next `staged_limit` jobs in the
+        # exact order workers will claim them (tool priority rank, then queue
+        # priority). These are health-checked (or being checked) and on deck, so
+        # a freed worker starts one instantly. Bump-arrows change priority, which
+        # moves jobs in/out of this window naturally.
+        try:
+            _slim = max(0, int(get_setting("staged_limit") or "100"))
+        except (TypeError, ValueError):
+            _slim = 100
+        staged = db.execute(f"""SELECT id, file_name, file_size_gb, job_type, health_status,
+                status, priority, hdr_type, dovi_profile FROM queue
+            WHERE status IN ('queued','pending') AND health_status IN ('healthy','checking','pending')
+            ORDER BY {_tool_rank_case()} ASC, priority ASC, id ASC LIMIT ?""", (_slim,)).fetchall()
         # v3.28 SECURITY — /api/dashboard is public (no login); never leak secrets
         # here. Mask any key that looks like a credential; the authed /api/settings
         # still returns real values for the settings page.
@@ -3047,6 +3064,7 @@ def api_dashboard():
         "workers": [dict(w) for w in ws],
         "processing": [{**{k:v for k,v in dict(p).items() if k!="probe_data"},
                         "worker_name": wname.get(p["worker_id"], "—")} for p in processing],
+        "staged": [dict(s) for s in staged],
         "recent_complete": [{k:v for k,v in dict(c).items() if k!="probe_data"} for c in recent_complete],
         "saved_gb": saved["s"],
         "settings": settings,

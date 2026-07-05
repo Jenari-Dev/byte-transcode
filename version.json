@@ -1,7 +1,7 @@
 {
-  "server": "3.29",
-  "node": "2.22",
+  "server": "3.30",
+  "node": "2.23",
   "released": "2026-07-05",
-  "notes": "Disk-space: transcode/DV/compat jobs now check the temp drive up front and fail instantly with a clear 'not enough temp space' message instead of running 20 min then dying on 'No space left on device'. Restarting a node (e.g. after an update) now auto-releases its in-progress jobs instead of stranding them. Security: the public dashboard endpoint no longer exposes API keys/passwords. Node v2.21 + server v3.29.",
+  "notes": "Live worker scaling: changing worker counts now applies within ~30s, no node restart. Staged Files is now real tdarr-style staging — the next N health-checked jobs on deck, sized by the staged-limit box. New 'Replace originals' toggle in the Options bar (auto-accept only skips review). Node v2.23 also auto-spills temp to the roomiest drive when full. Server v3.30.",
   "update_docs": "https://github.com/Jenari-Dev/byte-transcode#updating"
 }

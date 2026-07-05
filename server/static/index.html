@@ -93,7 +93,7 @@ function Login({onAuth,setup}){
     return <div style={{minHeight:'100vh',background:T.bg,display:'flex',alignItems:'center',justifyContent:'center'}}>
         <div style={{background:T.sb,borderRadius:14,padding:'44px 40px',border:`1px solid ${T.bd}`,width:380,textAlign:'center'}}>
             <div style={{fontSize:36,fontWeight:800,color:T.ac,letterSpacing:'-1px',lineHeight:1,marginBottom:4}}>BYTE</div>
-            <div style={{fontSize:11,color:T.t2,letterSpacing:'3px',fontWeight:600,marginBottom:36}}>TRANSCODE v3.29</div>
+            <div style={{fontSize:11,color:T.t2,letterSpacing:'3px',fontWeight:600,marginBottom:36}}>TRANSCODE v3.30</div>
             {setup&&<div style={{fontSize:13,color:T.ac,marginBottom:16,padding:'10px 14px',background:`${T.ac}15`,borderRadius:8}}>First time — create your admin account</div>}
             {e&&<div style={{fontSize:13,color:T.er,marginBottom:14}}>{e}</div>}
             <input value={u} onChange={ev=>setU(ev.target.value)} placeholder="Username" style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'12px 16px',color:T.tx,fontSize:14,marginBottom:12}}/>
@@ -305,7 +305,7 @@ function App(){
         <nav style={{width:218,background:T.sb,borderRight:`1px solid ${T.bd}`,display:'flex',flexDirection:'column',position:'sticky',top:0,height:'100vh',flexShrink:0}}>
             <div style={{padding:'22px 18px',borderBottom:`1px solid ${T.bd}`}}>
                 <div style={{fontSize:24,fontWeight:800,color:T.ac,letterSpacing:'-0.5px',lineHeight:1}}>BYTE</div>
-                <div style={{fontSize:10,color:T.t2,letterSpacing:'2.5px',fontWeight:600,marginTop:4}}>TRANSCODE v3.29</div>
+                <div style={{fontSize:10,color:T.t2,letterSpacing:'2.5px',fontWeight:600,marginTop:4}}>TRANSCODE v3.30</div>
             </div>
             <div style={{padding:10,flex:1,overflowY:'auto'}}>
                 {/* Main */}
@@ -512,7 +512,7 @@ function App(){
                     </div>
                     <div style={{background:T.bg,borderRadius:8,padding:'10px 14px',border:`1px solid ${T.bd}`}}>
                         <div style={{fontSize:10,color:T.t2,fontWeight:600}}>VERSION</div>
-                        <div className="mono" style={{fontSize:15,fontWeight:700,color:T.t1,marginTop:2}}>3.29</div>
+                        <div className="mono" style={{fontSize:15,fontWeight:700,color:T.t1,marginTop:2}}>3.30</div>
                     </div>
                     <div style={{background:T.bg,borderRadius:8,padding:'10px 14px',border:`1px solid ${T.bd}`}}>
                         <div style={{fontSize:10,color:T.t2,fontWeight:600}}>STATUS</div>
@@ -725,17 +725,19 @@ function App(){
                     </div>
                 </div>
                 <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginBottom:16}}>
-                    {/* LEFT: Staged Files — Processing */}
+                    {/* LEFT: Staged Files — processing + the next N on deck (tdarr-style, v3.30) */}
                     {(()=>{
                         const myProc=(s.processing||[]).filter(p=>(p.job_type||'transcode')===qTypeT);
+                        const myStaged=(s.staged||[]).filter(p=>(p.job_type||'transcode')===qTypeT);
                         const myComplete=(s.recent_complete||[]).filter(c=>(c.job_type||'transcode')===qTypeT);
                         return <>
                     <div style={{background:T.card,borderRadius:10,border:`1px solid ${T.bd}`,overflow:'hidden'}}>
                         <div style={{padding:'10px 14px',borderBottom:`1px solid ${T.bd}`,display:'flex',alignItems:'center',gap:6}}>
                             <I n="zap" s={14} c={T.ac}/><span style={{fontSize:12,fontWeight:600,color:T.t3}}>Staged Files</span>
-                            <span className="mono" style={{marginLeft:'auto',fontSize:10,color:T.ac,fontWeight:700}}>{myProc.length}</span>
+                            <span style={{fontSize:9,color:T.t2}}>health-checked · next in line</span>
+                            <span className="mono" style={{marginLeft:'auto',fontSize:10,color:T.ac,fontWeight:700}}>{myProc.length} active · {myStaged.length} staged</span>
                         </div>
-                        <div style={{display:'grid',gridTemplateColumns:'70px 1fr 60px 70px 50px',gap:4,padding:'6px 12px',fontSize:9,fontWeight:600,color:T.t2,textTransform:'uppercase',borderBottom:`1px solid ${T.bd}`}}>
+                        <div style={{display:'grid',gridTemplateColumns:'70px 1fr 60px 82px 50px',gap:4,padding:'6px 12px',fontSize:9,fontWeight:600,color:T.t2,textTransform:'uppercase',borderBottom:`1px solid ${T.bd}`}}>
                             <span>Type</span><span>Original File</span><span>Size</span><span>Status</span><span></span>
                         </div>
                         <div style={{maxHeight:250,overflowY:'auto'}}>
@@ -743,14 +745,28 @@ function App(){
                                 const jt2=p.job_type||'transcode';
                                 const jtLbl={transcode:'Transcode',subgen:'AI Subtitle',remuxclean:'Cleanup',dv78only:'DV→P8',compatfix:'Compat'}[jt2]||jt2;
                                 const jtClr={transcode:T.ac,subgen:T.ok,remuxclean:T.in,dv78only:T.a2,compatfix:T.wn}[jt2]||T.ac;
-                                return <div key={p.id+'stg'} style={{display:'grid',gridTemplateColumns:'70px 1fr 60px 70px 50px',gap:4,padding:'8px 12px',alignItems:'center',borderBottom:`1px solid ${T.bd}`,fontSize:11}}>
+                                return <div key={p.id+'stg'} style={{display:'grid',gridTemplateColumns:'70px 1fr 60px 82px 50px',gap:4,padding:'8px 12px',alignItems:'center',borderBottom:`1px solid ${T.bd}`,fontSize:11}}>
                                 <span style={{color:jtClr,fontWeight:600,fontSize:10}}>{jtLbl}</span>
                                 <span style={{color:T.t1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{p.file_name}</span>
                                 <span className="mono" style={{color:T.t3,fontSize:10}}>{(p.file_size_gb||0).toFixed(1)} GB</span>
                                 <span style={{color:T.ac,fontWeight:500,fontSize:10}}>Processing</span>
                                 <button onClick={()=>doAct('/queue/'+p.id+'/cancel')} style={{background:T.er+'10',border:'none',borderRadius:4,padding:'3px',cursor:'pointer',color:T.er}}><I n="stop" s={12}/></button>
                             </div>;})}
-                            {myProc.length===0&&<div style={{padding:20,textAlign:'center',color:T.t2,fontSize:11}}>No active jobs</div>}
+                            {myStaged.map(p=>{
+                                const jt2=p.job_type||'transcode';
+                                const jtLbl={transcode:'Transcode',subgen:'AI Subtitle',remuxclean:'Cleanup',dv78only:'DV→P8',compatfix:'Compat'}[jt2]||jt2;
+                                const jtClr={transcode:T.ac,subgen:T.ok,remuxclean:T.in,dv78only:T.a2,compatfix:T.wn}[jt2]||T.ac;
+                                const hc=p.health_status;
+                                const stLbl=hc==='healthy'?'Ready':(hc==='checking'?'Health check…':'Waiting check');
+                                const stClr=hc==='healthy'?T.ok:T.wn;
+                                return <div key={p.id+'stgq'} style={{display:'grid',gridTemplateColumns:'70px 1fr 60px 82px 50px',gap:4,padding:'8px 12px',alignItems:'center',borderBottom:`1px solid ${T.bd}`,fontSize:11,opacity:0.85}}>
+                                <span style={{color:jtClr,fontWeight:600,fontSize:10}}>{jtLbl}</span>
+                                <span style={{color:T.t3,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{p.file_name}</span>
+                                <span className="mono" style={{color:T.t3,fontSize:10}}>{(p.file_size_gb||0).toFixed(1)} GB</span>
+                                <span style={{color:stClr,fontWeight:500,fontSize:10}}>{stLbl}</span>
+                                <button title="Send back to queue (deprioritize)" onClick={()=>doAct('/queue/'+p.id+'/bump',{direction:'down'})} style={{background:'none',border:'none',borderRadius:4,padding:'3px',cursor:'pointer',color:T.t2}}><I n="down" s={12}/></button>
+                            </div>;})}
+                            {myProc.length===0&&myStaged.length===0&&<div style={{padding:20,textAlign:'center',color:T.t2,fontSize:11}}>No active or staged jobs</div>}
                         </div>
                     </div>
                     {/* RIGHT: Recently Completed */}
@@ -790,8 +806,11 @@ function App(){
                         <input className="mono" type="number" min={0} max={500} value={lSettings?.staged_limit||'100'} onChange={e=>{setLS(s=>({...s,staged_limit:e.target.value}));put('/settings',{staged_limit:e.target.value})}} style={{width:55,background:T.bg,border:`1px solid ${T.bd}`,borderRadius:4,padding:'4px 8px',color:(lSettings?.staged_limit||'100')==='0'?T.er:T.ac,fontSize:12,fontWeight:700,outline:'none',textAlign:'center'}}/>
                         {(lSettings?.staged_limit||'100')==='0'&&<span style={{color:T.er,fontWeight:600,fontSize:10}}>PAUSED</span>}
                     </div>
-                    <label style={{display:'flex',alignItems:'center',gap:8,cursor:'pointer',color:T.t3}}>
-                        <input type="checkbox" checked={(lSettings?.auto_accept||'false')==='true'} onChange={e=>{const v=e.target.checked?'true':'false';setLS(s=>({...s,auto_accept:v}));put('/settings',{auto_accept:v})}} style={{accentColor:T.ac}}/> Auto accept transcodes
+                    <label title="Mark completed jobs accepted without manual review (does NOT touch your files)" style={{display:'flex',alignItems:'center',gap:8,cursor:'pointer',color:T.t3}}>
+                        <input type="checkbox" checked={(lSettings?.auto_accept||'false')==='true'} onChange={e=>{const v=e.target.checked?'true':'false';setLS(s=>({...s,auto_accept:v}));put('/settings',{auto_accept:v})}} style={{accentColor:T.ac}}/> Auto accept (skip review)
+                    </label>
+                    <label title="After a job completes + passes safety checks, the new file REPLACES the original in your library and its temp files are cleaned up. Off = outputs stay in the node's temp folder." style={{display:'flex',alignItems:'center',gap:8,cursor:'pointer',color:T.t3}}>
+                        <input type="checkbox" checked={(lSettings?.replace_original||'false')==='true'} onChange={e=>{const v=e.target.checked?'true':'false';setLS(s=>({...s,replace_original:v}));put('/settings',{replace_original:v});toast(v==='true'?'Completed files will replace originals':'Outputs will be kept in temp (originals untouched)','info')}} style={{accentColor:T.ok}}/> Replace originals
                     </label>
                     <label style={{display:'flex',alignItems:'center',gap:8,cursor:'pointer',color:T.t3}}>
                         <input type="checkbox" checked={showPaths} onChange={e=>setShowPaths(e.target.checked)} style={{accentColor:T.ac}}/> Show full paths
