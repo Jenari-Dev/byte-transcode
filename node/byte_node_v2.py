@@ -158,7 +158,7 @@ except Exception:
 # ─── Self-update (v2.11) ─────────────────────────────────────────────────────
 # The node checks the same published manifest the web UI uses and can pull its
 # own new files from GitHub, then relaunch — matching the website's update flow.
-NODE_VERSION = "2.28"
+NODE_VERSION = "2.29"
 GITHUB_RAW = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main"
 VERSION_MANIFEST_URL = GITHUB_RAW + "/version.json"
 NODE_FILES = ["byte_node_v2.py", "byte_node_gui.py", "setup_tools.py",
@@ -320,10 +320,17 @@ class ByteNode:
         return name
 
     def _free(self, path):
-        try:
-            return shutil.disk_usage(path).free
-        except Exception:
-            return 0
+        # v2.29 — timeout-guarded. shutil.disk_usage on a hung/flaky drive can
+        # block indefinitely, which froze temp pre-flight before Step 1. Cap it
+        # at 6s; a non-responsive drive reads as 0 free (→ spill to another drive
+        # or a clean 'no space' error — never a hang).
+        box = {}
+        def probe():
+            try: box["v"] = shutil.disk_usage(path).free
+            except Exception: box["v"] = 0
+        t = threading.Thread(target=probe, daemon=True)
+        t.start(); t.join(6.0)
+        return box.get("v", 0)
 
     def _list_temp_drives(self):
         """Fixed local drives usable for temp, as base mount paths (Windows 'D:\\').
@@ -410,8 +417,24 @@ class ByteNode:
             base = "C:\\Byte_Engine_temp" if os.name == "nt" else "/tmp/byte_work"
         base = self._best_temp_base(base, need_bytes, job_id)
         work_dir = os.path.join(base, f"job_{job_id}")
-        os.makedirs(work_dir, exist_ok=True)
-        return work_dir
+        # v2.29 — timeout-guarded makedirs. On a flaky disk or a bad temp path
+        # this call could hang forever, freezing the worker at 'Starting...'
+        # before Step 1 (the 3060's intermittent wedge). Cap it at 15s; on
+        # timeout raise so the job errors cleanly and the thread frees instead
+        # of black-holing. process_job catches this and reports it.
+        box = {}
+        def mk():
+            try: os.makedirs(work_dir, exist_ok=True); box["ok"] = True
+            except Exception as e: box["err"] = e
+        t = threading.Thread(target=mk, daemon=True)
+        t.start(); t.join(15.0)
+        if box.get("ok"):
+            return work_dir
+        if "err" in box:
+            raise box["err"]
+        raise RuntimeError(f"Temp folder creation timed out (>15s) at {work_dir} — "
+                           f"this node's temp drive is unresponsive; point node_temp_path "
+                           f"at a healthy local drive with free space")
 
     def _sweep_stale_temp(self, settings):
         """v2.22 — on startup, delete leftover job_* temp dirs from previous runs
@@ -3403,46 +3426,55 @@ class ByteNode:
         success, error, result, work_dir = False, None, None, None
 
         # ── Dispatch ────────────────────────────────────────────────────────
-        if job_type == "remuxclean":
-            self.send_log(job_id, f"  Pipeline: RemuxClean (track filter + name cleanup)")
-            success, error, result, work_dir = self.remux_clean(job, settings)
-        elif job_type == "dv78only":
-            self.send_log(job_id, f"  Pipeline: DV Profile → 8 (no re-encode)")
-            success, error, result, work_dir = self.dv78only_convert(job, settings)
-        elif job_type == "compatfix":
-            self.send_log(job_id, f"  Pipeline: Compatibility fix (device-safe convert)")
-            success, error, result, work_dir = self.compat_fix(job, settings)
-        elif job_type == "subgen":
-            self.send_log(job_id, f"  Pipeline: SubGen (Whisper + Claude → Japanese SRT)")
-            success, error, result, work_dir = self.subgen(job, settings)
-        else:
-            # Default: 'transcode' (full DoVi/standard NVENC pipeline)
-            self.send_log(job_id, f"  HDR: {job.get('hdr_type', 'SDR')}")
-            self.send_log(job_id, f"  Codec: {video_codec}")
-            self.send_log(job_id, f"  DoVi: {bool(has_dovi)} (Profile {job.get('dovi_profile', 'N/A')})")
-            self.send_log(job_id, f"  CQ: {settings.get('cq', '18')}, Preset: {settings.get('preset', 'slow')}")
-
-            # Pre-flight probe: verify codec before choosing transcode pipeline
-            self.send_log(job_id, f"  Pre-flight: Probing source file...")
-            probe = self.probe_file(filepath, job_id)
-            if probe:
-                streams = probe.get("streams", [])
-                vid = next((s for s in streams if s.get("codec_type") == "video"), None)
-                if vid:
-                    actual_codec = vid.get("codec_name", "")
-                    self.send_log(job_id, f"  Detected codec: {actual_codec}")
-                    if has_dovi and actual_codec != "hevc":
-                        self.send_log(job_id,
-                            f"  [WARN] DoVi flagged but codec is {actual_codec}, not HEVC — "
-                            f"using standard pipeline")
-                        has_dovi = 0
-                else:
-                    self.send_log(job_id, f"  [WARN] No video stream found in probe — proceeding anyway")
-
-            if has_dovi:
-                success, error, result, work_dir = self.transcode_dovi(job, settings)
+        # v2.29 — wrapped so ANY unhandled pipeline exception (e.g. temp-folder
+        # creation timing out on a flaky disk, v2.29 raises RuntimeError) errors
+        # the job cleanly and frees this worker, instead of bubbling up and
+        # leaving the job stuck 'processing' at 'Starting...' until requeued.
+        try:
+            if job_type == "remuxclean":
+                self.send_log(job_id, f"  Pipeline: RemuxClean (track filter + name cleanup)")
+                success, error, result, work_dir = self.remux_clean(job, settings)
+            elif job_type == "dv78only":
+                self.send_log(job_id, f"  Pipeline: DV Profile → 8 (no re-encode)")
+                success, error, result, work_dir = self.dv78only_convert(job, settings)
+            elif job_type == "compatfix":
+                self.send_log(job_id, f"  Pipeline: Compatibility fix (device-safe convert)")
+                success, error, result, work_dir = self.compat_fix(job, settings)
+            elif job_type == "subgen":
+                self.send_log(job_id, f"  Pipeline: SubGen (Whisper + Claude → Japanese SRT)")
+                success, error, result, work_dir = self.subgen(job, settings)
             else:
-                success, error, result, work_dir = self.transcode_standard(job, settings)
+                # Default: 'transcode' (full DoVi/standard NVENC pipeline)
+                self.send_log(job_id, f"  HDR: {job.get('hdr_type', 'SDR')}")
+                self.send_log(job_id, f"  Codec: {video_codec}")
+                self.send_log(job_id, f"  DoVi: {bool(has_dovi)} (Profile {job.get('dovi_profile', 'N/A')})")
+                self.send_log(job_id, f"  CQ: {settings.get('cq', '18')}, Preset: {settings.get('preset', 'slow')}")
+
+                # Pre-flight probe: verify codec before choosing transcode pipeline
+                self.send_log(job_id, f"  Pre-flight: Probing source file...")
+                probe = self.probe_file(filepath, job_id)
+                if probe:
+                    streams = probe.get("streams", [])
+                    vid = next((s for s in streams if s.get("codec_type") == "video"), None)
+                    if vid:
+                        actual_codec = vid.get("codec_name", "")
+                        self.send_log(job_id, f"  Detected codec: {actual_codec}")
+                        if has_dovi and actual_codec != "hevc":
+                            self.send_log(job_id,
+                                f"  [WARN] DoVi flagged but codec is {actual_codec}, not HEVC — "
+                                f"using standard pipeline")
+                            has_dovi = 0
+                    else:
+                        self.send_log(job_id, f"  [WARN] No video stream found in probe — proceeding anyway")
+
+                if has_dovi:
+                    success, error, result, work_dir = self.transcode_dovi(job, settings)
+                else:
+                    success, error, result, work_dir = self.transcode_standard(job, settings)
+        except Exception as e:
+            self.log(f"Job #{job_id} pipeline error: {e}", "ERROR")
+            self.send_log(job_id, f"[ERROR] {str(e)[:300]}")
+            success, error, result = False, f"Node pipeline error: {str(e)[:200]}", None
 
         elapsed = time.time() - start_time
         elapsed_str = f"{int(elapsed/60)}m {int(elapsed%60)}s"

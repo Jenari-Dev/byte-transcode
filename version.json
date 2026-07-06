@@ -1,7 +1,7 @@
 {
   "server": "3.36",
-  "node": "2.28",
+  "node": "2.29",
   "released": "2026-07-06",
-  "notes": "Fixes the real 3060 wedge + timezone + job cap. TIMEZONE: docker-compose was set to TZ=UTC, so every stored timestamp was 9h behind — now TZ=JST-9 (UTC+9, no tzdata needed). JOB CAP: the fleet cap only counted each node's GPU workers, so total was stuck at the sum of GPU counts and the new CPU workers could never claim a job — now it counts GPU+CPU per node. 3060 WEDGE: node 2.28 hardens temp-drive enumeration — the spill path (used when the temp drive is low on space) called psutil.disk_partitions(), which hangs forever on Windows when a dead network drive exists, wedging the worker before Step 1 with no timeout; now it uses GetDriveTypeW (fixed drives only, never touches the network). Server also requeues never-started (0% for 6+ min) jobs faster. NOTE: the 3060 wedges because its temp drive C:\\Byte_temp is low on space (triggering the spill); pointing its temp at a roomier drive avoids it even before updating.",
+  "notes": "Node 2.29 makes the temp-folder pre-flight bulletproof. Proven cause of the 3060's intermittent freeze: on its flaky disk, os.makedirs() (temp folder) and shutil.disk_usage() (free-space check) could block forever before Step 1, wedging a worker at 'Starting...'. Both are now timeout-guarded (makedirs 15s, disk_usage 6s), and the whole pipeline dispatch is wrapped so a timeout errors the job cleanly and frees the thread instead of black-holing — the job requeues and retries (on this node or the other) instead of sitting stuck forever. The 3060 already processes fine once past this step (its GPU reads 0% only because nvidia-smi utilization.gpu doesn't reflect the NVENC engine; jobs advance at the same rate as the 5080). Update BOTH nodes to 2.29.",
   "update_docs": "https://github.com/Jenari-Dev/byte-transcode#updating"
 }
