@@ -1,7 +1,7 @@
 {
   "server": "3.37",
-  "node": "2.31",
+  "node": "2.32",
   "released": "2026-07-06",
-  "notes": "3.37 (server/UI only, no node update): the node card's ACTIVE/IDLE badge now reflects whether the node actually has jobs running. A node runs several worker threads sharing one ID, but the server tracks only one 'current job' per node — so when that one finished the card wrongly showed IDLE while other threads were still encoding. The badge now shows ACTIVE if the node is online and has any processing jobs. Node 2.31 unchanged. Reminder from earlier releases: keep every node on the SAME known-good ffmpeg build (a broken nightly libplacebo fails DV Profile-5 jobs); set TZ in docker-compose; node temp dir must be a real local drive on that machine.",
-  "update_docs": "https://github.com/Jenari-Dev/byte-transcode#running-multiple-nodes"
+  "notes": "Node 2.32 makes live worker-count scaling reliable. The scaler used to track a counter to decide how many threads to add; after rapid up/down changes plus node restarts that counter drifted and left the node under-threaded (e.g. running 1 worker while set to 4) until a manual restart. It now counts the actual LIVE worker threads each pass and spawns whichever are missing, so the node always converges to the configured count on its own — no more restarts needed to apply a worker-count change. Update both nodes and restart once to pick it up. (The Health-check CPU/GPU steppers are server-side file-check controls and don't affect transcode throughput; the Nodes Overview table shows the GLOBAL default, while the per-node value on the worker card is your override.)",
+  "update_docs": "https://github.com/Jenari-Dev/byte-transcode#worker-counts--multiple-nodes"
 }

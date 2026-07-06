@@ -158,7 +158,7 @@ except Exception:
 # ─── Self-update (v2.11) ─────────────────────────────────────────────────────
 # The node checks the same published manifest the web UI uses and can pull its
 # own new files from GitHub, then relaunch — matching the website's update flow.
-NODE_VERSION = "2.31"
+NODE_VERSION = "2.32"
 GITHUB_RAW = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main"
 VERSION_MANIFEST_URL = GITHUB_RAW + "/version.json"
 NODE_FILES = ["byte_node_v2.py", "byte_node_gui.py", "setup_tools.py",
@@ -3800,25 +3800,38 @@ class ByteNode:
                 pass
 
     def _worker_scaler_loop(self):
-        """v2.23 — apply worker-count changes live (no node restart)."""
+        """v2.32 — apply worker-count changes live, ROBUSTLY. The old version
+        tracked a single _tw_spawned counter to decide how many threads to add;
+        after rapid up/down changes + node restarts that counter drifted (it
+        could think 4 workers exist when only 1 does), leaving the node
+        permanently under-threaded until a manual restart. Now: each pass we
+        count the LIVE transcode worker threads by name and spawn whichever
+        indices below the target are actually missing. Threads whose index is
+        >= target drain themselves (see _tw_worker_loop). This self-corrects
+        from any drift — the node always converges to exactly `target` workers."""
         while self.running:
-            time.sleep(30)
+            time.sleep(20)
             try:
                 settings = self.api("GET", "/api/settings") or {}
                 settings.update(self._node_overrides(force=True))
                 target = self._tw_count(settings)
-                if target == self._tw_target:
-                    continue
-                old = self._tw_target
                 self._tw_target = target
-                if target > self._tw_spawned:
-                    for i in range(self._tw_spawned, target):
+                live = set()
+                for t in threading.enumerate():
+                    if t.name.startswith("tw-") and t.is_alive():
+                        idx = t.name[3:]
+                        if idx.isdigit():
+                            live.add(int(idx))
+                spawned = 0
+                for i in range(target):
+                    if i not in live:
                         threading.Thread(target=self._tw_worker_loop, args=(i,),
                                          daemon=True, name=f"tw-{i}").start()
-                        self._tw_spawned += 1
-                    self.log(f"Worker count {old} → {target}: spawned {target - old} new worker(s)")
-                else:
-                    self.log(f"Worker count {old} → {target}: extra workers will stop after their current job")
+                        spawned += 1
+                if spawned:
+                    self._tw_spawned = max(getattr(self, "_tw_spawned", 0), target)
+                    self.log(f"Scaler: target {target} workers — spawned {spawned} that were missing "
+                             f"(had {len(live)} live)")
             except Exception:
                 pass
 
