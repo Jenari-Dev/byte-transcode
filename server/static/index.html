@@ -93,7 +93,7 @@ function Login({onAuth,setup}){
     return <div style={{minHeight:'100vh',background:T.bg,display:'flex',alignItems:'center',justifyContent:'center'}}>
         <div style={{background:T.sb,borderRadius:14,padding:'44px 40px',border:`1px solid ${T.bd}`,width:380,textAlign:'center'}}>
             <div style={{fontSize:36,fontWeight:800,color:T.ac,letterSpacing:'-1px',lineHeight:1,marginBottom:4}}>BYTE</div>
-            <div style={{fontSize:11,color:T.t2,letterSpacing:'3px',fontWeight:600,marginBottom:36}}>TRANSCODE v3.34</div>
+            <div style={{fontSize:11,color:T.t2,letterSpacing:'3px',fontWeight:600,marginBottom:36}}>TRANSCODE v3.35</div>
             {setup&&<div style={{fontSize:13,color:T.ac,marginBottom:16,padding:'10px 14px',background:`${T.ac}15`,borderRadius:8}}>First time — create your admin account</div>}
             {e&&<div style={{fontSize:13,color:T.er,marginBottom:14}}>{e}</div>}
             <input value={u} onChange={ev=>setU(ev.target.value)} placeholder="Username" style={{width:'100%',background:'rgba(255,255,255,0.05)',border:`1px solid ${T.bd}`,borderRadius:8,padding:'12px 16px',color:T.tx,fontSize:14,marginBottom:12}}/>
@@ -312,7 +312,7 @@ function App(){
         <nav style={{width:218,background:T.sb,borderRight:`1px solid ${T.bd}`,display:'flex',flexDirection:'column',position:'sticky',top:0,height:'100vh',flexShrink:0}}>
             <div style={{padding:'22px 18px',borderBottom:`1px solid ${T.bd}`}}>
                 <div style={{fontSize:24,fontWeight:800,color:T.ac,letterSpacing:'-0.5px',lineHeight:1}}>BYTE</div>
-                <div style={{fontSize:10,color:T.t2,letterSpacing:'2.5px',fontWeight:600,marginTop:4}}>TRANSCODE v3.34</div>
+                <div style={{fontSize:10,color:T.t2,letterSpacing:'2.5px',fontWeight:600,marginTop:4}}>TRANSCODE v3.35</div>
             </div>
             <div style={{padding:10,flex:1,overflowY:'auto'}}>
                 {/* Main */}
@@ -520,7 +520,7 @@ function App(){
                     </div>
                     <div style={{background:T.bg,borderRadius:8,padding:'10px 14px',border:`1px solid ${T.bd}`}}>
                         <div style={{fontSize:10,color:T.t2,fontWeight:600}}>VERSION</div>
-                        <div className="mono" style={{fontSize:15,fontWeight:700,color:T.t1,marginTop:2}}>3.34</div>
+                        <div className="mono" style={{fontSize:15,fontWeight:700,color:T.t1,marginTop:2}}>3.35</div>
                     </div>
                     <div style={{background:T.bg,borderRadius:8,padding:'10px 14px',border:`1px solid ${T.bd}`}}>
                         <div style={{fontSize:10,color:T.t2,fontWeight:600}}>STATUS</div>
@@ -636,12 +636,21 @@ function App(){
                                     <div style={{fontSize:9,color:T.t2,marginBottom:8}}>{type==='transcode'?'Concurrent jobs on this node':'Parallel file checks on the server (CPU/ffprobe — CPU+GPU are summed)'}</div>
                                     <div style={{display:'flex',gap:16}}>
                                         {[['CPU','cpu'],['GPU','gpu']].map(([wl,wt])=>{
-                                            const key=type+'_'+wt+'_count';const val=parseInt(lSettings?.[key])||( wt==='gpu'?1:0);
+                                            // v3.35 — PER-NODE. These steppers used to write the GLOBAL
+                                            // setting, so changing one node's count changed every node.
+                                            // Now each stepper reads this node's override (nodeCfg),
+                                            // falling back to the global default, and saves to THIS
+                                            // node's config only. The POST replaces the whole config,
+                                            // so send the merged object (blanks stripped).
+                                            const key=type+'_'+wt+'_count';
+                                            const hasOv=nodeCfg&&nodeCfg[key]!=null&&String(nodeCfg[key]).trim()!=='';
+                                            const val=parseInt(hasOv?nodeCfg[key]:lSettings?.[key])||(wt==='gpu'?1:0);
+                                            const save=nv=>{const nc={...(nodeCfg||{}),[key]:String(nv)};setNodeCfg(nc);post('/workers/'+w.id+'/config',Object.fromEntries(Object.entries(nc).filter(([k,v])=>String(v).trim()!=='')));};
                                             return <div key={wt} style={{display:'flex',alignItems:'center',gap:5}}>
                                                 <span style={{fontSize:10,color:T.t2,minWidth:28}}>{wl}:</span>
-                                                <button onClick={e=>{e.stopPropagation();const nv=Math.max(0,val-1);setLS(s=>({...s,[key]:String(nv)}));put('/settings',{[key]:String(nv)});}} style={{width:22,height:22,borderRadius:4,border:`1px solid ${T.bd}`,background:T.card,color:T.t3,cursor:'pointer',fontSize:13,display:'flex',alignItems:'center',justifyContent:'center'}}>−</button>
-                                                <span className="mono" style={{fontSize:14,fontWeight:700,color:val>0?T.ac:T.t1,minWidth:18,textAlign:'center'}}>{val}</span>
-                                                <button onClick={e=>{e.stopPropagation();const nv=val+1;setLS(s=>({...s,[key]:String(nv)}));put('/settings',{[key]:String(nv)});}} style={{width:22,height:22,borderRadius:4,border:`1px solid ${T.bd}`,background:T.card,color:T.t3,cursor:'pointer',fontSize:13,display:'flex',alignItems:'center',justifyContent:'center'}}>+</button>
+                                                <button onClick={e=>{e.stopPropagation();save(Math.max(0,val-1));}} style={{width:22,height:22,borderRadius:4,border:`1px solid ${T.bd}`,background:T.card,color:T.t3,cursor:'pointer',fontSize:13,display:'flex',alignItems:'center',justifyContent:'center'}}>−</button>
+                                                <span className="mono" style={{fontSize:14,fontWeight:700,color:hasOv?T.ac:T.t1,minWidth:18,textAlign:'center'}} title={hasOv?'Per-node override':'Using global default (click to override for this node)'}>{val}</span>
+                                                <button onClick={e=>{e.stopPropagation();save(val+1);}} style={{width:22,height:22,borderRadius:4,border:`1px solid ${T.bd}`,background:T.card,color:T.t3,cursor:'pointer',fontSize:13,display:'flex',alignItems:'center',justifyContent:'center'}}>+</button>
                                             </div>;})}
                                     </div>
                                 </div>)}
@@ -655,9 +664,7 @@ function App(){
                             <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'8px 16px'}}>
                                 {[['Temp directory','node_temp_path','e.g. C:\\Byte_temp'],
                                   ['Remote path prefix','node_path_remote_prefix','e.g. /media/'],
-                                  ['Local path prefix','node_path_local_prefix','e.g. Z:\\'],
-                                  ['Transcode workers','transcode_gpu_count','e.g. 1'],
-                                  ['Health check workers','healthcheck_gpu_count','e.g. 0']].map(([label,key,ph])=>
+                                  ['Local path prefix','node_path_local_prefix','e.g. Z:\\']].map(([label,key,ph])=>
                                     <div key={key}>
                                         <div style={{fontSize:10,color:T.t2,fontWeight:600,marginBottom:3,textTransform:'uppercase'}}>{label}</div>
                                         <input className="mono" value={nodeCfg[key]||''} placeholder={ph} onClick={e=>e.stopPropagation()} onChange={e=>setNodeCfg(c=>({...c,[key]:e.target.value}))} style={{width:'100%',background:T.card,border:`1px solid ${T.bd}`,borderRadius:5,padding:'6px 10px',color:T.tx,fontSize:12,outline:'none'}}/>

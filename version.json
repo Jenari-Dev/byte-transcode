@@ -1,7 +1,7 @@
 {
-  "server": "3.34",
+  "server": "3.35",
   "node": "2.27",
   "released": "2026-07-06",
-  "notes": "One consolidated node update (2.27) + live server/UI update (3.34). Node 2.27: the Transcode CPU box now works — transcode workers = GPU + CPU counts summed (4+4 = 8 concurrent jobs/node), matching how health-check already sums them; ETA no longer goes blank on the non-encode steps (wall-clock fallback counts down to 100%); drive re-map is now error-85/1219-proof (clears the letter AND any deviceless session, authenticates deviceless, retries). Also carries 2.26's 10s timeout on the source-size stat that used to black-hole a worker at 0%. Server/UI 3.34: Decline button in Completed (keep original, discard new file — node's temp sweep reclaims it); a job's stale logs are wiped when it starts a fresh run; log timestamps show the date; per-job log Live toggle; queue rows show the relevant time (start/finish) instead of the original queued time.",
+  "notes": "3.35 (live server/UI, no node update needed): fixes the per-node worker steppers — the CPU/GPU +/- controls on each node card used to write the GLOBAL setting, so changing one node's counts changed every node. They're now per-node: each stepper reads that node's override (falling back to the global default) and saves to that node's config only. Blue value = per-node override active. Removed the redundant worker-count text fields from Per-Node Overrides. Node 2.27 unchanged (Transcode CPU box works via GPU+CPU sum, ETA wall-clock fallback, error-85-proof remap, 10s source-stat timeout).",
   "update_docs": "https://github.com/Jenari-Dev/byte-transcode#updating"
 }
