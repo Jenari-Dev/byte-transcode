@@ -158,7 +158,7 @@ except Exception:
 # ─── Self-update (v2.11) ─────────────────────────────────────────────────────
 # The node checks the same published manifest the web UI uses and can pull its
 # own new files from GitHub, then relaunch — matching the website's update flow.
-NODE_VERSION = "2.30"
+NODE_VERSION = "2.31"
 GITHUB_RAW = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main"
 VERSION_MANIFEST_URL = GITHUB_RAW + "/version.json"
 NODE_FILES = ["byte_node_v2.py", "byte_node_gui.py", "setup_tools.py",
@@ -1984,7 +1984,7 @@ class ByteNode:
             vf = ("libplacebo=apply_dolbyvision=true:tonemapping=clip:"
                   "colorspace=bt2020nc:color_primaries=bt2020:color_trc=smpte2084:"
                   "format=p010,hwdownload,format=p010le")
-            ok, err = self.run_cmd([
+            reenc_cmd = [
                 self.ffmpeg, "-y", "-init_hw_device", "vulkan",
                 "-i", filepath, "-map", "0:v:0", "-vf", vf,
                 "-c:v", "hevc_nvenc", "-preset", preset, "-cq", str(cq),
@@ -1992,10 +1992,28 @@ class ByteNode:
                 "-color_primaries", "bt2020", "-color_trc", "smpte2084",
                 "-colorspace", "bt2020nc",
                 "-f", "hevc", pq_hevc
-            ], "DV5→HDR10 Re-encode", job_id, parse_progress=True,
-               input_size_gb=file_size_gb, total_duration_sec=duration_sec)
+            ]
+            # v2.31 — retry the NVENC re-encode up to 3x. On some GPUs (notably
+            # the RTX 3060) opening NVENC alongside the Vulkan tone-map device
+            # fails INTERMITTENTLY ("Error while opening encoder — maybe
+            # incorrect parameters"), even at 1 concurrent job. It almost always
+            # succeeds on a retry, so an occasional open-failure no longer errors
+            # the whole job. A genuinely bad file still fails after 3 tries.
+            ok, err = False, ""
+            for attempt in range(1, 4):
+                if self.cancelled:
+                    return False, "Cancelled by user", None, work_dir
+                ok, err = self.run_cmd(reenc_cmd, "DV5→HDR10 Re-encode", job_id,
+                    parse_progress=True, input_size_gb=file_size_gb,
+                    total_duration_sec=duration_sec)
+                if ok:
+                    break
+                if attempt < 3:
+                    self.send_log(job_id, f"  [retry] NVENC re-encode attempt {attempt}/3 failed "
+                                          f"(likely transient encoder-open) — retrying in 5s")
+                    time.sleep(5)
             if not ok:
-                return False, f"Base layer re-encode failed: {err[:200]}", None, work_dir
+                return False, f"Base layer re-encode failed after 3 attempts: {err[:200]}", None, work_dir
             if not os.path.exists(pq_hevc) or os.path.getsize(pq_hevc) < 1024:
                 return False, "Base layer re-encode produced empty output", None, work_dir
 

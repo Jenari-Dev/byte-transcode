@@ -1,7 +1,7 @@
 {
   "server": "3.36",
-  "node": "2.30",
+  "node": "2.31",
   "released": "2026-07-06",
-  "notes": "Node 2.30 adds an orphaned-process reaper. On Windows a node restart/kill leaves its ffmpeg children running (they don't die with the parent), so they pile up and lag the PC. Now: on startup the node kills every leftover Byte tool process (ffmpeg/dovi_tool/mkv*) from the previous instance, and a reaper runs every 60s to kill any Byte tool process not owned by an active job — active encodes are tracked by PID and never touched, and a just-spawned step is spared by a 45s grace. It only ever targets this node's own tool binaries, never unrelated ffmpeg. Updating the node (which restarts it) clears the current orphan pile-up immediately. Carries 2.29's temp-prep timeout guards.",
+  "notes": "Node 2.31 retries the DV5→HDR10 NVENC re-encode up to 3x. On some GPUs (notably the RTX 3060) opening NVENC alongside the Vulkan tone-map device fails intermittently ('Error while opening encoder'), even at 1 concurrent job — a retry almost always succeeds, so an occasional open-failure no longer errors the whole job (a genuinely bad file still fails after 3 tries, with a 5s backoff between attempts). Carries 2.30's orphan reaper and 2.29's temp-prep timeout guards. The 5080 is unaffected (it never hit the open-failure); this makes the 3060 reliable for DV→P8 too.",
   "update_docs": "https://github.com/Jenari-Dev/byte-transcode#updating"
 }
