@@ -2,6 +2,6 @@
   "server": "3.36",
   "node": "2.31",
   "released": "2026-07-06",
-  "notes": "Node 2.31 retries the DV5→HDR10 NVENC re-encode up to 3x. On some GPUs (notably the RTX 3060) opening NVENC alongside the Vulkan tone-map device fails intermittently ('Error while opening encoder'), even at 1 concurrent job — a retry almost always succeeds, so an occasional open-failure no longer errors the whole job (a genuinely bad file still fails after 3 tries, with a 5s backoff between attempts). Carries 2.30's orphan reaper and 2.29's temp-prep timeout guards. The 5080 is unaffected (it never hit the open-failure); this makes the 3060 reliable for DV→P8 too.",
-  "update_docs": "https://github.com/Jenari-Dev/byte-transcode#updating"
+  "notes": "Node 2.31 adds a small resilience retry (re-encode retried up to 3x on transient failure) plus 2.30's orphaned-ffmpeg reaper and 2.29's temp-prep timeout guards. IMPORTANT operational note: if DV Profile-5 (DV → P8) jobs fail on one node but work on another, it's almost always a BROKEN ffmpeg build on the failing node — some bleeding-edge nightly ffmpeg builds ship a libplacebo (Vulkan) filter that won't initialize ('Error initializing filters'), and the P5 pipeline needs it. Keep every node on the SAME known-good ffmpeg build; copy the working node's tools\\ffmpeg.exe + ffprobe.exe to the failing one. See the README 'Running multiple nodes' + Troubleshooting sections. Server 3.36 carries the timezone fix (set TZ in docker-compose), per-node worker steppers (3.35), and the GPU+CPU worker-count cap.",
+  "update_docs": "https://github.com/Jenari-Dev/byte-transcode#running-multiple-nodes"
 }

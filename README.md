@@ -396,6 +396,26 @@ afterward if the release added new tools, then restart the node.
 | Health check timeouts | Normal during library scans on large libraries. Jobs will retry automatically |
 | Only 1 worker active despite setting 4 | Restart the node GUI — worker counts are read at startup only |
 | Staged file limit shows 0 | Set it to 10+ in the Dashboard Options section. 0 pauses all processing |
+| **DV → P8 (Profile 5) jobs fail instantly** — job errors at the re-encode step, dashboard shows a truncated/metadata error | Almost always a **broken ffmpeg build on that node**: some bleeding-edge nightly ffmpeg builds ship a `libplacebo` filter that won't initialize, and the P5 pipeline needs libplacebo (Vulkan) for DV tone-mapping. Diagnose by running the re-encode command manually on that machine — if even `-vf libplacebo` (no options) prints **`Error initializing filters` / `Invalid argument`**, the build is the culprit, not your settings. **Fix:** replace that node's `tools\ffmpeg.exe` + `ffprobe.exe` with a known-good build — ideally the *exact same build* your other working nodes run. See **[Running multiple nodes](#running-multiple-nodes)**. |
+| A node errors **every** job with `The device is not ready: 'X:\'` | That node's temp directory points at a drive letter that doesn't exist on that machine (commonly from copying another PC's config). Set the node's **temp directory to a real local drive on that machine** (each node has its own — e.g. `C:\Byte_temp`). Edit it in the node GUI's Temp field or the node's per-node override on its worker card. |
+| Log / queue timestamps are hours off | The server container is on the wrong timezone. Set `TZ` in your `docker-compose.yml` to your locale (e.g. `environment:` → `- TZ=Asia/Tokyo`) and recreate the container: `docker compose down && docker compose up -d` (a plain restart won't re-read it). |
+| A node claims more jobs than it should / one node hogs slots | A node's concurrency = its **Transcode GPU + CPU counts summed** (4 GPU + 4 CPU = 8 concurrent jobs on that node). Set each per-node from its worker card. Weaker cards: keep the total modest, especially for VRAM-heavy 4K DoVi re-encodes. |
+| Editing one node's worker count changed every node | Fixed in **v3.35** — update the server. The +/- steppers are per-node now (blue number = a per-node override is active). |
+| Stray `ffmpeg` processes pile up / PC lags after restarting a node | Handled automatically as of **node v2.30**: the node kills its own leftover tool processes on startup and reaps orphans every 60s (it only ever touches its own ffmpeg/dovi_tool/mkv\* binaries, never other ffmpeg you run). Just update the node. |
+
+---
+
+### Running multiple nodes
+
+Byte Transcode is built for several GPU machines sharing one server, but there's **one rule that will save you hours: keep every node on the same, known-good ffmpeg build.**
+
+The DV → P8 Profile-5 pipeline runs each frame through ffmpeg's `libplacebo` filter (Vulkan) for Dolby Vision tone-mapping. Some bleeding-edge nightly ffmpeg builds ship a **broken libplacebo that fails to initialize** (`Error initializing filters`), so P5 jobs fail on *that* node while running perfectly on another node whose ffmpeg is an older, working build. Same node code, same command, same GPU — the only difference is the ffmpeg binary.
+
+- If one node fails P5 and another doesn't, run `ffmpeg -version` on both — if the builds differ, that's your cause.
+- Copy the working node's `tools\ffmpeg.exe` + `ffprobe.exe` onto the failing node (overwrite), restart the node, and it's fixed.
+- **Don't blindly update ffmpeg to the latest nightly** on one machine and not the others. When you do update tools, do all nodes from the same build and test one P5 job first.
+
+Each node still has its **own** temp drive and path mapping (set from its worker card) — those *should* differ per machine. It's only the tool binaries that must match.
 
 ---
 
