@@ -1,6 +1,6 @@
 {
   "_README": "Byte Transcode Node Config — Edit with Notepad, restart node after saving.",
-  "_docs": "Full reference: https://github.com/Jenari-Dev/byte-transcode#configuration-reference",
+  "_docs": "Full reference: https://github.com/Jenari-Dev/byte-transcode#configuration",
 
   "node_name": "MyNode",
   "_node_name": "Display name shown in the Byte Transcode dashboard",
@@ -20,8 +20,8 @@
   "path_to": "Z:\\",
   "_path_to": "Same media as your Windows mapped drive letter (e.g. Z:\\ or Y:\\)",
 
-  "temp_dir": "F:\\Byte_Engine_temp",
-  "_temp_dir": "LOCAL SSD path for temp files. DoVi jobs write 50-80 GB per file — use your fastest drive, NOT a network path",
+  "temp_dir": "C:\\Byte_temp",
+  "_temp_dir": "LOCAL temp path on THIS machine — the drive letter MUST exist here. A common failure is copying another PC's config that points at a drive you don't have (every job then errors 'The device is not ready'). DoVi jobs write 50-80 GB per file, so prefer your fastest local SSD; never a network path",
 
   "ffmpeg_path": "",
   "ffprobe_path": "",
