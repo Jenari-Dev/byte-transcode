@@ -1,7 +1,7 @@
 {
-  "server": "3.36",
+  "server": "3.37",
   "node": "2.31",
   "released": "2026-07-06",
-  "notes": "Node 2.31 adds a small resilience retry (re-encode retried up to 3x on transient failure) plus 2.30's orphaned-ffmpeg reaper and 2.29's temp-prep timeout guards. IMPORTANT operational note: if DV Profile-5 (DV → P8) jobs fail on one node but work on another, it's almost always a BROKEN ffmpeg build on the failing node — some bleeding-edge nightly ffmpeg builds ship a libplacebo (Vulkan) filter that won't initialize ('Error initializing filters'), and the P5 pipeline needs it. Keep every node on the SAME known-good ffmpeg build; copy the working node's tools\\ffmpeg.exe + ffprobe.exe to the failing one. See the README 'Running multiple nodes' + Troubleshooting sections. Server 3.36 carries the timezone fix (set TZ in docker-compose), per-node worker steppers (3.35), and the GPU+CPU worker-count cap.",
+  "notes": "3.37 (server/UI only, no node update): the node card's ACTIVE/IDLE badge now reflects whether the node actually has jobs running. A node runs several worker threads sharing one ID, but the server tracks only one 'current job' per node — so when that one finished the card wrongly showed IDLE while other threads were still encoding. The badge now shows ACTIVE if the node is online and has any processing jobs. Node 2.31 unchanged. Reminder from earlier releases: keep every node on the SAME known-good ffmpeg build (a broken nightly libplacebo fails DV Profile-5 jobs); set TZ in docker-compose; node temp dir must be a real local drive on that machine.",
   "update_docs": "https://github.com/Jenari-Dev/byte-transcode#running-multiple-nodes"
 }
