@@ -158,7 +158,7 @@ except Exception:
 # ─── Self-update (v2.11) ─────────────────────────────────────────────────────
 # The node checks the same published manifest the web UI uses and can pull its
 # own new files from GitHub, then relaunch — matching the website's update flow.
-NODE_VERSION = "2.29"
+NODE_VERSION = "2.30"
 GITHUB_RAW = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main"
 VERSION_MANIFEST_URL = GITHUB_RAW + "/version.json"
 NODE_FILES = ["byte_node_v2.py", "byte_node_gui.py", "setup_tools.py",
@@ -465,6 +465,90 @@ class ByteNode:
         if removed:
             self.log(f"Swept {removed} stale temp job dir(s) from {base}"
                      + (f" (kept {len(keep)} awaiting review)" if keep else ""))
+
+    # ── v2.30 orphaned-process reaper ────────────────────────────────────────
+    def _byte_tool_paths(self):
+        """Normalized full paths of the tool binaries THIS node runs. Used to
+        recognize our own ffmpeg/dovi_tool/mkv* processes (and nothing else) so
+        the reaper never touches unrelated ffmpeg the user is running."""
+        paths = set()
+        for t in (self.ffmpeg, self.ffprobe, self.dovi_tool, self.mkvmerge,
+                  self.mkvpropedit, self.mkvextract):
+            if not t:
+                continue
+            try:
+                paths.add(os.path.normcase(os.path.abspath(t)))
+            except Exception:
+                paths.add(os.path.normcase(t))
+        return paths
+
+    def _tracked_pids(self):
+        """PIDs of subprocesses currently owned by an active job."""
+        pids = set()
+        try:
+            with self._jobs_lock:
+                procs = [e.get("process") for e in self._jobs.values()]
+        except Exception:
+            procs = []
+        for p in procs:
+            if p is not None:
+                try:
+                    pids.add(p.pid)
+                except Exception:
+                    pass
+        return pids
+
+    def _reap_orphan_tools(self, kill_all=False):
+        """Kill leftover tool processes this node spawned that no active job
+        owns — the orphaned ffmpeg that pile up (and lag the PC) when the node
+        is restarted/killed mid-job (Windows doesn't kill child processes with
+        the parent). kill_all=True (startup) kills every Byte tool process: a
+        freshly started node owns none, so all are orphans from the dead prior
+        instance. Otherwise only UNTRACKED processes older than 45s die, so a
+        live job's encoder is never touched and a just-spawned step (not yet
+        registered) is spared by the age grace."""
+        try:
+            import psutil
+        except Exception:
+            return 0
+        tool_paths = self._byte_tool_paths()
+        if not tool_paths:
+            return 0
+        tracked = set() if kill_all else self._tracked_pids()
+        now = time.time()
+        killed = 0
+        for p in psutil.process_iter(["pid", "exe", "create_time"]):
+            try:
+                exe = p.info.get("exe")
+                if not exe:
+                    continue
+                if os.path.normcase(os.path.abspath(exe)) not in tool_paths:
+                    continue
+                if p.info["pid"] in tracked:
+                    continue
+                if not kill_all and (now - (p.info.get("create_time") or 0)) < 45:
+                    continue
+                p.kill()
+                killed += 1
+            except Exception:
+                pass
+        if killed:
+            self.log(f"Reaped {killed} orphaned tool process(es)"
+                     + (" on startup" if kill_all else ""), "WARN")
+        return killed
+
+    def _orphan_reaper_loop(self):
+        """Every 60s, reap untracked (orphaned) tool processes — leaves the
+        active jobs' encoders alone."""
+        while self.running:
+            for _ in range(60):
+                if not self.running:
+                    return
+                time.sleep(1)
+            try:
+                self._reap_orphan_tools(kill_all=False)
+            except Exception as e:
+                self.log(f"Orphan reaper error: {e}", "WARN")
 
     # ── v2.7 per-job state plumbing ──────────────────────────────────────────
     def _job_entry(self, job_id=None):
@@ -3620,6 +3704,7 @@ class ByteNode:
         settings = self.api("GET", "/api/settings") or {}
         settings.update(self._node_overrides(force=True))
         self._sweep_stale_temp(settings)   # v2.22 — clear leftover temp from prior runs
+        self._reap_orphan_tools(kill_all=True)  # v2.30 — kill ffmpeg orphaned by the previous instance
         n_tw = self._tw_count(settings)
         try:
             n_hc = int(settings.get("healthcheck_gpu_count", "0") or "0")
@@ -3656,6 +3741,7 @@ class ByteNode:
             self.log(f"Transcode worker #{i} started")
         threading.Thread(target=self._worker_scaler_loop, daemon=True, name="scaler").start()
         threading.Thread(target=self._finalize_poller_loop, daemon=True, name="finalize").start()
+        threading.Thread(target=self._orphan_reaper_loop, daemon=True, name="orphan-reaper").start()  # v2.30
         return True
 
     def _finalize_poller_loop(self):

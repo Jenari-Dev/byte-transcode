@@ -1,7 +1,7 @@
 {
   "server": "3.36",
-  "node": "2.29",
+  "node": "2.30",
   "released": "2026-07-06",
-  "notes": "Node 2.29 makes the temp-folder pre-flight bulletproof. Proven cause of the 3060's intermittent freeze: on its flaky disk, os.makedirs() (temp folder) and shutil.disk_usage() (free-space check) could block forever before Step 1, wedging a worker at 'Starting...'. Both are now timeout-guarded (makedirs 15s, disk_usage 6s), and the whole pipeline dispatch is wrapped so a timeout errors the job cleanly and frees the thread instead of black-holing — the job requeues and retries (on this node or the other) instead of sitting stuck forever. The 3060 already processes fine once past this step (its GPU reads 0% only because nvidia-smi utilization.gpu doesn't reflect the NVENC engine; jobs advance at the same rate as the 5080). Update BOTH nodes to 2.29.",
+  "notes": "Node 2.30 adds an orphaned-process reaper. On Windows a node restart/kill leaves its ffmpeg children running (they don't die with the parent), so they pile up and lag the PC. Now: on startup the node kills every leftover Byte tool process (ffmpeg/dovi_tool/mkv*) from the previous instance, and a reaper runs every 60s to kill any Byte tool process not owned by an active job — active encodes are tracked by PID and never touched, and a just-spawned step is spared by a 45s grace. It only ever targets this node's own tool binaries, never unrelated ffmpeg. Updating the node (which restarts it) clears the current orphan pile-up immediately. Carries 2.29's temp-prep timeout guards.",
   "update_docs": "https://github.com/Jenari-Dev/byte-transcode#updating"
 }
