@@ -1,145 +1,100 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Byte-Transcode-E040FB?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAzMiAzMic+PHJlY3Qgd2lkdGg9JzMyJyBoZWlnaHQ9JzMyJyByeD0nNicgZmlsbD0nIzEwMTAxMCcvPjx0ZXh0IHg9JzE2JyB5PScyMicgdGV4dC1hbmNob3I9J21pZGRsZScgZmlsbD0nI0UwNDBGQicgZm9udC1zaXplPScxNicgZm9udC13ZWlnaHQ9J2JvbGQnIGZvbnQtZmFtaWx5PSdtb25vc3BhY2UnPkI8L3RleHQ+PC9zdmc+" alt="Byte Transcode"/>
   <br/>
-  <strong>A self-hosted media transcoding tool with Dolby Vision support — a Tdarr alternative</strong>
+  <strong>Self-hosted, multi-GPU media transcoding with real Dolby Vision support — a simpler, free Tdarr alternative.</strong>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.10+-blue?style=flat-square" alt="Python"/>
   <img src="https://img.shields.io/badge/GPU-NVENC-76B900?style=flat-square" alt="NVENC"/>
-  <img src="https://img.shields.io/badge/Dolby_Vision-P7→P8-E040FB?style=flat-square" alt="DoVi"/>
+  <img src="https://img.shields.io/badge/Dolby_Vision-P5_&_P7→P8-E040FB?style=flat-square" alt="DoVi"/>
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="License"/>
   <img src="https://img.shields.io/badge/docker-ready-2496ED?style=flat-square" alt="Docker"/>
 </p>
 
----
-
-## Screenshots
-
-> _Coming soon — Dashboard, Settings, Node GUI, Active Transcode, Staging Section_
+One server on your NAS, one or more Windows GPU machines. The server holds the library, queue, and web UI; the nodes do the GPU work. Point it at your media, pick what you want done, and it works through the queue — with a live dashboard the whole time.
 
 ---
 
-## Features
+## Contents
 
-- **Full Dolby Vision P7→P8 pipeline** — Extract HEVC → Extract RPU → NVENC transcode → Inject RPU → Convert P7→P8 → mkvmerge remux
-- **Universal DV → P8 converter** — Converts ANY Dolby Vision profile to Profile 8 without re-encoding: P7 (dual-layer) and P5 (the one that plays purple/green on unsupported devices) both become P8.1 with maximum device compatibility
-- **Compatibility scan & fix** — Flags files likely to have playback issues (bad codecs, 10-bit H.264/Hi10P, 10-bit HEVC SDR, interlaced video, non-MKV containers, subtitle-track overload), notifies you, and converts them to a device-safe format. Clean files are recorded too, so any file can be force-converted with one click
-- **Per-node configuration** — Multiple worker nodes with different temp drives, path mappings and worker counts, editable from the web UI
-- **MCP server** — Control everything from Claude or any MCP client (see [MCP](#mcp-ai-assistant-control))
-- **HDR10, HDR10+, HLG, SDR support** — All HDR formats handled automatically
-- **Preserves everything** — All audio tracks (TrueHD Atmos, DTS-HD MA, etc.), subtitles, chapters
-- **NVENC GPU hardware encoding** with CUDA hardware decoding (near-zero CPU usage)
-- **DoVi concurrency control** — Limit heavy DoVi jobs while filling remaining slots with HDR10/SDR
-- **Remux mode** — Convert container formats (MKV↔MP4) without re-encoding
-- **Real-time dashboard** — Progress, FPS, ETA, compression stats, live log streaming
-- **Library scanning** with parallel health checks
-- **Queue management** — Bump, skip, requeue, force-start, cancel with process kill
-- **Three themes** — Dark, Carbon, Cobalt
-- **ntfy.sh push notifications** — Job complete, errors, scan complete
-- **Native Windows node** with Tdarr-style GUI
-- **Path translator** for NAS → Windows drive mapping
-- **Local SSD temp processing** for maximum transcode speed
-- **Crash recovery** — Resumes after node/server restart, cleans up temp files
-- **Auto-accept** — Optionally replace originals automatically
+- [What it does](#what-it-does)
+- [How it works](#how-it-works)
+- [Quick start](#quick-start)
+- [Configuration](#configuration)
+- [Worker counts & multiple nodes](#worker-counts--multiple-nodes)
+- [Everyday use](#everyday-use)
+- [Updating](#updating)
+- [Troubleshooting](#troubleshooting)
+- [MCP (AI assistant control)](#mcp-ai-assistant-control)
+- [Reference](#reference)
 
 ---
 
-## MCP (AI assistant control)
+## What it does
 
-`mcp/byte_mcp.py` is a Model Context Protocol server that exposes the whole
-system as tools: queue management, library scans, pipeline start/pause,
-settings, per-node config, and logs.
-
-```bash
-# Register with Claude Code (generate an API key in Settings → API first):
-claude mcp add byte-transcode -- py path/to/mcp/byte_mcp.py --server http://YOUR_NAS_IP:5800 --api-key YOUR_KEY
-```
-
-Requires Python 3.10+ with the `mcp` and `requests` packages (auto-installed
-on first run). Works with any MCP client, not just Claude.
-
----
-
-## Architecture
-
-```
-┌─────────────────────────────┐         ┌──────────────────────────────────┐
-│  SERVER (NAS / Docker)      │  HTTP   │  NODE (Windows / Native)         │
-│                             │◄───────►│                                  │
-│  Flask + SQLite + React UI  │  :5800  │  Python + ffmpeg + dovi_tool     │
-│  Libraries, Queue, Settings │         │  + mkvmerge + NVIDIA GPU         │
-│                             │         │                                  │
-│  /media/data/media/...      │         │  Z:\data\media\...  (mapped)     │
-│  (NAS storage)              │         │  F:\Byte_Engine_temp (local SSD) │
-└─────────────────────────────┘         └──────────────────────────────────┘
-```
-
-**File flow:** NAS media → read over network → GPU transcode to local SSD → copy result back to NAS → replace original (if accepted)
-
-For DoVi files, the pipeline extracts the raw HEVC bitstream and Dolby Vision RPU metadata to the local SSD, transcodes with NVENC, re-injects the RPU, converts to Profile 8 for maximum compatibility, then remuxes with all original audio/subtitle tracks.
-
-### The five pipelines
+**Five pipelines**, each with its own scan, queue, and start/pause switch:
 
 | Pipeline | What it does | Re-encodes video? |
 |---|---|---|
-| **Transcode** | NVENC compression with full DoVi/HDR10/HDR10+/SDR handling | Yes |
-| **DV → P8** | Converts ANY Dolby Vision profile to Profile 8. P7: metadata-only, seconds per file. P5 (the profile that plays purple/green on unsupported devices): rebuilds a genuine HDR10 base layer so the file plays correctly on DV **and** non-DV devices | P7: No · P5: Yes |
-| **Audio/Track Cleanup** | Strips audio + subtitle tracks not in your keep-list (configurable, default English + Japanese) and cleans messy track names | No |
-| **Compatibility** | Scans for playback-risk files (bad codecs, Hi10P, 10-bit HEVC SDR, interlaced, non-MKV containers, subtitle overload), notifies you, and fixes them. Every job wears a badge: **CONTAINER-ONLY REWRAP** (media untouched) or **VIDEO RE-ENCODE** | Depends — badge tells you |
-| **AI Subtitles** | Ensures English + target-language subtitles exist on every file: extracts or Whisper-transcribes English, translates via your choice of AI provider (Gemini / Claude / OpenAI / any local OpenAI-compatible endpoint), embeds or writes sidecar .srt | No |
+| **Transcode** | NVENC compression with full DoVi / HDR10 / HDR10+ / HLG / SDR handling | Yes |
+| **DV → P8** | Converts any Dolby Vision profile to Profile 8. **P7** (dual-layer): metadata-only, seconds per file. **P5** (the profile that plays purple/green on non-DV devices): rebuilds a genuine HDR10 base layer so it plays correctly on DV **and** non-DV displays | P7: No · P5: Yes |
+| **Audio/Track Cleanup** | Strips audio/subtitle tracks not in your keep-list (default eng + jpn) and tidies messy track names | No |
+| **Compatibility** | Flags files likely to misbehave (bad codecs, Hi10P, 10-bit HEVC SDR, interlaced, non-MKV, subtitle overload) and fixes them. Each job shows a badge: **container-only rewrap** (lossless) or **video re-encode** | Depends |
+| **AI Subtitles** | Ensures English + a target language exist on every file: extracts or Whisper-transcribes, translates via your AI provider (Gemini / Claude / OpenAI / local), embeds or writes sidecar `.srt` | No |
 
-Each pipeline has its own scan, queue, and start/pause switch. Worker nodes can be
-toggled ON/OFF from the dashboard and carry per-node config (temp drive, path
-mapping, worker counts) so machines with different setups share one server.
+**Built for real setups:**
 
----
-
-## Requirements
-
-### Server (NAS / Docker host)
-- Docker and Docker Compose
-- Linux, Unraid, or any Docker-capable NAS
-- Network-accessible media storage
-
-### Node (Windows GPU machine)
-- Windows 10 or 11
-- Python 3.10+ ([python.org](https://www.python.org/downloads/) or Microsoft Store)
-- NVIDIA GPU with NVENC support (GTX 1650+ / RTX series)
-- Latest [NVIDIA drivers](https://www.nvidia.com/Download/index.aspx) (Vulkan support required for DV Profile 5 conversion — any current driver has it)
-- ffmpeg build with libplacebo + Vulkan (the BtbN/jellyfin-ffmpeg builds that `setup_tools.py` downloads include it)
-- NAS media accessible via mapped network drive (e.g. `Z:\`)
-- Local SSD recommended for temp directory (dramatically faster than NAS for temp files)
-- Run `py setup_tools.py` once — it downloads ffmpeg/ffprobe, dovi_tool, and the MKVToolNix trio (mkvmerge, mkvpropedit, mkvextract) into `tools\`
-
-### Network
-- NAS and GPU machine on the same network
-- NAS media path mapped as a Windows drive letter (e.g. `Z:\` → `\\NAS\media`)
+- **Multi-node** — several GPU machines share one server; each node has its own temp drive, path mapping, and worker counts, all editable from the web UI and applied **live** (no restart).
+- **Live everything** — dashboard with per-job progress, FPS, ETA, compression, and streaming logs.
+- **Staged queue** — the next N files are health-checked and on-deck so a freed worker starts instantly (Tdarr-style).
+- **Review or auto-accept** — completed jobs wait for you to **Accept** (replace the original) or **Decline** (keep the original, discard the new file); flip on **Auto-accept** once you trust the results.
+- **Resilient** — resumes through node/server restarts, cleans up its own temp and orphaned `ffmpeg` processes, auto-remaps a dropped network drive, and requeues jobs that stall instead of black-holing.
+- **Preserves everything** — all audio (TrueHD Atmos, DTS-HD MA…), subtitles, and chapters.
+- **NVENC hardware encode + CUDA decode**, with a native Windows node GUI and ntfy.sh push notifications.
 
 ---
 
-## Installation
+## How it works
 
-### Step 1: Deploy the Server (NAS)
-
-**Option A — Docker Compose (recommended)**
-
-Create a directory on your NAS for the server files:
-
-```bash
-mkdir -p /home/YOUR_USER/byte-transcode/server/app/static
-mkdir -p /home/YOUR_USER/byte-transcode/server/config
+```
+┌─────────────────────────────┐         ┌──────────────────────────────────┐
+│  SERVER (NAS / Docker)      │  HTTP   │  NODE(S) (Windows / Native)      │
+│                             │◄───────►│                                  │
+│  Flask + SQLite + React UI  │  :5800  │  Python + ffmpeg + dovi_tool     │
+│  Libraries · Queue · Config │         │  + mkvmerge + NVIDIA GPU         │
+│                             │         │                                  │
+│  /media/... (NAS storage)   │         │  Z:\...  (mapped network drive)  │
+│                             │         │  C:\Byte_temp (local SSD temp)   │
+└─────────────────────────────┘         └──────────────────────────────────┘
 ```
 
-Download the server files from this repo into the `app/` folder:
+**File flow:** NAS media → read over the network → GPU work into a **local** temp drive → result copied back to the NAS → original replaced (when accepted).
+
+For Dolby Vision, the node extracts the raw HEVC bitstream and the DV RPU, does the GPU work, re-injects the RPU, converts to Profile 8, and remuxes with all original tracks. The P5 path uses ffmpeg's `libplacebo` (Vulkan) filter to rebuild a true HDR10 base layer — see [worker counts & multiple nodes](#worker-counts--multiple-nodes) for the one thing that matters when you run more than one machine.
+
+---
+
+## Quick start
+
+### Requirements
+
+**Server (NAS / Docker host):** Docker + Docker Compose, network-accessible media storage.
+
+**Node (Windows GPU machine):** Windows 10/11 · Python 3.10+ · an NVIDIA GPU with NVENC (GTX 1650+ / RTX) · current NVIDIA drivers (Vulkan is included and is required for DV P5) · the NAS media mapped to a drive letter (e.g. `Z:\`) · a local SSD for temp (DoVi jobs write tens of GB per file).
+
+### 1 · Server (NAS)
+
+Create the folders and drop in the server files:
 
 ```bash
-cd /home/YOUR_USER/byte-transcode/server/app
+mkdir -p /home/YOU/byte-transcode/server/app/static /home/YOU/byte-transcode/server/config
+cd /home/YOU/byte-transcode/server/app
 wget https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main/server/byte_server_v3.py
 wget -O static/index.html https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main/server/static/index.html
 ```
 
-Create `docker-compose.yml` in the server directory:
+Create `docker-compose.yml` next to `app/`:
 
 ```yaml
 services:
@@ -149,76 +104,37 @@ services:
     restart: unless-stopped
     ports:
       - "5800:5800"
+    environment:
+      - TZ=Asia/Tokyo          # ← set to YOUR timezone, or logs/queue times will be off
     volumes:
-      - ./app/byte_server_v3.py:/app/byte_server.py    # Note: mounted AS byte_server.py
+      - ./app/byte_server_v3.py:/app/byte_server.py    # mounted AS byte_server.py
       - ./app/static:/app/static
       - ./config:/config
-      - /mnt/media:/media:ro                            # Your media path (read-only)
+      - /mnt/media:/media:ro                            # ← your media root (read-only)
     working_dir: /app
     command: >
       bash -c "pip install flask --quiet --break-system-packages &&
                python3 /app/byte_server.py --port 5800"
 ```
 
-> **Important:** The bind mount maps `byte_server_v3.py` → `/app/byte_server.py` because the container runs `python3 /app/byte_server.py`. Adjust the `/mnt/media` path to match your NAS media root.
-
-Start the server:
-
 ```bash
 docker compose up -d
 ```
 
-**Option B — Docker Run (manual)**
+Open `http://YOUR_NAS_IP:5800`, create your admin account. Done.
 
-```bash
-docker run -d \
-  --name byte-server \
-  --restart unless-stopped \
-  -p 5800:5800 \
-  -v /path/to/app/byte_server_v3.py:/app/byte_server.py \
-  -v /path/to/app/static:/app/static \
-  -v /path/to/config:/config \
-  -v /mnt/media:/media:ro \
-  python:3.12-slim \
-  bash -c "pip install flask --quiet --break-system-packages && python3 /app/byte_server.py --port 5800"
-```
+> **Two things people miss:** the bind mount maps `byte_server_v3.py` → `/app/byte_server.py` (the container runs `python3 /app/byte_server.py`), and **`TZ` must match your locale** — a plain restart won't re-read it, so after changing it run `docker compose down && docker compose up -d`.
 
-**Verify** — Open `http://YOUR_NAS_IP:5800` in your browser. You should see the Byte Transcode login screen. Create your admin account on first visit.
-
----
-
-### Step 2: Set Up the Node (Windows)
-
-**Download the node files:**
+### 2 · Node (Windows)
 
 ```powershell
 git clone https://github.com/Jenari-Dev/byte-transcode.git
 cd byte-transcode\node
-```
-
-Or download the ZIP from GitHub and extract the `node/` folder.
-
-**Install Python dependencies:**
-
-```
 pip install requests
+py setup_tools.py          # downloads ffmpeg, ffprobe, dovi_tool, mkvmerge into tools\
 ```
 
-**Download required tools** (ffmpeg, dovi_tool, mkvmerge):
-
-```
-py setup_tools.py
-```
-
-This downloads all three tools into the `tools/` subfolder automatically. Alternatively, download them manually:
-
-| Tool | Download | Place in |
-|------|----------|----------|
-| ffmpeg | [BtbN GPL build](https://github.com/BtbN/FFmpeg-Builds/releases) (ffmpeg-master-latest-win64-gpl.zip) | `node/tools/ffmpeg.exe` + `ffprobe.exe` |
-| dovi_tool | [quietvoid/dovi_tool](https://github.com/quietvoid/dovi_tool/releases) | `node/tools/dovi_tool.exe` |
-| mkvmerge | [MKVToolNix](https://mkvtoolnix.download/downloads.html#windows) (portable) | `node/tools/mkvmerge.exe` |
-
-**Configure the node** — Edit `byte_node_config.json` (or copy from `byte_node_config.example.json`):
+Copy `byte_node_config.example.json` → `byte_node_config.json` and edit:
 
 ```json
 {
@@ -228,248 +144,173 @@ This downloads all three tools into the `tools/` subfolder automatically. Altern
   "poll_interval": 10,
   "path_from": "/media",
   "path_to": "Z:\\",
-  "temp_dir": "F:\\Byte_Engine_temp",
-  "ffmpeg_path": "",
-  "ffprobe_path": "",
-  "dovi_tool_path": "",
-  "mkvmerge_path": "",
+  "temp_dir": "C:\\Byte_temp",
   "start_paused": false
 }
 ```
 
-**Key settings to configure:**
+`path_from`/`path_to` translate the server's Docker path to your Windows drive (`/media/...` ↔ `Z:\...`). **`temp_dir` must be a real local drive that exists on _this_ machine** — see the troubleshooting note about copying configs between PCs.
 
-| Setting | What it does | Example |
-|---------|-------------|---------|
-| `server_url` | Your NAS IP + port where the server runs | `http://192.168.1.100:5800` |
-| `path_from` | The media path as the server sees it (inside Docker) | `/media` |
-| `path_to` | The same media as your Windows mapped drive | `Z:\\` |
-| `temp_dir` | **Local SSD path** for temp files during transcoding. Use your fastest drive — DoVi jobs write 50-80 GB of temp data per file. NAS temp is 5-10x slower. | `F:\\Byte_Engine_temp` |
-| `gpu` | Your GPU name (cosmetic, shown in the dashboard) | `RTX 4090` |
-
-> **Path translator explained:** The server sees media at `/media/data/media/movies/...` (inside Docker). Your Windows machine sees the same files at `Z:\data\media\movies\...` via a mapped network drive. The `path_from`/`path_to` settings tell the node how to convert between the two.
-
-**Start the node:**
-
-Double-click `run_node.bat` or run manually:
+Start it — double-click `run_node.bat`, or:
 
 ```
 py byte_node_gui.py
 ```
 
----
+It registers with the server automatically.
 
-### Step 3: First-Time Setup
+### 3 · First run
 
-1. Open `http://YOUR_NAS_IP:5800` and create your admin account
-2. Go to **Libraries** → Add your media folder (use the server's Docker path, e.g. `/media/data/media/movies`)
-3. Click **Scan** — the server probes each file with ffprobe and queues them
-4. Start the Windows node — it registers with the server automatically
-5. Go to **Dashboard** → Click **Start Processing**
-6. Set the **Staged file limit** to 10 (controls how many files are queued at once)
-7. Adjust **GPU workers** via the +/- buttons on the worker card (4 recommended for RTX 5080)
-8. Watch transcodes progress in real-time
+1. **Libraries** → add your media folder using the **server's** path (e.g. `/media/data/media/movies`) → **Scan**.
+2. Start the node (it appears on the Dashboard).
+3. **Dashboard** → **Start Processing**.
+4. On the node's worker card, set its **GPU / CPU worker counts** (see [below](#worker-counts--multiple-nodes)) — changes apply within ~60s, no restart.
+5. Watch it go.
 
 ---
 
-## Configuration Reference
+## Configuration
 
-### Node Config (`byte_node_config.json`)
+### Node config (`byte_node_config.json`)
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `node_name` | string | `"MyNode"` | Display name shown in the dashboard |
-| `server_url` | string | | Byte Transcode server URL (http://IP:5800) |
-| `gpu` | string | | GPU name (cosmetic label for dashboard) |
-| `poll_interval` | int | `10` | Seconds between checking server for new jobs (5-30 recommended) |
-| `path_from` | string | `"/media"` | Server-side media path prefix (what Docker sees) |
-| `path_to` | string | `"Z:\\"` | Windows-side mapped drive equivalent |
-| `temp_dir` | string | | Local path for temp files — use fastest SSD |
-| `ffmpeg_path` | string | `""` | Override ffmpeg path (blank = auto-detect from tools/) |
-| `ffprobe_path` | string | `""` | Override ffprobe path (blank = auto-detect) |
-| `dovi_tool_path` | string | `""` | Override dovi_tool path (blank = auto-detect) |
-| `mkvmerge_path` | string | `""` | Override mkvmerge path (blank = auto-detect) |
-| `start_paused` | bool | `false` | If true, node starts but doesn't process until you click Start |
+| Field | Default | Description |
+|-------|---------|-------------|
+| `node_name` | `"MyNode"` | Display name in the dashboard |
+| `server_url` | | Server URL, `http://IP:5800` |
+| `gpu` | | GPU name (cosmetic label) |
+| `poll_interval` | `10` | Seconds between job polls (5–30) |
+| `path_from` | `"/media"` | Server-side media prefix (what Docker sees) |
+| `path_to` | `"Z:\\"` | The same media as your Windows mapped drive |
+| `temp_dir` | | **Local** temp path on this machine — use your fastest SSD |
+| `ffmpeg_path` / `ffprobe_path` / `dovi_tool_path` / `mkvmerge_path` | `""` | Override tool paths (blank = auto-detect from `tools\`) |
+| `start_paused` | `false` | Start the node without processing until you click Start |
 
-### Server Settings (Web UI → Settings)
+> Anything set here is a **local override** and wins over the same setting pushed from the server's worker card. Leave a field blank to let the server/global value apply.
+
+### Server settings (Web UI → Settings)
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| Constant Quality (CQ) | 18 | Lower = better quality, larger files. 16-20 for 4K. |
-| NVENC Preset | p7 | P1 (fastest) to P7 (slowest/best compression) |
-| Output Codec | HEVC | HEVC (H.265), H.264, or AV1 |
-| Hardware Encoder | NVENC | NVENC (NVIDIA), QSV (Intel), VAAPI (Linux), Software |
-| Hardware Decoding | Enabled | Use GPU for decoding (reduces CPU to near 0%) |
-| Max Workers | 4 | Server-side cap on concurrent processing jobs |
+| Constant Quality (CQ) | 16 | Lower = better quality, bigger files. 16–20 for 4K |
+| NVENC Preset | p7 | p1 (fastest) → p7 (best compression) |
+| Output Codec | HEVC | HEVC · H.264 · AV1 |
+| Hardware Decoding | On | GPU decode (keeps CPU near 0%) |
+| Max Workers | 4 | Floor for the fleet cap (actual cap = sum of nodes' counts, see below) |
 | Min File Size | 10 GB | Skip files smaller than this |
-| Container | MKV | Output container format (MKV or MP4) |
-| DoVi → P8 | Enabled | Convert any Dolby Vision profile to Profile 8 during transcode |
-| DV5 Mode | reencode | Profile 5 conversion: `reencode` builds a true HDR10 base layer (correct everywhere); `relabel` is metadata-only (fast, but non-DV playback stays wrong) |
-| Keep Languages | eng,jpn | Audio/subtitle languages kept by Cleanup + Compatibility filtering (comma-separated ISO codes; untagged tracks always kept) |
-| Compatibility Target | H.264 | Codec for Compatibility re-encodes (H.264 = plays everywhere, HEVC = smaller) |
-| Replace Original | Enabled | Replace source file after transcode |
-| Auto-Accept | Disabled | Automatically accept completed transcodes |
-| Skip Transcoded | Enabled | Skip files already encoded with NVENC |
-| Staged File Limit | 100 | Assignment gate: 0 pauses all job hand-out |
-| Node Temp Path / Path Mapping | — | Global defaults; override per node from its worker card |
-| AI / Subtitles | Gemini 2.5 Flash | Translation provider + API key, Whisper model, embed-or-external behavior — set your API key here before running AI Subtitles |
+| DV5 Mode | reencode | `reencode` rebuilds a true HDR10 base (correct everywhere); `relabel` is metadata-only (fast, but non-DV playback stays wrong) |
+| Keep Languages | eng,jpn | Languages kept by Cleanup/Compatibility (ISO codes; untagged tracks always kept) |
+| Replace Original | On | Replace the source after a job is accepted |
+| Auto-Accept | Off | Skip manual review and replace automatically |
+| Staged File Limit | 100 | How many files are staged/on-deck. **0 pauses hand-out** |
+| AI / Subtitles | Gemini 2.5 Flash | Provider + API key, Whisper model, embed behavior — set your key before running AI Subtitles |
 
 ---
 
-## Usage
+## Worker counts & multiple nodes
 
-### Adding a Library
-Go to **Libraries** → enter a name and the server-side path (e.g. `/media/data/media/movies`) → click **+ Add** → click **Scan**.
+**A node's concurrency = its Transcode `GPU` count + its `CPU` count**, summed. So `4 GPU + 4 CPU = 8` jobs running on that node at once. Set both on the node's worker card with the +/- steppers (a **blue** number means that node has its own override; white = the global default). Changes apply **live within ~60 seconds — no node restart needed.**
 
-### Starting Processing
-**Dashboard** → **Start Processing**. The node picks up jobs automatically. Adjust worker counts with the +/- buttons on the worker card.
+The whole fleet's cap is the **sum of every online node's counts** (floored at *Max Workers*), so adding a node automatically raises total throughput.
 
-### Monitoring
-The dashboard shows active transcodes with real-time progress bars, FPS, ETA, and compression ratios. Click any file to see detailed logs. The **Staging** section shows health checks in progress and queued files.
+Pick counts to match the card. A 16 GB card handles many concurrent 4K DoVi re-encodes; a 12 GB card should stay modest — DoVi P5 re-encodes are VRAM-heavy, so start at 2–3 and raise it while watching for failures.
 
-### Accepting Results
-Completed transcodes appear in the **Completed** panel. Click **Accept** to replace the original, or enable **Auto-accept** in Options to do this automatically.
+### The one rule for multiple nodes: same ffmpeg build everywhere
 
-### Requeuing Failed Jobs
-Click the **Errored** tab → **Requeue All Errors**. Or click individual files to requeue them.
+The DV → P8 Profile-5 pipeline runs each frame through ffmpeg's `libplacebo` (Vulkan) filter for Dolby Vision tone-mapping. **Some bleeding-edge nightly ffmpeg builds ship a broken libplacebo that won't initialize** — so P5 jobs fail on that node (`Error initializing filters`) while running perfectly on another node whose ffmpeg is an older, working build. Same node code, same command, same GPU — the only difference is the ffmpeg binary.
 
-### Changing Worker Counts
-Use the +/- buttons on the worker card in the Dashboard. **Restart the node GUI** after changing for the new counts to take effect.
+- If one node fails P5 and another doesn't, run `ffmpeg -version` on both. Different builds = your cause.
+- Copy the working node's `tools\ffmpeg.exe` + `ffprobe.exe` onto the failing node, restart it, fixed.
+- **Don't update ffmpeg to the latest nightly on one machine only.** Update all nodes from the same build and test one P5 job first.
 
-### Turning a Node On/Off
-Every worker card has an **ON/OFF** switch. A disabled node stays connected
-(heartbeats keep flowing) but is never assigned new jobs — flip it back ON any
-time without touching the machine. Per-node overrides (temp drive, path
-mapping, worker counts) live in the same card and apply within ~60 seconds,
-no restart needed.
+Each node still keeps its **own** temp drive and path mapping — those *should* differ per machine. Only the tool binaries must match.
 
-### Container-Only vs Re-Encode
-In the **Compatibility** view, every flagged file shows a badge before you
-start the pipeline: green **CONTAINER-ONLY REWRAP — media untouched** means
-only the container changes (lossless, seconds per file); orange
-**VIDEO RE-ENCODE** means the video stream itself gets re-encoded to your
-Compatibility Target codec. Files with no issues are listed as skipped — hit
-**Requeue** on any of them to force-convert it anyway.
+---
+
+## Everyday use
+
+- **Dashboard & staging** — active transcodes show live progress, FPS, ETA, and compression. The staging panel shows health checks and the on-deck files. Click any job for detailed, live-streaming logs.
+- **Accept / Decline** — with Auto-Accept off, finished jobs land in **Completed** and wait: **Accept** replaces the original with the new file; **Decline** keeps the original and discards the new one (its temp is cleaned up automatically). Turn on **Auto-Accept** to replace originals without review.
+- **Node ON/OFF** — every worker card has a switch. A disabled node keeps heartbeating but is never handed jobs — flip it back on anytime without touching the machine. If a node's network drive drops, it shows a red **MEDIA DRIVE OFFLINE** badge and re-maps the drive itself.
+- **Requeue** — the **Errored** tab has *Requeue All*, or requeue individual jobs. Requeued jobs are health-checked and picked up automatically.
+- **Priorities** — drag tools in the sidebar to set which pipeline runs first; use a job's up-arrow to push it into the staged area.
 
 ---
 
 ## Updating
 
-Byte Transcode checks GitHub for new versions and shows a **bell** in the
-sidebar when an update is available (server or node). Updating is one command
-per machine — your database, settings, media paths, and tools are left
-untouched.
+A **bell** appears in the sidebar when a new server or node version is on GitHub. Your database, settings, paths, and tools are left untouched.
 
-**Server (NAS):** from your server build dir (the folder with `byte_server.py`
-and `docker-compose.yml`):
+**Server (NAS)** — from your server build dir:
 ```bash
 bash update.sh
 ```
-It backs up the current code, downloads the latest from GitHub, and rebuilds
-the container.
+Backs up the current code, pulls the latest, rebuilds the container.
 
-**Node (Windows):** close the node first, then from your `ByteNode` folder:
+**Node (Windows)** — close the node, then from your `ByteNode` folder:
 ```bat
 update_node.bat
 ```
-It backs up and downloads the latest node code. Run `py setup_tools.py`
-afterward if the release added new tools, then restart the node.
+Backs up and pulls the latest node code; run `py setup_tools.py` afterward only if a release added new tools, then restart the node. **Don't re-download ffmpeg from a newer nightly just to update** — see the multi-node rule above.
 
-> Both scripts are included in the repo (`server/update.sh`, `node/update_node.bat`)
-> and ship with a normal setup, so an existing install already has them.
-> For a major release that changes `docker-compose.yml` or the `Dockerfile`,
-> the release notes will say so — those rare structural changes are applied by
-> re-copying the file manually.
+> Rare releases that change `docker-compose.yml` or the `Dockerfile` say so in the notes; apply those by re-copying the file.
 
 ---
 
 ## Troubleshooting
 
-| Problem | Solution |
-|---------|----------|
-| "File not found" during transcode | Check your path translator: `path_from` must match the Docker media mount, `path_to` must match your Windows mapped drive. Verify with `dir Z:\data\media\movies` |
-| Node shows "server unreachable" | Verify the server URL in config. Test: `curl http://YOUR_NAS_IP:5800/api/worker-counts` |
-| NVENC errors | Update NVIDIA drivers. Verify GPU supports NVENC: `nvidia-smi` |
-| High CPU usage during transcode | Ensure hardware decoding is enabled in Settings. The node should use `-hwaccel cuda` |
-| Scans appear stuck | Restart the server: `docker restart byte-server`. This clears any SQLite lock contention |
-| DoVi jobs fail with "Access denied" | Too many DoVi jobs competing for disk I/O. Lower "Max DoVi Concurrent" to 2 |
-| Health check timeouts | Normal during library scans on large libraries. Jobs will retry automatically |
-| Only 1 worker active despite setting 4 | Restart the node GUI — worker counts are read at startup only |
-| Staged file limit shows 0 | Set it to 10+ in the Dashboard Options section. 0 pauses all processing |
-| **DV → P8 (Profile 5) jobs fail instantly** — job errors at the re-encode step, dashboard shows a truncated/metadata error | Almost always a **broken ffmpeg build on that node**: some bleeding-edge nightly ffmpeg builds ship a `libplacebo` filter that won't initialize, and the P5 pipeline needs libplacebo (Vulkan) for DV tone-mapping. Diagnose by running the re-encode command manually on that machine — if even `-vf libplacebo` (no options) prints **`Error initializing filters` / `Invalid argument`**, the build is the culprit, not your settings. **Fix:** replace that node's `tools\ffmpeg.exe` + `ffprobe.exe` with a known-good build — ideally the *exact same build* your other working nodes run. See **[Running multiple nodes](#running-multiple-nodes)**. |
-| A node errors **every** job with `The device is not ready: 'X:\'` | That node's temp directory points at a drive letter that doesn't exist on that machine (commonly from copying another PC's config). Set the node's **temp directory to a real local drive on that machine** (each node has its own — e.g. `C:\Byte_temp`). Edit it in the node GUI's Temp field or the node's per-node override on its worker card. |
-| Log / queue timestamps are hours off | The server container is on the wrong timezone. Set `TZ` in your `docker-compose.yml` to your locale (e.g. `environment:` → `- TZ=Asia/Tokyo`) and recreate the container: `docker compose down && docker compose up -d` (a plain restart won't re-read it). |
-| A node claims more jobs than it should / one node hogs slots | A node's concurrency = its **Transcode GPU + CPU counts summed** (4 GPU + 4 CPU = 8 concurrent jobs on that node). Set each per-node from its worker card. Weaker cards: keep the total modest, especially for VRAM-heavy 4K DoVi re-encodes. |
-| Editing one node's worker count changed every node | Fixed in **v3.35** — update the server. The +/- steppers are per-node now (blue number = a per-node override is active). |
-| Stray `ffmpeg` processes pile up / PC lags after restarting a node | Handled automatically as of **node v2.30**: the node kills its own leftover tool processes on startup and reaps orphans every 60s (it only ever touches its own ffmpeg/dovi_tool/mkv\* binaries, never other ffmpeg you run). Just update the node. |
+| Problem | Fix |
+|---------|-----|
+| **DV → P8 (Profile-5) jobs fail instantly** at the re-encode step | Almost always a **broken ffmpeg build on that node**. Run the re-encode command manually — if even `-vf libplacebo` (no options) prints `Error initializing filters` / `Invalid argument`, replace that node's `tools\ffmpeg.exe` + `ffprobe.exe` with a known-good build (ideally the exact build your other nodes use). See [the multi-node rule](#the-one-rule-for-multiple-nodes-same-ffmpeg-build-everywhere). |
+| A node errors **every** job with `The device is not ready: 'X:\'` | Its temp directory points at a drive that doesn't exist on that machine (often from copying another PC's config). Set the node's temp dir to a real local drive here (e.g. `C:\Byte_temp`) — in the node GUI or its worker-card override. |
+| Log / queue timestamps are hours off | Set `TZ` in `docker-compose.yml` to your locale, then `docker compose down && docker compose up -d` (a plain restart won't re-read it). |
+| One node hogs slots / claims too many | Concurrency = that node's **GPU + CPU** counts summed. Lower them on its worker card; keep weaker/low-VRAM cards modest for 4K DoVi. |
+| "File not found" during transcode | Path translator mismatch: `path_from` must match the Docker media mount and `path_to` your Windows mapped drive. Verify with `dir Z:\data\media\movies`. |
+| Node shows "server unreachable" | Check `server_url`. Test `curl http://YOUR_NAS_IP:5800/api/worker-counts`. |
+| Stray `ffmpeg` piling up / PC lags after a node restart | Handled automatically — the node reaps its own orphaned tool processes on startup and every 60s. Just be on a current node version. |
+| Editing one node's worker count changed every node | Older bug — update the server; the steppers are per-node now. |
+| Scans appear stuck | `docker restart byte-server` clears any SQLite lock contention. |
+| High CPU during transcode | Ensure Hardware Decoding is on in Settings. |
+| Staged file limit shows 0 | Set it to 10+ in Dashboard Options — 0 pauses hand-out. |
 
 ---
 
-### Running multiple nodes
+## MCP (AI assistant control)
 
-Byte Transcode is built for several GPU machines sharing one server, but there's **one rule that will save you hours: keep every node on the same, known-good ffmpeg build.**
+`mcp/byte_mcp.py` is a Model Context Protocol server exposing the whole system as tools — queue, scans, pipeline start/pause, settings, per-node config, logs. Works with any MCP client.
 
-The DV → P8 Profile-5 pipeline runs each frame through ffmpeg's `libplacebo` filter (Vulkan) for Dolby Vision tone-mapping. Some bleeding-edge nightly ffmpeg builds ship a **broken libplacebo that fails to initialize** (`Error initializing filters`), so P5 jobs fail on *that* node while running perfectly on another node whose ffmpeg is an older, working build. Same node code, same command, same GPU — the only difference is the ffmpeg binary.
+```bash
+# Generate an API key in Settings → API first, then:
+claude mcp add byte-transcode -- py path/to/mcp/byte_mcp.py --server http://YOUR_NAS_IP:5800 --api-key YOUR_KEY
+```
 
-- If one node fails P5 and another doesn't, run `ffmpeg -version` on both — if the builds differ, that's your cause.
-- Copy the working node's `tools\ffmpeg.exe` + `ffprobe.exe` onto the failing node (overwrite), restart the node, and it's fixed.
-- **Don't blindly update ffmpeg to the latest nightly** on one machine and not the others. When you do update tools, do all nodes from the same build and test one P5 job first.
-
-Each node still has its **own** temp drive and path mapping (set from its worker card) — those *should* differ per machine. It's only the tool binaries that must match.
-
----
-
-## Tech Stack
-
-- **Python 3** — Flask (server), requests (node), tkinter (GUI)
-- **SQLite** — WAL mode for concurrent access
-- **React 18** — CDN + Babel standalone (single-file frontend, no build step)
-- **ffmpeg** — BtbN GPL build with NVENC/NVDEC support
-- **dovi_tool** — Dolby Vision metadata extraction and conversion
-- **mkvmerge** — MKVToolNix for final container remuxing
-- **Docker** — Server deployment (node runs natively on Windows)
+Requires Python 3.10+ with `mcp` and `requests` (auto-installed on first run).
 
 ---
 
-## Project Structure
+## Reference
+
+**Tech stack** — Python 3 / Flask (server) · requests + tkinter (node) · SQLite (WAL) · React 18 (single-file, CDN + Babel, no build step) · ffmpeg (NVENC/NVDEC + libplacebo/Vulkan) · dovi_tool · MKVToolNix · Docker (server).
+
+**Project structure**
 
 ```
 byte-transcode/
-├── README.md
-├── LICENSE
+├── README.md · LICENSE · version.json
 ├── server/
-│   ├── byte_server_v3.py          # Flask server + API + SQLite
-│   ├── static/
-│   │   └── index.html             # React frontend (single file)
-│   └── docker-compose.yml
+│   ├── byte_server_v3.py       # Flask server + API + SQLite
+│   ├── static/index.html       # React frontend (single file)
+│   ├── docker-compose.yml
+│   └── update.sh
 ├── node/
-│   ├── byte_node_v2.py            # Transcode engine
-│   ├── byte_node_gui.py           # Windows GUI wrapper (tkinter)
-│   ├── byte_node_config.json      # Your local config (gitignored)
+│   ├── byte_node_v2.py         # transcode engine
+│   ├── byte_node_gui.py        # Windows GUI (tkinter)
 │   ├── byte_node_config.example.json
-│   ├── setup_tools.py             # Downloads ffmpeg, dovi_tool, mkvmerge
-│   ├── run_node.bat               # Windows launcher with Python auto-detection
-│   └── tools/                     # Auto-populated by setup_tools.py
-│       ├── ffmpeg.exe
-│       ├── ffprobe.exe
-│       ├── dovi_tool.exe
-│       └── mkvmerge.exe
-└── docker/
-    └── Dockerfile                 # Optional: Docker-based node
+│   ├── setup_tools.py          # downloads ffmpeg, dovi_tool, mkvmerge
+│   ├── run_node.bat · update_node.bat
+│   └── tools/                  # populated by setup_tools.py
+└── mcp/byte_mcp.py             # MCP server
 ```
 
----
+**License** — MIT, see [LICENSE](LICENSE).
 
-## License
-
-MIT License — see [LICENSE](LICENSE)
-
----
-
-## Credits
-
-- [ffmpeg](https://ffmpeg.org/) — multimedia framework
-- [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) — Windows GPL builds with NVENC
-- [quietvoid/dovi_tool](https://github.com/quietvoid/dovi_tool) — Dolby Vision metadata tools
-- [MKVToolNix](https://mkvtoolnix.download/) — Matroska container tools
-- [Tdarr](https://tdarr.io/) — inspiration for the distributed transcoding architecture
+**Credits** — [ffmpeg](https://ffmpeg.org/) · [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) · [quietvoid/dovi_tool](https://github.com/quietvoid/dovi_tool) · [MKVToolNix](https://mkvtoolnix.download/) · inspired by [Tdarr](https://tdarr.io/).
