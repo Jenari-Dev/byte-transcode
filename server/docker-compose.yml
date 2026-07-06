@@ -29,4 +29,8 @@ services:
       bash -c "pip install flask --quiet --break-system-packages 2>/dev/null &&
                python3 /app/byte_server.py --port 5800"
     environment:
-      - TZ=UTC
+      # Container timezone — datetime('now','localtime') resolves to this, so
+      # all stored log/queue timestamps are local time. MUST match your locale
+      # (was TZ=UTC once, which made every timestamp 9h behind for a JST user).
+      # A stale container can hold an old value — recreate (down/up) to apply.
+      - TZ=Asia/Tokyo

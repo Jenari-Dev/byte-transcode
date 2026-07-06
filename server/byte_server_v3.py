@@ -29,7 +29,19 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 from flask import Flask, request, jsonify, send_from_directory, Response, session, redirect
 
-SERVER_VERSION = "3.35"
+# v3.36 — TIMESTAMPS. All stored times use datetime('now','+9 hours') (JST,
+# UTC+9, no DST in Japan) instead of the 'localtime' modifier. The flask
+# process's glibc kept resolving 'localtime' to UTC even with TZ=Asia/Tokyo in
+# its env (Python never calls tzset() and the cached zone stuck), so logs and
+# queue times came out 9h behind. A fixed +9h offset is deterministic and
+# independent of the process/container timezone. tzset() below is belt-and-
+# suspenders for any code that reads the OS local time directly.
+try:
+    time.tzset()
+except AttributeError:
+    pass  # Windows has no tzset()
+
+SERVER_VERSION = "3.36"
 NODE_VERSION = "2.25"   # fallback only; the update bell uses each connected node's reported version
 # Where the update checker looks for the newest published versions.
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main/version.json"
@@ -121,7 +133,7 @@ def init_db():
                 total_size_gb REAL DEFAULT 0,
                 last_scanned TEXT,
                 status TEXT DEFAULT 'idle',
-                created_at TEXT DEFAULT (datetime('now','localtime'))
+                created_at TEXT DEFAULT (datetime('now','+9 hours'))
             );
             CREATE TABLE IF NOT EXISTS queue (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -154,7 +166,7 @@ def init_db():
                 error_message TEXT,
                 started_at TEXT,
                 completed_at TEXT,
-                created_at TEXT DEFAULT (datetime('now','localtime')),
+                created_at TEXT DEFAULT (datetime('now','+9 hours')),
                 accepted INTEGER DEFAULT 0,
                 skipped_reason TEXT,
                 probe_data TEXT,
@@ -168,7 +180,7 @@ def init_db():
                 status TEXT DEFAULT 'idle',
                 current_job_id INTEGER,
                 last_heartbeat TEXT,
-                registered_at TEXT DEFAULT (datetime('now','localtime')),
+                registered_at TEXT DEFAULT (datetime('now','+9 hours')),
                 jobs_completed INTEGER DEFAULT 0,
                 total_saved_gb REAL DEFAULT 0,
                 cpu_usage REAL DEFAULT 0,
@@ -182,7 +194,7 @@ def init_db():
             );
             CREATE TABLE IF NOT EXISTS logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT DEFAULT (datetime('now','localtime')),
+                timestamp TEXT DEFAULT (datetime('now','+9 hours')),
                 level TEXT DEFAULT 'INFO',
                 source TEXT DEFAULT 'server',
                 message TEXT NOT NULL,
@@ -346,7 +358,7 @@ def init_db():
                             error_message TEXT,
                             started_at TEXT,
                             completed_at TEXT,
-                            created_at TEXT DEFAULT (datetime('now','localtime')),
+                            created_at TEXT DEFAULT (datetime('now','+9 hours')),
                             accepted INTEGER DEFAULT 0,
                             skipped_reason TEXT,
                             probe_data TEXT,
@@ -406,7 +418,11 @@ def init_db():
 def add_log(msg, level="INFO", source="server", job_id=None):
     try:
         with get_db() as db:
-            db.execute("INSERT INTO logs (level, source, message, job_id) VALUES (?, ?, ?, ?)",
+            # v3.36 — set timestamp explicitly (+9h/JST). The existing table's
+            # column DEFAULT is still the old 'localtime' (which the flask
+            # process resolves to UTC), and editing CREATE TABLE doesn't change
+            # an already-created table — so rely on the explicit value, not the default.
+            db.execute("INSERT INTO logs (timestamp, level, source, message, job_id) VALUES (datetime('now','+9 hours'), ?, ?, ?, ?)",
                        (level, source, msg, job_id))
     except Exception:
         pass
@@ -539,7 +555,7 @@ def _flush_buffers():
         def _wl():
             with get_db() as db:
                 db.executemany(
-                    "INSERT INTO logs (level, source, message, job_id) VALUES (?, ?, ?, ?)", logs)
+                    "INSERT INTO logs (timestamp, level, source, message, job_id) VALUES (datetime('now','+9 hours'), ?, ?, ?, ?)", logs)
         try: db_write_retry(_wl)
         except Exception as e: log.error(f"log flush failed: {e}")
 
@@ -904,7 +920,7 @@ def scan_library_task(library_id):
                 added += 1
 
     with get_db() as db:
-        db.execute("UPDATE libraries SET file_count=?, total_size_gb=?, last_scanned=datetime('now','localtime'), status='scanned' WHERE id=?",
+        db.execute("UPDATE libraries SET file_count=?, total_size_gb=?, last_scanned=datetime('now','+9 hours'), status='scanned' WHERE id=?",
                    (file_count, total_size, library_id))
 
     scan_progress[library_id] = {"total": total_files, "scanned": total_files, "current_file": "", "eta": "done", "status": "complete"}
@@ -1803,7 +1819,7 @@ def start_health_check_loop():
                     # Reset libraries stuck in 'scanning' for > 30 minutes
                     stuck_libs = db.execute("""UPDATE libraries SET status='idle'
                         WHERE status='scanning' AND last_scanned IS NOT NULL
-                        AND last_scanned < datetime('now','localtime', '-30 minutes')""")
+                        AND last_scanned < datetime('now','+9 hours', '-30 minutes')""")
                     if stuck_libs.rowcount > 0:
                         log.warning(f"Auto-reset {stuck_libs.rowcount} stuck library scans")
                         deferred_logs.append((f"Auto-reset {stuck_libs.rowcount} stuck library scans (>30min)", "WARN", None))
@@ -1811,7 +1827,7 @@ def start_health_check_loop():
                     # Also reset libraries stuck with no last_scanned timestamp
                     stuck_libs2 = db.execute("""UPDATE libraries SET status='idle'
                         WHERE status='scanning' AND last_scanned IS NULL
-                        AND created_at < datetime('now','localtime', '-30 minutes')""")
+                        AND created_at < datetime('now','+9 hours', '-30 minutes')""")
                     if stuck_libs2.rowcount > 0:
                         log.warning(f"Auto-reset {stuck_libs2.rowcount} stuck new library scans")
 
@@ -1836,17 +1852,17 @@ def start_health_check_loop():
                     ghost_jobs = db.execute("""SELECT q.id, q.worker_id, q.file_name,
                             COALESCE(q.attempts,0) AS attempts FROM queue q
                         WHERE q.status='processing'
-                          AND q.started_at < datetime('now','localtime', '-300 seconds')
+                          AND q.started_at < datetime('now','+9 hours', '-300 seconds')
                           AND NOT EXISTS (
                               SELECT 1 FROM workers w
                               WHERE w.id = q.worker_id
-                                AND w.last_heartbeat > datetime('now','localtime', '-600 seconds'))""").fetchall()
+                                AND w.last_heartbeat > datetime('now','+9 hours', '-600 seconds'))""").fetchall()
                     for sj in ghost_jobs:
                         att = (sj["attempts"] or 0) + 1
                         if att >= MAX_REQUEUE_ATTEMPTS:
                             # v3.19 — poison job: stop re-feeding it to workers.
                             db.execute("""UPDATE queue SET status='error', worker_id=NULL, started_at=NULL,
-                                attempts=?, current_step='Failed', completed_at=datetime('now','localtime'),
+                                attempts=?, current_step='Failed', completed_at=datetime('now','+9 hours'),
                                 error_message=? WHERE id=?""",
                                 (att, f"Auto-failed after {att} worker-offline requeues (likely a bad file or node issue)", sj["id"]))
                             deferred_logs.append((f"Parked poison job #{sj['id']} after {att} requeues: {sj['file_name']}", "WARN", sj["id"]))
@@ -1871,13 +1887,13 @@ def start_health_check_loop():
                     never_started = db.execute("""SELECT id, worker_id, file_name,
                             COALESCE(attempts,0) AS attempts FROM queue
                         WHERE status='processing'
-                          AND started_at < datetime('now','localtime', '-1200 seconds')
+                          AND started_at < datetime('now','+9 hours', '-360 seconds')
                           AND COALESCE(progress,0) = 0""").fetchall()
                     for sj in never_started:
                         att = (sj["attempts"] or 0) + 1
                         if att >= MAX_REQUEUE_ATTEMPTS:
                             db.execute("""UPDATE queue SET status='error', worker_id=NULL, started_at=NULL,
-                                attempts=?, current_step='Failed', completed_at=datetime('now','localtime'),
+                                attempts=?, current_step='Failed', completed_at=datetime('now','+9 hours'),
                                 error_message=? WHERE id=?""",
                                 (att, f"Auto-failed after {att} stalled starts (worker wedged before Step 1 — check the node's media drive)", sj["id"]))
                             deferred_logs.append((f"Parked never-started job #{sj['id']} after {att} stalls: {sj['file_name']}", "WARN", sj["id"]))
@@ -1893,23 +1909,23 @@ def start_health_check_loop():
                     # Jobs stuck mid-work for 2+ hours (worker alive but no
                     # progress advance) still error out for manual attention.
                     stuck_jobs = db.execute("""SELECT id, worker_id, file_name FROM queue
-                        WHERE status='processing' AND started_at < datetime('now','localtime', '-7200 seconds')
+                        WHERE status='processing' AND started_at < datetime('now','+9 hours', '-7200 seconds')
                         AND progress > 0""").fetchall()
                     for sj in stuck_jobs:
-                        db.execute("UPDATE queue SET status='error', error_message='Stuck — no progress for 2+ hours', completed_at=datetime('now','localtime') WHERE id=?", (sj["id"],))
+                        db.execute("UPDATE queue SET status='error', error_message='Stuck — no progress for 2+ hours', completed_at=datetime('now','+9 hours') WHERE id=?", (sj["id"],))
                         if sj["worker_id"]:
                             db.execute("UPDATE workers SET status='idle', current_job_id=NULL WHERE id=?", (sj["worker_id"],))
                         deferred_logs.append((f"Auto-cancelled stuck job #{sj['id']}: {sj['file_name']}", "WARN", sj["id"]))
 
                     # Clean up workers with stale heartbeats (> 5 minutes) that show as active
                     db.execute("""UPDATE workers SET status='idle', current_job_id=NULL
-                        WHERE status='active' AND last_heartbeat < datetime('now','localtime', '-300 seconds')""")
+                        WHERE status='active' AND last_heartbeat < datetime('now','+9 hours', '-300 seconds')""")
 
                     # Auto-delete workers with no heartbeat for 10+ minutes (dead
                     # nodes). v3.22 — was 30 min, which left stale rows inflating
                     # the "nodes online" count long after a node stopped.
                     deleted = db.execute("""DELETE FROM workers
-                        WHERE last_heartbeat < datetime('now','localtime', '-600 seconds')""")
+                        WHERE last_heartbeat < datetime('now','+9 hours', '-600 seconds')""")
                     if deleted.rowcount > 0:
                         log.info(f"Auto-deleted {deleted.rowcount} dead worker(s) (no heartbeat for 10+ min)")
 
@@ -1931,7 +1947,7 @@ def start_health_check_loop():
 def api_status():
     with get_db() as db:
         qs = db.execute("SELECT status, COUNT(*) as c, COALESCE(SUM(file_size_gb),0) as gb FROM queue GROUP BY status").fetchall()
-        wc = db.execute("SELECT COUNT(*) as c FROM workers WHERE last_heartbeat > datetime('now','localtime','-60 seconds')").fetchone()["c"]
+        wc = db.execute("SELECT COUNT(*) as c FROM workers WHERE last_heartbeat > datetime('now','+9 hours','-60 seconds')").fetchone()["c"]
     return jsonify({"status": "running", "queue": {s["status"]: {"count": s["c"], "total_gb": s["gb"]} for s in qs}, "active_workers": wc, "version": SERVER_VERSION})
 
 # Libraries
@@ -2437,7 +2453,7 @@ def api_updates_check():
     # (pre-3.25) are ignored so we don't nag about phantom updates.
     with get_db() as db:
         online = db.execute("""SELECT name, COALESCE(version,'') AS version FROM workers
-            WHERE last_heartbeat > datetime('now','localtime','-300 seconds')""").fetchall()
+            WHERE last_heartbeat > datetime('now','+9 hours','-300 seconds')""").fetchall()
     node_versions = [{"name": w["name"], "version": w["version"]} for w in online]
     reported = [w["version"] for w in online if w["version"]]
     outdated = [w for w in node_versions if w["version"] and _vtuple(w["version"]) < _vtuple(latest_node)]
@@ -2697,7 +2713,7 @@ def api_server_overview():
     except Exception as e:
         info["error"] = str(e)
     with get_db() as db:
-        wc = db.execute("SELECT COUNT(*) as c FROM workers WHERE last_heartbeat > datetime('now','localtime','-300 seconds')").fetchone()["c"]
+        wc = db.execute("SELECT COUNT(*) as c FROM workers WHERE last_heartbeat > datetime('now','+9 hours','-300 seconds')").fetchone()["c"]
         qc = db.execute("SELECT COUNT(*) as c FROM queue WHERE status='queued'").fetchone()["c"]
         pc = db.execute("SELECT COUNT(*) as c FROM queue WHERE status='processing'").fetchone()["c"]
     info.update({"active_workers": wc, "queued": qc, "processing": pc,
@@ -2746,7 +2762,7 @@ def api_register_worker():
     if not wid: return jsonify({"error": "ID required"}), 400
     name = d.get("name", "")
     with get_db() as db:
-        db.execute("INSERT OR REPLACE INTO workers (id,name,host,gpu,status,last_heartbeat,version) VALUES (?,?,?,?,'idle',datetime('now','localtime'),?)",
+        db.execute("INSERT OR REPLACE INTO workers (id,name,host,gpu,status,last_heartbeat,version) VALUES (?,?,?,?,'idle',datetime('now','+9 hours'),?)",
                    (wid, name, d.get("host",""), d.get("gpu",""), d.get("version","")))
         # v3.22 — collapse duplicate rows for the same node name that are no
         # longer heartbeating (e.g. a node relaunched from a different folder,
@@ -2754,7 +2770,7 @@ def api_register_worker():
         # heartbeat and is preserved.
         if name:
             db.execute("""DELETE FROM workers WHERE name=? AND id<>?
-                AND (last_heartbeat IS NULL OR last_heartbeat < datetime('now','localtime','-120 seconds'))""",
+                AND (last_heartbeat IS NULL OR last_heartbeat < datetime('now','+9 hours','-120 seconds'))""",
                 (name, wid))
         # v3.28 — a re-registering worker is a FRESH start (it was just
         # (re)launched — e.g. after an update). Any job still marked 'processing'
@@ -2776,7 +2792,7 @@ def api_prune_workers():
     the 10-min auto-delete. Any processing jobs they held are requeued."""
     with get_db() as db:
         stale = db.execute("""SELECT id FROM workers
-            WHERE last_heartbeat IS NULL OR last_heartbeat < datetime('now','localtime','-120 seconds')""").fetchall()
+            WHERE last_heartbeat IS NULL OR last_heartbeat < datetime('now','+9 hours','-120 seconds')""").fetchall()
         ids = [w["id"] for w in stale]
         for wid in ids:
             db.execute("""UPDATE queue SET status='queued', worker_id=NULL, started_at=NULL,
@@ -2790,7 +2806,7 @@ def api_prune_workers():
 def api_heartbeat():
     d = request.json
     with get_db() as db:
-        db.execute("""UPDATE workers SET last_heartbeat=datetime('now','localtime'), cpu_usage=?, ram_usage=?,
+        db.execute("""UPDATE workers SET last_heartbeat=datetime('now','+9 hours'), cpu_usage=?, ram_usage=?,
             gpu_usage=?, vram_usage=?, version=COALESCE(NULLIF(?,''),version),
             media_ok=COALESCE(?, media_ok) WHERE id=?""",
                    (d.get("cpu", 0), d.get("ram", 0), d.get("gpu_usage", 0), d.get("vram", 0),
@@ -2838,19 +2854,36 @@ def _effective_worker_cap(db):
     except (TypeError, ValueError):
         global_tw = 1
     online = db.execute(
-        "SELECT id FROM workers WHERE last_heartbeat > datetime('now','localtime','-90 seconds')"
+        "SELECT id FROM workers WHERE last_heartbeat > datetime('now','+9 hours','-90 seconds')"
     ).fetchall()
+    # v3.35 — count GPU + CPU workers per node, matching the node's _tw_count
+    # (which spawns transcode_gpu_count + transcode_cpu_count threads). The old
+    # code only counted transcode_gpu_count, so the fleet cap stayed at the sum
+    # of GPU counts and the CPU workers could never claim a job — the node would
+    # spawn 6 threads but the server would only ever hand out 4.
+    global_cpu = 0
+    try:
+        global_cpu = int(get_setting("transcode_cpu_count") or "0")
+    except (TypeError, ValueError):
+        global_cpu = 0
     total = 0
     for w in online:
-        n = global_tw
+        cfg = {}
         raw = get_setting(f"worker_config_{w['id']}")
         if raw:
             try:
-                v = json.loads(raw).get("transcode_gpu_count")
-                if v is not None:
-                    n = int(v)
+                cfg = json.loads(raw)
             except Exception:
-                pass
+                cfg = {}
+        def _cnt(key, dflt):
+            v = cfg.get(key)
+            if v is None or str(v).strip() == "":
+                return dflt
+            try:
+                return max(0, int(v))
+            except (TypeError, ValueError):
+                return dflt
+        n = _cnt("transcode_gpu_count", global_tw) + _cnt("transcode_cpu_count", global_cpu)
         total += max(1, n)
     return max(total, manual)
 
@@ -2908,7 +2941,7 @@ def api_next_job():
 
         # Atomic claim — only succeed if status is still 'queued'
         result = db.execute(
-            "UPDATE queue SET status='processing', worker_id=?, started_at=datetime('now','localtime'), "
+            "UPDATE queue SET status='processing', worker_id=?, started_at=datetime('now','+9 hours'), "
             "current_step='Starting...' WHERE id=? AND status='queued'",
             (wid, job["id"]))
         if result.rowcount == 0:
@@ -2968,7 +3001,7 @@ def api_complete(jid):
     replaced = not hold
     def _w():
         with get_db() as db:
-            db.execute("UPDATE queue SET status='complete', progress=100, current_step=?, output_path=?, output_size_gb=?, reduction_pct=?, completed_at=datetime('now','localtime'), accepted=?, finalized=? WHERE id=?",
+            db.execute("UPDATE queue SET status='complete', progress=100, current_step=?, output_path=?, output_size_gb=?, reduction_pct=?, completed_at=datetime('now','+9 hours'), accepted=?, finalized=? WHERE id=?",
                        (step, d.get("output_path",""), d.get("output_size_gb",0), d.get("reduction_pct",0), int(auto), int(replaced), jid))
             # v3.27 — count the completion, but only flip the node to idle / clear
             # the pointer if THIS job was the one displayed. On a multi-threaded
@@ -3039,10 +3072,10 @@ def api_error(jid):
     def _w():
         with get_db() as db:
             if is_cancel:
-                db.execute("UPDATE queue SET status='cancelled', progress=0, current_step='Cancelled', error_message=?, completed_at=datetime('now','localtime') WHERE id=?",
+                db.execute("UPDATE queue SET status='cancelled', progress=0, current_step='Cancelled', error_message=?, completed_at=datetime('now','+9 hours') WHERE id=?",
                            (err, jid))
             else:
-                db.execute("UPDATE queue SET status='error', progress=0, current_step='Failed', error_message=?, completed_at=datetime('now','localtime') WHERE id=?",
+                db.execute("UPDATE queue SET status='error', progress=0, current_step='Failed', error_message=?, completed_at=datetime('now','+9 hours') WHERE id=?",
                            (err, jid))
             # v3.27 — only clear the pointer if this job was the displayed one
             # (a multi-threaded node keeps other jobs running).
@@ -3110,7 +3143,7 @@ def api_dashboard():
         ws = db.execute("""SELECT w.*, q.file_name as current_file, q.progress as job_progress,
             q.current_step, q.eta as job_eta, q.hdr_type, q.dovi_profile, q.file_size_gb, q.audio_summary
             FROM workers w LEFT JOIN queue q ON w.current_job_id=q.id
-            WHERE w.last_heartbeat > datetime('now','localtime','-300 seconds')""").fetchall()
+            WHERE w.last_heartbeat > datetime('now','+9 hours','-300 seconds')""").fetchall()
         saved = db.execute("SELECT COALESCE(SUM(file_size_gb-COALESCE(output_size_gb,file_size_gb)),0) as s FROM queue WHERE status='complete'").fetchone()
         processing = db.execute("SELECT * FROM queue WHERE status='processing' ORDER BY priority").fetchall()
         recent_complete = db.execute("SELECT * FROM queue WHERE status='complete' ORDER BY completed_at DESC LIMIT 10").fetchall()

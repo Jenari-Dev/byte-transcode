@@ -1,7 +1,7 @@
 {
-  "server": "3.35",
-  "node": "2.27",
+  "server": "3.36",
+  "node": "2.28",
   "released": "2026-07-06",
-  "notes": "3.35 (live server/UI, no node update needed): fixes the per-node worker steppers — the CPU/GPU +/- controls on each node card used to write the GLOBAL setting, so changing one node's counts changed every node. They're now per-node: each stepper reads that node's override (falling back to the global default) and saves to that node's config only. Blue value = per-node override active. Removed the redundant worker-count text fields from Per-Node Overrides. Node 2.27 unchanged (Transcode CPU box works via GPU+CPU sum, ETA wall-clock fallback, error-85-proof remap, 10s source-stat timeout).",
+  "notes": "Fixes the real 3060 wedge + timezone + job cap. TIMEZONE: docker-compose was set to TZ=UTC, so every stored timestamp was 9h behind — now TZ=JST-9 (UTC+9, no tzdata needed). JOB CAP: the fleet cap only counted each node's GPU workers, so total was stuck at the sum of GPU counts and the new CPU workers could never claim a job — now it counts GPU+CPU per node. 3060 WEDGE: node 2.28 hardens temp-drive enumeration — the spill path (used when the temp drive is low on space) called psutil.disk_partitions(), which hangs forever on Windows when a dead network drive exists, wedging the worker before Step 1 with no timeout; now it uses GetDriveTypeW (fixed drives only, never touches the network). Server also requeues never-started (0% for 6+ min) jobs faster. NOTE: the 3060 wedges because its temp drive C:\\Byte_temp is low on space (triggering the spill); pointing its temp at a roomier drive avoids it even before updating.",
   "update_docs": "https://github.com/Jenari-Dev/byte-transcode#updating"
 }

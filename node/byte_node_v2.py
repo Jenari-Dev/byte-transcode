@@ -158,7 +158,7 @@ except Exception:
 # ─── Self-update (v2.11) ─────────────────────────────────────────────────────
 # The node checks the same published manifest the web UI uses and can pull its
 # own new files from GitHub, then relaunch — matching the website's update flow.
-NODE_VERSION = "2.27"
+NODE_VERSION = "2.28"
 GITHUB_RAW = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main"
 VERSION_MANIFEST_URL = GITHUB_RAW + "/version.json"
 NODE_FILES = ["byte_node_v2.py", "byte_node_gui.py", "setup_tools.py",
@@ -326,7 +326,29 @@ class ByteNode:
             return 0
 
     def _list_temp_drives(self):
-        """Fixed local drives usable for temp, as base mount paths (Windows 'D:\\')."""
+        """Fixed local drives usable for temp, as base mount paths (Windows 'D:\\').
+        v2.28 — Windows: enumerate with GetDriveTypeW and keep ONLY DRIVE_FIXED.
+        The old psutil.disk_partitions() path (and os.path.exists fallback) could
+        HANG INDEFINITELY on a dead/zombie NETWORK drive — which wedged a spill
+        (triggered when the temp drive is low on space) right before Step 1 with
+        no timeout (the 3060 black-hole after 2.27). GetDriveTypeW reads the local
+        mount table only; it never touches the network, so it cannot hang."""
+        if os.name == "nt":
+            try:
+                import ctypes
+                get_type = ctypes.windll.kernel32.GetDriveTypeW
+                DRIVE_FIXED = 3
+                drives = []
+                for l in "CDEFGHIJKLMNOPQRSTUVWXYZ":
+                    root = f"{l}:\\"
+                    try:
+                        if get_type(root) == DRIVE_FIXED:
+                            drives.append(root)
+                    except Exception:
+                        pass
+                return drives
+            except Exception:
+                pass
         drives = []
         try:
             import psutil
@@ -336,13 +358,7 @@ class ByteNode:
                     continue
                 drives.append(p.mountpoint)
         except Exception:
-            if os.name == "nt":
-                for l in "CDEFGHIJKLMNOPQRSTUVWXYZ":
-                    d = f"{l}:\\"
-                    if os.path.exists(d):
-                        drives.append(d)
-            else:
-                drives.append("/")
+            drives.append("/")
         return drives
 
     def _need_bytes(self, filepath, file_size_gb, mult):
