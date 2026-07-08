@@ -41,7 +41,7 @@ try:
 except AttributeError:
     pass  # Windows has no tzset()
 
-SERVER_VERSION = "3.40"
+SERVER_VERSION = "3.41"
 NODE_VERSION = "2.25"   # fallback only; the update bell uses each connected node's reported version
 # Where the update checker looks for the newest published versions.
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main/version.json"
@@ -252,14 +252,6 @@ def init_db():
             # Target codec for compat re-encodes: h264 = plays on everything,
             # hevc = smaller files, plays on most modern devices
             "compat_target": "h264",
-            # v3.40 — Flag 10-bit HEVC (Main 10) for an 8-bit re-encode.
-            # OFF by default: most modern TVs/phones/clients hardware-decode
-            # 10-bit HEVC fine, so flagging it would sweep most libraries.
-            # Turn ON if a target device can't direct-play 10-bit HEVC — e.g. a
-            # budget/older TV whose HEVC decoder is 8-bit-only. Symptom: the file
-            # black-screens / needs a client bitrate cap (which forces a transcode
-            # to 8-bit) to play. This was the real Euphoria cause.
-            "compat_flag_10bit_hevc": "false",
             # Worker / concurrency counts (v3.0+; defaults surfaced v3.11).
             # transcode_gpu_count = concurrent transcode workers per node.
             # healthcheck_(gpu|cpu)_count = how many file health checks the
@@ -858,6 +850,18 @@ def scan_library_task(library_id):
     path = lib["path"]
     add_log(f"Scanning library: {lib['name']} ({path})")
 
+    # v3.41 — reconcile first: retire rows whose source moved/renamed (e.g. a
+    # Sonarr/Radarr rename, or files relocated to a new library path) so a
+    # "Find New" scan actually cleans up the stale "missing" rows instead of
+    # only adding the new ones. Mount-guarded, so it's a no-op if the drive is
+    # briefly offline.
+    try:
+        _rec = reconcile_missing_files(lib_id=library_id)
+        if _rec:
+            add_log(f"Scan reconcile: retired {_rec} moved/renamed file(s) in {lib['name']} → skipped")
+    except Exception as e:
+        log.error(f"scan reconcile failed for lib #{library_id}: {e}")
+
     # Count total files first for progress
     total_files = count_video_files(path)
     scan_progress[library_id] = {"total": total_files, "scanned": 0, "current_file": "", "eta": "calculating...", "status": "scanning"}
@@ -1266,18 +1270,12 @@ COMPAT_BAD_VCODECS = {'vc1', 'mpeg2video', 'mpeg4', 'msmpeg4v3', 'msmpeg4v2',
                       'wmv1', 'wmv2', 'wmv3', 'vp8', 'h263', 'mjpeg'}
 COMPAT_MAX_SUB_TRACKS = 12
 
-def analyze_for_compat(probe_json, ext, flag_10bit_hevc=None):
+def analyze_for_compat(probe_json, ext):
     """
     Decide whether a file risks playback issues and how to fix it.
     Returns {"flag": bool, "reasons": [str], "strategy": 'remux'|'reencode',
              "deinterlace": bool, "filter_subs": bool}.
-
-    flag_10bit_hevc: when True, 10-bit HEVC (Main 10) SDR files are flagged for
-    an 8-bit re-encode. For devices whose HEVC decoder is 8-bit-only (some
-    budget/older TVs). Defaults to the compat_flag_10bit_hevc setting.
     """
-    if flag_10bit_hevc is None:
-        flag_10bit_hevc = (get_setting("compat_flag_10bit_hevc") == "true")
     reasons = []
     strategy = None
     deinterlace = False
@@ -1311,18 +1309,13 @@ def analyze_for_compat(probe_json, ext, flag_10bit_hevc=None):
         if vcodec == "h264" and is_10bit:
             reasons.append("10-bit H.264 (Hi10P) — unplayable on most devices")
             strategy = "reencode"
-        # 10-bit HEVC (Main 10) SDR. OFF by default — hardware-decoded by
-        # essentially all modern TVs/phones/clients, and flagging it sweeps
-        # most libraries (~78%) into a lossy 8-bit re-encode for nothing.
-        # But some budget/older TVs have an 8-bit-only HEVC decoder and can't
-        # direct-play it (black screen / needs a client bitrate cap to force a
-        # transcode) — this was the real Euphoria S2/S3 cause. Enable
-        # compat_flag_10bit_hevc for those setups to re-encode to 8-bit.
-        # HDR/DV 10-bit is never caught here (is_hdr guard) — the DV pipeline
-        # owns those, and re-encoding real HDR to 8-bit SDR would wreck it.
-        if (flag_10bit_hevc and vcodec == "hevc" and is_10bit and not is_hdr):
-            reasons.append("10-bit HEVC (Main 10) — won't play on 8-bit-only TV decoders")
-            strategy = "reencode"
+        # NOTE: 10-bit HEVC (Main 10) is intentionally NOT flagged. It is
+        # hardware-decoded by essentially all modern TVs/phones/clients, and a
+        # library audit found no metadata signature that distinguishes a file
+        # that won't play from the thousands that do (e.g. Euphoria's failing
+        # seasons were spec-identical to working files — one was even plain
+        # 8-bit H.264). Blanket-converting 10-bit to 8-bit is lossy and pointless.
+        # (is_hdr/has_dovi_sd kept above for the DV pipeline's guard.)
         if field in ("tt", "bb", "tb", "bt"):
             reasons.append("interlaced video")
             strategy = "reencode"
@@ -1359,7 +1352,6 @@ def scan_compat_task(library_id):
                            "eta": "calculating...", "status": "scanning"}
     start_time = time.time()
     file_count, flagged, recorded_ok, skipped_dup, skipped_probe = 0, 0, 0, 0, 0
-    flag_10bit_hevc = (get_setting("compat_flag_10bit_hevc") == "true")
 
     for root, dirs, files in os.walk(path):
         for filename in sorted(files):
@@ -1401,7 +1393,7 @@ def scan_compat_task(library_id):
                 skipped_probe += 1
                 continue
 
-            compat = analyze_for_compat(probe_json, ext, flag_10bit_hevc)
+            compat = analyze_for_compat(probe_json, ext)
             # Stash the decision inside probe_data so the node knows the
             # strategy without any schema change.
             probe_json["_compat"] = compat
@@ -1711,7 +1703,13 @@ def _health_check_one(item):
     status, error = "healthy", None
     try:
         if not os.path.exists(path):
-            status, error = "missing", "File not found on disk"
+            # v3.41 — distinguish a genuine move/rename (mount alive, file gone)
+            # from a whole-mount outage. Moved/renamed → retire quietly to
+            # 'skipped'; a real outage stays 'missing' for the transient path.
+            if _source_moved(path):
+                status, error = "moved", "Source moved or renamed — a re-scan re-adds it under the new path/name"
+            else:
+                status, error = "missing", "File not found on disk"
         elif os.path.getsize(path) == 0:
             status, error = "corrupt", "File is empty (0 bytes)"
         else:
@@ -1747,6 +1745,9 @@ def _health_check_one(item):
         with get_db() as db:
             if status == "healthy":
                 db.execute("UPDATE queue SET health_status='healthy', status='queued', current_step='Health check passed' WHERE id=?", (job_id,))
+            elif status == "moved":
+                db.execute("UPDATE queue SET health_status='moved', status='skipped', error_message=?, current_step='Source moved/renamed — rescan adds the new path', completed_at=datetime('now','+9 hours') WHERE id=?",
+                           (error, job_id))
             else:
                 db.execute("UPDATE queue SET health_status=?, status='error', error_message=?, current_step='Health check failed' WHERE id=?",
                            (status, error, job_id))
@@ -1757,6 +1758,8 @@ def _health_check_one(item):
     hc_checking_since.pop(job_id, None)
     if status == "healthy":
         add_log(f"[Health Check] PASSED: {filename}", source="healthcheck", job_id=job_id)
+    elif status == "moved":
+        add_log(f"[Health Check] MOVED/RENAMED: {filename} — retired to skipped (re-scan re-adds it)", source="healthcheck", job_id=job_id)
     else:
         add_log(f"[Health Check] FAILED: {filename} — {error}", level="ERROR", source="healthcheck", job_id=job_id)
 
@@ -1807,6 +1810,80 @@ def health_check_task():
 # or a hung probe: unknown or >10-minute-old 'checking' states go back to
 # 'pending'.
 hc_checking_since = {}
+
+# ── v3.41 — moved / renamed source reconciliation ─────────────────────────
+# Sonarr/Radarr renames and library moves (e.g. anime → animexxx) leave queue
+# rows pointing at a path that no longer exists. Those used to pile up forever
+# as "File not found" ERRORS. Instead we detect a genuine move/rename — the
+# file is gone but the media mount is provably still alive — and retire the
+# stale row to 'skipped' (a re-scan re-adds the file under its new path/name).
+# CRITICAL guard: if the whole mount is offline, os.path.exists is False for
+# EVERYTHING, so we must NOT purge — _source_moved returns False unless an
+# ancestor directory still exists and is non-empty (mount proven alive).
+_MOVED_ERR_PATTERNS = ("not found", "no such file", "cannot find the file",
+                       "cannot find the path", "winerror 2", "winerror 3",
+                       "does not exist", "file is missing", "source moved")
+
+def _source_moved(path):
+    """True only when `path` is gone AND a surviving ancestor directory still
+    lists entries — i.e. the media mount is alive and the file was genuinely
+    moved or renamed. Returns False if no ancestor exists (mount offline →
+    transient, do not purge)."""
+    try:
+        if not path or os.path.exists(path):
+            return False
+        p = os.path.dirname(path)
+        hops = 0
+        while p and hops < 10:
+            if os.path.exists(p):
+                try:
+                    with os.scandir(p) as it:
+                        return any(True for _ in it)  # dir alive & populated
+                except Exception:
+                    return False
+            parent = os.path.dirname(p)
+            if parent == p:
+                break
+            p, hops = parent, hops + 1
+    except Exception:
+        return False
+    return False
+
+def reconcile_missing_files(lib_id=None, limit=4000):
+    """Retire queue rows whose source moved/renamed to 'skipped'. Considers
+    error/queued/pending rows already flagged missing or whose message looks
+    like a not-found. Mount-guarded via _source_moved. Returns count retired."""
+    like = " OR ".join("LOWER(COALESCE(error_message,'')) LIKE ?" for _ in _MOVED_ERR_PATTERNS)
+    conds = ["status IN ('error','queued','pending')",
+             "(health_status='missing' OR " + like + ")"]
+    params = [f"%{t}%" for t in _MOVED_ERR_PATTERNS]
+    if lib_id is not None:
+        conds.append("library_id=?"); params.append(lib_id)
+    sql = "SELECT id, file_path FROM queue WHERE " + " AND ".join(conds) + " LIMIT ?"
+    params.append(limit)
+    try:
+        with get_db() as db:
+            rows = db.execute(sql, params).fetchall()
+    except Exception as e:
+        log.error(f"reconcile query failed: {e}")
+        return 0
+    moved = [r["id"] for r in rows if _source_moved(r["file_path"])]
+    if not moved:
+        return 0
+    def _w():
+        with get_db() as db:
+            db.executemany(
+                "UPDATE queue SET status='skipped', health_status='moved', "
+                "current_step='Source moved/renamed — rescan adds the new path', "
+                "error_message='Source moved or renamed; old path is gone. A re-scan re-adds it under the new name/path.', "
+                "worker_id=NULL, completed_at=datetime('now','+9 hours') WHERE id=?",
+                [(i,) for i in moved])
+    try:
+        db_write_retry(_w)
+    except Exception as e:
+        log.error(f"reconcile write failed: {e}")
+        return 0
+    return len(moved)
 
 def start_health_check_loop():
     def loop():
@@ -1987,6 +2064,19 @@ def start_health_check_loop():
             for msg, lvl, jid in deferred_logs:
                 add_log(msg, level=lvl, job_id=jid)
 
+            # v3.41 — every ~60s, retire moved/renamed sources so they stop
+            # nagging as "File not found" errors. Runs OUTSIDE the get_db()
+            # block above (reconcile opens its own connection). Mount-guarded,
+            # so a transient outage never purges the queue.
+            recovery_loop._tick = getattr(recovery_loop, "_tick", 0) + 1
+            if recovery_loop._tick % 12 == 0:
+                try:
+                    n = reconcile_missing_files()
+                    if n:
+                        add_log(f"Reconciled {n} moved/renamed file(s) → skipped (re-scan re-adds them under the new path)", level="INFO")
+                except Exception as e:
+                    log.error(f"auto-reconcile failed: {e}")
+
             time.sleep(5)
 
     threading.Thread(target=loop, daemon=True, name="health-check").start()
@@ -2125,20 +2215,19 @@ def api_scan_all():
 @app.route("/api/libraries/<int:lid>/refresh", methods=["POST"])
 @login_required
 def api_refresh_library(lid):
-    """Re-scan and update changed files."""
-    with get_db() as db:
-        # Remove queue items whose files no longer exist
-        items = db.execute("SELECT id, file_path FROM queue WHERE library_id=?", (lid,)).fetchall()
-        removed = 0
-        for item in items:
-            if not os.path.exists(item["file_path"]):
-                db.execute("DELETE FROM queue WHERE id=?", (item["id"],))
-                removed += 1
-        if removed:
-            add_log(f"Refresh: removed {removed} missing files from library #{lid}")
-    # Then do a fresh scan to pick up new files
+    """Reconcile moved/renamed sources, then re-scan for new files.
+    v3.41 — was a BLIND delete of every row whose file_path didn't exist,
+    which would wipe an entire library's queue during a brief mount outage
+    (os.path.exists → False for everything). Now mount-guarded: only rows whose
+    source is provably moved/renamed (an ancestor dir is still alive) are
+    retired to 'skipped', never deleted, so nothing is lost and an outage is
+    a no-op."""
+    moved = reconcile_missing_files(lib_id=lid)
+    if moved:
+        add_log(f"Refresh: retired {moved} moved/renamed file(s) in library #{lid} → skipped")
+    # Then do a fresh scan to pick up the files under their new path/name
     threading.Thread(target=scan_library_task, args=(lid,), daemon=True).start()
-    return jsonify({"ok": True, "removed": removed})
+    return jsonify({"ok": True, "reconciled": moved})
 
 @app.route("/api/scan-progress")
 @login_required
