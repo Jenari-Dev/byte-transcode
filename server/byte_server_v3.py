@@ -41,7 +41,7 @@ try:
 except AttributeError:
     pass  # Windows has no tzset()
 
-SERVER_VERSION = "3.38"
+SERVER_VERSION = "3.39"
 NODE_VERSION = "2.25"   # fallback only; the update bell uses each connected node's reported version
 # Where the update checker looks for the newest published versions.
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main/version.json"
@@ -1297,9 +1297,14 @@ def analyze_for_compat(probe_json, ext):
         if vcodec == "h264" and is_10bit:
             reasons.append("10-bit H.264 (Hi10P) — unplayable on most devices")
             strategy = "reencode"
-        if vcodec == "hevc" and is_10bit and not is_hdr:
-            reasons.append("10-bit HEVC SDR — known playback issues on some TV clients")
-            strategy = "reencode"
+        # v3.39 — DROPPED the "10-bit HEVC SDR" flag. 10-bit HEVC (Main10) is
+        # hardware-decoded by essentially all modern TVs/phones/clients, so
+        # flagging it wrongly swept ~78% of a library into the Compat queue and
+        # would have re-encoded fine files down to 8-bit H.264 (lossy, often
+        # bigger). Compat only flags what genuinely won't direct-play now:
+        # Hi10P, legacy codecs (VC-1/MPEG-2/MPEG-4-ASP/WMV/…), bad containers,
+        # interlaced, and subtitle overload. (is_hdr/has_dovi_sd kept above in
+        # case future rules need them.)
         if field in ("tt", "bb", "tb", "bt"):
             reasons.append("interlaced video")
             strategy = "reencode"

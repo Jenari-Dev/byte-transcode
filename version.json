@@ -1,7 +1,7 @@
 {
-  "server": "3.38",
+  "server": "3.39",
   "node": "2.33",
   "released": "2026-07-06",
-  "notes": "Node 2.33 fixes a real bug: mkvmerge returns exit code 1 for WARNINGS but still writes a complete, valid file — the node was treating that as a failure and erroring good remuxes at the final step (DV → P8 Step 4, and Audio Cleanup track-filter). Now exit 1 with a valid output = success. Also raised the mkvmerge -J analyze timeout 120s → 300s so big files over a slow network drive don't time out. Server 3.38 adds AUTO-REQUEUE for transient errors: failures whose message matches a network-drive timeout / not-responding / device-not-ready / file-lock pattern are automatically requeued (up to 5 attempts, then parked). Real errors (file not found, codec/encoder failures) are left in Errored for manual attention. Update both nodes to 2.33.",
+  "notes": "Server 3.39 retunes the Compatibility scan to flag only files that genuinely won't play on most devices. Dropped the '10-bit HEVC SDR' rule, which was ~78% of all flags — 10-bit HEVC (Main10) plays on essentially every modern client, and re-encoding it to 8-bit H.264 is lossy and pointless. Compat now flags only Hi10P (10-bit H.264), legacy codecs (VC-1/MPEG-2/MPEG-4-ASP/WMV/etc.), non-MKV/MP4 containers (e.g. AVI), interlaced, and subtitle overload (>12 tracks — the likely cause of the Euphoria stalls, fixed by a lossless sub-trim). Existing over-flagged entries were re-evaluated and cleared. Node 2.33 (mkvmerge exit-1 fix + analyze timeout) and server 3.38 (auto-requeue transient errors) still apply — update both nodes to 2.33.",
   "update_docs": "https://github.com/Jenari-Dev/byte-transcode#troubleshooting"
 }
