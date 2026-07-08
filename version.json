@@ -1,7 +1,7 @@
 {
-  "server": "3.37",
-  "node": "2.32",
+  "server": "3.38",
+  "node": "2.33",
   "released": "2026-07-06",
-  "notes": "Node 2.32 makes live worker-count scaling reliable. The scaler used to track a counter to decide how many threads to add; after rapid up/down changes plus node restarts that counter drifted and left the node under-threaded (e.g. running 1 worker while set to 4) until a manual restart. It now counts the actual LIVE worker threads each pass and spawns whichever are missing, so the node always converges to the configured count on its own — no more restarts needed to apply a worker-count change. Update both nodes and restart once to pick it up. (The Health-check CPU/GPU steppers are server-side file-check controls and don't affect transcode throughput; the Nodes Overview table shows the GLOBAL default, while the per-node value on the worker card is your override.)",
-  "update_docs": "https://github.com/Jenari-Dev/byte-transcode#worker-counts--multiple-nodes"
+  "notes": "Node 2.33 fixes a real bug: mkvmerge returns exit code 1 for WARNINGS but still writes a complete, valid file — the node was treating that as a failure and erroring good remuxes at the final step (DV → P8 Step 4, and Audio Cleanup track-filter). Now exit 1 with a valid output = success. Also raised the mkvmerge -J analyze timeout 120s → 300s so big files over a slow network drive don't time out. Server 3.38 adds AUTO-REQUEUE for transient errors: failures whose message matches a network-drive timeout / not-responding / device-not-ready / file-lock pattern are automatically requeued (up to 5 attempts, then parked). Real errors (file not found, codec/encoder failures) are left in Errored for manual attention. Update both nodes to 2.33.",
+  "update_docs": "https://github.com/Jenari-Dev/byte-transcode#troubleshooting"
 }

@@ -158,7 +158,7 @@ except Exception:
 # ─── Self-update (v2.11) ─────────────────────────────────────────────────────
 # The node checks the same published manifest the web UI uses and can pull its
 # own new files from GitHub, then relaunch — matching the website's update flow.
-NODE_VERSION = "2.32"
+NODE_VERSION = "2.33"
 GITHUB_RAW = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main"
 VERSION_MANIFEST_URL = GITHUB_RAW + "/version.json"
 NODE_FILES = ["byte_node_v2.py", "byte_node_gui.py", "setup_tools.py",
@@ -971,15 +971,24 @@ class ByteNode:
 
             if self.cancelled:
                 return False, "Cancelled by user"
-            if rc != 0:
-                self.log(f"[FAILED] {description} (exit {rc})", "ERROR")
-                self.send_log(job_id, f"[ERROR] {description} failed (exit {rc})")
-                if stderr:
-                    self.send_log(job_id, f"[ERROR] {stderr[:500]}")
-                return False, stderr or "Failed"
-
-            self.send_log(job_id, f"[OK] {description} completed")
-            return True, stdout or ""
+            # v2.33 — mkvmerge (the only user of this watchdog) returns exit code
+            # 1 for WARNINGS but still writes a complete, valid output file
+            # (unsupported-track-type notices, timestamp/CUE warnings, etc.).
+            # Treating that as a failure errored out perfectly good remuxes at
+            # the final step. Accept exit 1 when the -o output exists and is
+            # non-trivial; only 2+ (or 1 with no real output) is a true failure.
+            out_file = cmd[cmd.index("-o") + 1] if "-o" in cmd else None
+            out_ok = bool(out_file and os.path.exists(out_file) and os.path.getsize(out_file) > 1024)
+            if rc == 0 or (rc == 1 and out_ok):
+                if rc == 1:
+                    self.send_log(job_id, f"  [note] {description}: mkvmerge finished with warnings (exit 1) — output is valid")
+                self.send_log(job_id, f"[OK] {description} completed")
+                return True, stdout or ""
+            self.log(f"[FAILED] {description} (exit {rc})", "ERROR")
+            self.send_log(job_id, f"[ERROR] {description} failed (exit {rc})")
+            if stderr:
+                self.send_log(job_id, f"[ERROR] {stderr[:500]}")
+            return False, stderr or "Failed"
 
         except Exception as e:
             self.log(f"[EXCEPTION] {description}: {e}", "ERROR")
@@ -1554,7 +1563,7 @@ class ByteNode:
         # mkvmerge -J for track IDs and language
         try:
             r = subprocess.run([self.mkvmerge, "-J", filepath],
-                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)  # v2.33 — 120s was too short for big files over slow SMB
             if r.returncode != 0 and r.returncode != 1:
                 # mkvmerge returns 1 for warnings but still produces JSON
                 self.send_log(job_id, f"  [WARN] mkvmerge -J returned {r.returncode}")

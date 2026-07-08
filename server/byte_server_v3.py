@@ -41,7 +41,7 @@ try:
 except AttributeError:
     pass  # Windows has no tzset()
 
-SERVER_VERSION = "3.37"
+SERVER_VERSION = "3.38"
 NODE_VERSION = "2.25"   # fallback only; the update bell uses each connected node's reported version
 # Where the update checker looks for the newest published versions.
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main/version.json"
@@ -1916,6 +1916,34 @@ def start_health_check_loop():
                         if sj["worker_id"]:
                             db.execute("UPDATE workers SET status='idle', current_job_id=NULL WHERE id=?", (sj["worker_id"],))
                         deferred_logs.append((f"Auto-cancelled stuck job #{sj['id']}: {sj['file_name']}", "WARN", sj["id"]))
+
+                    # v3.38 — AUTO-REQUEUE transient errors. Some failures are just
+                    # the network drive briefly timing out / not responding, or a
+                    # file-lock race — those succeed on a retry. Requeue them
+                    # automatically (up to MAX_REQUEUE_ATTEMPTS, then parked for you).
+                    # REAL errors (file not found, codec/encoder failures, bad
+                    # params) are NOT matched here, so they stay in Errored for you
+                    # to look at. A 60s delay lets the transient condition clear.
+                    _transient = ("timed out", "not responding", "device is not ready",
+                                  "media drive", "being used by another process",
+                                  "winerror 32", "temporarily", "connection reset",
+                                  "connection aborted", "the specified network",
+                                  "semaphore timeout", "network path")
+                    _like = " OR ".join("LOWER(error_message) LIKE ?" for _ in _transient)
+                    _params = [f"%{t}%" for t in _transient]
+                    retryable = db.execute(
+                        "SELECT id, file_name, COALESCE(attempts,0) AS attempts FROM queue "
+                        "WHERE status='error' AND error_message IS NOT NULL "
+                        "AND COALESCE(attempts,0) < " + str(MAX_REQUEUE_ATTEMPTS) + " "
+                        "AND completed_at < datetime('now','+9 hours','-60 seconds') "
+                        "AND (" + _like + ")", _params).fetchall()
+                    for sj in retryable:
+                        att = (sj["attempts"] or 0) + 1
+                        db.execute("""UPDATE queue SET status='queued', health_status='healthy',
+                            progress=0, current_step='Auto-requeued (transient error)',
+                            error_message=NULL, worker_id=NULL, started_at=NULL, completed_at=NULL,
+                            attempts=? WHERE id=?""", (att, sj["id"]))
+                        deferred_logs.append((f"Auto-requeued transient error #{sj['id']} (attempt {att}/{MAX_REQUEUE_ATTEMPTS}): {sj['file_name']}", "INFO", sj["id"]))
 
                     # Clean up workers with stale heartbeats (> 5 minutes) that show as active
                     db.execute("""UPDATE workers SET status='idle', current_job_id=NULL
