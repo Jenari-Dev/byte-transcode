@@ -41,7 +41,7 @@ try:
 except AttributeError:
     pass  # Windows has no tzset()
 
-SERVER_VERSION = "3.39"
+SERVER_VERSION = "3.40"
 NODE_VERSION = "2.25"   # fallback only; the update bell uses each connected node's reported version
 # Where the update checker looks for the newest published versions.
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/Jenari-Dev/byte-transcode/main/version.json"
@@ -252,6 +252,14 @@ def init_db():
             # Target codec for compat re-encodes: h264 = plays on everything,
             # hevc = smaller files, plays on most modern devices
             "compat_target": "h264",
+            # v3.40 — Flag 10-bit HEVC (Main 10) for an 8-bit re-encode.
+            # OFF by default: most modern TVs/phones/clients hardware-decode
+            # 10-bit HEVC fine, so flagging it would sweep most libraries.
+            # Turn ON if a target device can't direct-play 10-bit HEVC — e.g. a
+            # budget/older TV whose HEVC decoder is 8-bit-only. Symptom: the file
+            # black-screens / needs a client bitrate cap (which forces a transcode
+            # to 8-bit) to play. This was the real Euphoria cause.
+            "compat_flag_10bit_hevc": "false",
             # Worker / concurrency counts (v3.0+; defaults surfaced v3.11).
             # transcode_gpu_count = concurrent transcode workers per node.
             # healthcheck_(gpu|cpu)_count = how many file health checks the
@@ -1258,12 +1266,18 @@ COMPAT_BAD_VCODECS = {'vc1', 'mpeg2video', 'mpeg4', 'msmpeg4v3', 'msmpeg4v2',
                       'wmv1', 'wmv2', 'wmv3', 'vp8', 'h263', 'mjpeg'}
 COMPAT_MAX_SUB_TRACKS = 12
 
-def analyze_for_compat(probe_json, ext):
+def analyze_for_compat(probe_json, ext, flag_10bit_hevc=None):
     """
     Decide whether a file risks playback issues and how to fix it.
     Returns {"flag": bool, "reasons": [str], "strategy": 'remux'|'reencode',
              "deinterlace": bool, "filter_subs": bool}.
+
+    flag_10bit_hevc: when True, 10-bit HEVC (Main 10) SDR files are flagged for
+    an 8-bit re-encode. For devices whose HEVC decoder is 8-bit-only (some
+    budget/older TVs). Defaults to the compat_flag_10bit_hevc setting.
     """
+    if flag_10bit_hevc is None:
+        flag_10bit_hevc = (get_setting("compat_flag_10bit_hevc") == "true")
     reasons = []
     strategy = None
     deinterlace = False
@@ -1297,14 +1311,18 @@ def analyze_for_compat(probe_json, ext):
         if vcodec == "h264" and is_10bit:
             reasons.append("10-bit H.264 (Hi10P) — unplayable on most devices")
             strategy = "reencode"
-        # v3.39 — DROPPED the "10-bit HEVC SDR" flag. 10-bit HEVC (Main10) is
-        # hardware-decoded by essentially all modern TVs/phones/clients, so
-        # flagging it wrongly swept ~78% of a library into the Compat queue and
-        # would have re-encoded fine files down to 8-bit H.264 (lossy, often
-        # bigger). Compat only flags what genuinely won't direct-play now:
-        # Hi10P, legacy codecs (VC-1/MPEG-2/MPEG-4-ASP/WMV/…), bad containers,
-        # interlaced, and subtitle overload. (is_hdr/has_dovi_sd kept above in
-        # case future rules need them.)
+        # 10-bit HEVC (Main 10) SDR. OFF by default — hardware-decoded by
+        # essentially all modern TVs/phones/clients, and flagging it sweeps
+        # most libraries (~78%) into a lossy 8-bit re-encode for nothing.
+        # But some budget/older TVs have an 8-bit-only HEVC decoder and can't
+        # direct-play it (black screen / needs a client bitrate cap to force a
+        # transcode) — this was the real Euphoria S2/S3 cause. Enable
+        # compat_flag_10bit_hevc for those setups to re-encode to 8-bit.
+        # HDR/DV 10-bit is never caught here (is_hdr guard) — the DV pipeline
+        # owns those, and re-encoding real HDR to 8-bit SDR would wreck it.
+        if (flag_10bit_hevc and vcodec == "hevc" and is_10bit and not is_hdr):
+            reasons.append("10-bit HEVC (Main 10) — won't play on 8-bit-only TV decoders")
+            strategy = "reencode"
         if field in ("tt", "bb", "tb", "bt"):
             reasons.append("interlaced video")
             strategy = "reencode"
@@ -1341,6 +1359,7 @@ def scan_compat_task(library_id):
                            "eta": "calculating...", "status": "scanning"}
     start_time = time.time()
     file_count, flagged, recorded_ok, skipped_dup, skipped_probe = 0, 0, 0, 0, 0
+    flag_10bit_hevc = (get_setting("compat_flag_10bit_hevc") == "true")
 
     for root, dirs, files in os.walk(path):
         for filename in sorted(files):
@@ -1382,7 +1401,7 @@ def scan_compat_task(library_id):
                 skipped_probe += 1
                 continue
 
-            compat = analyze_for_compat(probe_json, ext)
+            compat = analyze_for_compat(probe_json, ext, flag_10bit_hevc)
             # Stash the decision inside probe_data so the node knows the
             # strategy without any schema change.
             probe_json["_compat"] = compat

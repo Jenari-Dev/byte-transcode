@@ -1397,6 +1397,9 @@ function App(){
                                 <option value="hevc">HEVC (smaller files)</option>
                             </select>
                         </SB>
+                        <SB T={T} title="Flag 10-bit HEVC (8-bit-only TVs)" desc="Off by default — most modern TVs/phones play 10-bit HEVC (Main 10) fine. Turn ON only if a device can't direct-play it (black screen, or only plays when you set a client bitrate cap that forces a transcode). Compat then re-encodes 10-bit HEVC to 8-bit. HDR/Dolby Vision is never touched. This is the Euphoria fix.">
+                            <label style={{display:'flex',alignItems:'center',gap:12,cursor:'pointer'}}><Tog on={lSettings.compat_flag_10bit_hevc==='true'} onTog={()=>setLS(s=>({...s,compat_flag_10bit_hevc:s.compat_flag_10bit_hevc==='true'?'false':'true'}))} T={T}/><span style={{fontSize:14,color:T.tx}}>{lSettings.compat_flag_10bit_hevc==='true'?'Re-encode 10-bit HEVC → 8-bit':'Leave 10-bit HEVC as-is'}</span></label>
+                        </SB>
                         <SB T={T} title="Replace Original" desc="Overwrite source file once processing completes.">
                             <label style={{display:'flex',alignItems:'center',gap:12,cursor:'pointer'}}><Tog on={lSettings.replace_original==='true'} onTog={()=>setLS(s=>({...s,replace_original:s.replace_original==='true'?'false':'true'}))} T={T}/><span style={{fontSize:14,color:T.tx}}>{lSettings.replace_original==='true'?'Replace originals':'Keep both'}</span></label>
                         </SB>

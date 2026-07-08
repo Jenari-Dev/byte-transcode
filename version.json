@@ -1,7 +1,7 @@
 {
-  "server": "3.39",
+  "server": "3.40",
   "node": "2.33",
-  "released": "2026-07-06",
-  "notes": "Server 3.39 retunes the Compatibility scan to flag only files that genuinely won't play on most devices. Dropped the '10-bit HEVC SDR' rule, which was ~78% of all flags — 10-bit HEVC (Main10) plays on essentially every modern client, and re-encoding it to 8-bit H.264 is lossy and pointless. Compat now flags only Hi10P (10-bit H.264), legacy codecs (VC-1/MPEG-2/MPEG-4-ASP/WMV/etc.), non-MKV/MP4 containers (e.g. AVI), interlaced, and subtitle overload (>12 tracks — the likely cause of the Euphoria stalls, fixed by a lossless sub-trim). Existing over-flagged entries were re-evaluated and cleared. Node 2.33 (mkvmerge exit-1 fix + analyze timeout) and server 3.38 (auto-requeue transient errors) still apply — update both nodes to 2.33.",
+  "released": "2026-07-08",
+  "notes": "Server 3.40 adds an opt-in Compatibility rule for 10-bit HEVC. Root cause of the Euphoria S2/S3 playback problem: those files are 10-bit HEVC (Main 10) SDR, and some TVs have an 8-bit-only HEVC decoder that can't direct-play 10-bit — the file black-screens unless the client bitrate cap forces a transcode down to 8-bit. It was never bitrate or subtitles. New setting 'Flag 10-bit HEVC (8-bit-only TVs)' (Settings → Compatibility, default OFF) makes the Compat scan flag 10-bit HEVC SDR files and re-encode them to 8-bit so they direct-play; HDR/Dolby Vision is never touched (the DV pipeline owns that). Left OFF by default because most modern devices decode 10-bit HEVC fine and re-encoding is lossy. Node stays 2.33 (mkvmerge exit-1 fix + scaler fix) — update both nodes to 2.33 if not already.",
   "update_docs": "https://github.com/Jenari-Dev/byte-transcode#troubleshooting"
 }
